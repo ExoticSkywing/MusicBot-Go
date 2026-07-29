@@ -401,19 +401,40 @@ git commit -m "feat(kuwo): resolve verified lossless audio"
 
 **文件：**
 
+- 修改：`plugins/kuwo/client.go`
 - 创建：`plugins/kuwo/lyrics.go`
 - 创建：`plugins/kuwo/lyrics_test.go`
 
 - [ ] **步骤 1：编写失败的歌词协议测试**
 
-在内存中把以下内容编码为 GB18030，再依次异或 `yeelion`、Base64、zlib，并包为 `tp=content\r\n\r\n`：
+先验证请求明文经循环异或 `yeelion`、标准 Base64 后的固定向量：
 
 ```text
-[00:00.000]<0,500>好<500,500>运<1000,500>来
-[00:02.000]<2000,1000>祝你好运来
+228908:
+DBYAHlReXEpRUEAeCgxVEgAORRgLG0MXCRgaCwoRAB5UAwEaBAkEBhwaXxcAHVReSAsMAVEkOj0wJjpeW1dXSV1DABsMFkRU
+
+41378936:
+DBYAHlReXEpRUEAeCgxVEgAORRgLG0MXCRgaCwoRAB5UAwEaBAkEBhwaXxcAHVReSAsMAVEkOj0wJjpYWFxZQVxWWk8DHBodWF0=
 ```
 
-预期 `Plain == "好运来\n祝你好运来"`，同步行时间为 0 和 2 秒且不含 `<...>`。
+通过 `httptest` 断言后一个值原样位于 `r.URL.RawQuery`，末尾 `=` 没有变成 `%3D`。
+
+歌词解码使用完整固定响应夹具，而不是只构造单行信封：
+
+```text
+dHA9Y29udGVudA0KcGF0aD1maXh0dXJlDQpscmN4PTENCg0KeJwVy0ELgjAchvEP5CFFCzp4qNHfUlSc+m56myOLkmwFTfv02e2Bh9/pEhSRbSHdgecR3bL9WMg5pQN/d8zugkakrrwPPTAdpbeOcxo0x/Nc4tO/PKjlxTVNbd2ZWYBrgS2rCKjNo2v81FlcJb1JAtAZZbpcoqBr/3dA4nwTo/yNCkazUg4xLmwY/gCBODGK
+```
+
+该 Base64 表示的完整响应解密后为：
+
+```text
+[kuwo:104]
+[ti:Fixture]
+[00:00.000]<0,500>好<500,500>运<1000,500>来
+[00:02.000]<2000,1000,0>祝你好运来ḿ
+```
+
+预期 `Plain == "好运来\n祝你好运来ḿ"`，同步行时间为 0 和 2 秒且不含二元/三元逐字标记；`ḿ` 的 GB18030 编码能防止实现误用 GBK。
 
 移动回退夹具必须带目标身份：
 
@@ -430,7 +451,9 @@ git commit -m "feat(kuwo): resolve verified lossless audio"
 }
 ```
 
-增强接口失败时预期回退；`songinfo.id` 或 `musicrId` 与请求 ID 错配必须返回 `ErrUnavailable`，两端均无内容也返回 `ErrUnavailable`。移动歌词使用完整 envelope fixture 覆盖 `status`、`songinfo.id`、`musicrId`、时间与歌词字段的字符串/数字/`null`/缺失/未知字段变体；所有非空身份字段都必须一致，不能因某个字段无法转换而跳过校验。
+增强接口失败或成功解码但没有有效时间行时预期回退。移动请求只能有 `musicId=<RID>`，不能附加 `httpsStatus=1`，也不能携带 Cookie 或 `Secret`。`songinfo.id` 或 `musicrId` 与请求 ID 错配、所有身份均缺失/空、任一非空身份无法规范化、两端均无内容时必须返回 `ErrUnavailable`。移动歌词使用完整 envelope fixture 覆盖 `status`、身份、时间与歌词字段的字符串/数字/`null`/缺失/未知字段变体；一个身份缺失而另一个匹配可接受，所有出现的非空身份都必须一致。
+
+边界测试还要覆盖：多行信封、损坏 zlib/Base64/GB18030、4 MiB 原始响应与 8 MiB 解压上限、LRC 元数据过滤、二元/三元有符号标记、`[offset:毫秒]`、乱序和同时间稳定排序、负数/NaN/Inf/溢出时间、取消/截止时间/429 不触发移动回退。
 
 - [ ] **步骤 2：运行测试验证正确失败**
 
@@ -455,9 +478,11 @@ func (c *Client) GetLyrics(ctx context.Context, trackID string) (*platform.Lyric
 "user=12345,web,web,web&requester=localhost&req=1&rid=MUSIC_" + trackID + "&lrcx=1"
 ```
 
-请求异或 `yeelion` 后 Base64 并 URL 编码。响应总读取上限 4 MiB；信封后的 zlib 结果限制 8 MiB，再 Base64、异或和 GB18030 解码。移除正则 `<[-\d]+,[-\d]+>`，保留行时间，不写入不兼容的 `RawYRC`、`RawQRC` 或 `RawLYS`。
+请求异或 `yeelion` 后做标准 Base64，并直接赋给 URL 的 `RawQuery`；不得再 URL 编码。响应总读取上限 4 MiB；在首个 `\r\n\r\n` 后对 payload 做 zlib 解压并把输出限制为 8 MiB，再 Base64、异或和严格 GB18030 解码。只移除正则 `<-?\d+,-?\d+(?:,-?\d+)?>`，过滤 `[kuwo:]`、`[ver:]`、`[ti:]`、`[ar:]`、`[al:]`、`[by:]` 等元数据，应用 `[offset:毫秒]`，不写入不兼容的 `RawYRC`、`RawQRC` 或 `RawLYS`。
 
-移动歌词只在增强链失败时调用，必须把 `songinfo.id` 和 `musicrId` 中出现的每个非空值规范化并与请求 ID 比较；时间以浮点秒解析并稳定排序。
+在 `kuwoEndpoints` 增加可注入的 `wordLyric` 和 `mobileLyric`。歌词 HTTP 请求在 `clientMu` 下取得 API client 快照后复制 client、设置 `Jar=nil`，保留 transport/timeout/代理但不发送会话 Cookie 或 `Secret`。
+
+移动歌词只在增强链普通失败或无有效行时调用，请求只发送 `musicId`。必须把 `songinfo.id` 和 `musicrId` 中出现的每个非空值规范化并与请求 ID 比较，并要求至少一个有效身份；时间以浮点秒解析，拒绝负数、非有限值和 `time.Duration` 溢出，按毫秒转换后稳定排序。调用取消、截止时间和 HTTP 429 立即返回。
 
 - [ ] **步骤 4：运行歌词测试**
 
@@ -468,7 +493,7 @@ func (c *Client) GetLyrics(ctx context.Context, trackID string) (*platform.Lyric
 - [ ] **步骤 5：提交**
 
 ```bash
-git add plugins/kuwo/lyrics.go plugins/kuwo/lyrics_test.go
+git add plugins/kuwo/client.go plugins/kuwo/lyrics.go plugins/kuwo/lyrics_test.go
 git commit -m "feat(kuwo): decode synchronized lyrics"
 ```
 

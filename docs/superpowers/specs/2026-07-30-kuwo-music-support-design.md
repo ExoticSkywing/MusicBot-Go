@@ -123,10 +123,13 @@ MusicBot-Go 已通过静态插件注册机制接入网易云音乐、QQ 音乐�
 ### 歌词
 
 1. 首选 `newlyric.kuwo.cn` 增强歌词。
-2. 请求参数使用固定异或密钥 `yeelion` 编码；响应按 `tp=content` 信封、zlib、Base64、异或和 GB18030 顺序解码。
-3. 酷我的 `<开始,时长>` 逐字标记不直接写入项目现有 `RawYRC`、`RawQRC` 或 `RawLYS` 字段，因为格式不兼容。插件移除逐字标记，保留 `[mm:ss.xxx]` 行时间，构造同步行歌词和纯文本。
-4. 增强歌词请求或解码失败时，回退到移动歌词 JSON 接口。
-5. 两条链路均无有效歌词时返回 `ErrUnavailable`。
+2. 请求明文使用固定异或密钥 `yeelion` 编码并做标准 Base64；结果作为无键的 opaque `RawQuery` 原样发送，不能再用 `url.Values` 或 `QueryEscape` 把 Base64 padding `=` 改写为 `%3D`。
+3. 增强响应先验证多行 `tp=content` 信封及首个 `\r\n\r\n` 分隔符，再按 zlib、Base64、异或和严格 GB18030 顺序解码。原始响应与解压输出分别限制为 4 MiB 和 8 MiB。
+4. 酷我的 `<开始,时长>` 或 `<开始,时长,标记>` 逐字字段允许有符号整数，但不直接写入项目现有 `RawYRC`、`RawQRC` 或 `RawLYS`，因为格式不兼容。插件只移除这两种精确标记，过滤 LRC 元数据，应用 `[offset:毫秒]` 后保留 `[mm:ss.xxx]` 行时间，构造稳定排序的同步行歌词和纯文本。
+5. 增强歌词请求、解码或有效时间行解析失败时，回退到移动歌词 JSON 接口。移动请求只发送 `musicId`，不附加当前会导致业务 `status=301` 的 `httpsStatus=1`。
+6. 歌词请求复制 API HTTP client 以继承 transport/代理，但必须设置 `Jar=nil`，且不发送 Cookie 或 `Secret`。调用取消、截止时间和 HTTP 429 立即返回，不继续跨主机回退。
+7. 移动响应至少要有一个非空身份字段；`songinfo.id` 与 `musicrId` 中每个出现的非空值都必须能规范化为目标 RID 并完全一致。时间接受字符串或数字浮点秒，拒绝负数、非有限值和溢出值，并稳定排序。
+8. 两条链路均无有效歌词、移动身份缺失/非法/错配或业务状态非 200 时返回 `ErrUnavailable`。
 
 ### 歌单
 
