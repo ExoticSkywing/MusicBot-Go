@@ -276,10 +276,9 @@ func (c *Client) signedSessionSnapshot(ctx context.Context, endpoint string) (si
 			return signedSessionSnapshot{}, err
 		}
 		client, jar, cookies := c.sessionClientCookies(endpoint)
-		for _, cookie := range cookies {
-			if cookie.Name == kuwoSessionCookie && validSessionCookie(cookie.Value) {
-				return signedSessionSnapshot{client: client, jar: jar, cookies: cookies, cookie: cookie.Value}, nil
-			}
+		cookie, filteredCookies := selectedSessionCookie(cookies)
+		if cookie != "" {
+			return signedSessionSnapshot{client: client, jar: jar, cookies: filteredCookies, cookie: cookie}, nil
 		}
 		// An invalidation may replace the client/Jar pair after ensureSession
 		// returns. Re-enter session establishment instead of signing with an

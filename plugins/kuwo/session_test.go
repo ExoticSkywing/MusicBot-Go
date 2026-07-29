@@ -375,6 +375,89 @@ func TestSessionBindsCookieSnapshotAndWritesResponseCookies(t *testing.T) {
 	}
 }
 
+func TestSessionSnapshotSendsOnlySelectedValidSessionCookie(t *testing.T) {
+	const (
+		invalidPathCookie = "abcdefghijklmnop-"
+		validRootCookie   = "qrstuvwxyzABCDEF"
+		otherCookieName   = "kuwo_other"
+		otherCookieValue  = "preserved"
+	)
+
+	type observedRequest struct {
+		cookies []*http.Cookie
+		secret  string
+	}
+	requests := make(chan observedRequest, 1)
+	homeCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			homeCalls++
+			return
+		}
+		if r.URL.Path != "/search" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		requests <- observedRequest{cookies: r.Cookies(), secret: r.Header.Get("Secret")}
+		_, _ = w.Write([]byte(`{"data":{"list":[]}}`))
+	}))
+	defer server.Close()
+
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
+	homeURL, err := url.Parse(server.URL + "/")
+	if err != nil {
+		t.Fatalf("parse homepage URL: %v", err)
+	}
+	searchURL, err := url.Parse(server.URL + "/search")
+	if err != nil {
+		t.Fatalf("parse search URL: %v", err)
+	}
+	client.apiHTTPClient.Jar.SetCookies(homeURL, []*http.Cookie{
+		{Name: kuwoSessionCookie, Value: validRootCookie, Path: "/"},
+		{Name: otherCookieName, Value: otherCookieValue, Path: "/"},
+	})
+	client.apiHTTPClient.Jar.SetCookies(searchURL, []*http.Cookie{
+		{Name: kuwoSessionCookie, Value: invalidPathCookie, Path: "/search"},
+	})
+	client.sessionMu.Lock()
+	client.sessionExpires = time.Now().Add(sessionTTL)
+	client.sessionMu.Unlock()
+
+	if _, err := client.Search(context.Background(), "test", 1); err != nil {
+		t.Fatalf("Search() = %v", err)
+	}
+	if homeCalls != 0 {
+		t.Errorf("homepage refreshes = %d, want 0 with a valid URL-applicable session cookie", homeCalls)
+	}
+	select {
+	case got := <-requests:
+		var sessions []string
+		otherFound := false
+		for _, cookie := range got.cookies {
+			switch cookie.Name {
+			case kuwoSessionCookie:
+				sessions = append(sessions, cookie.Value)
+			case otherCookieName:
+				otherFound = cookie.Value == otherCookieValue
+			}
+		}
+		if len(sessions) != 1 || sessions[0] != validRootCookie {
+			t.Errorf("session cookies = %q, want only %q", sessions, validRootCookie)
+		}
+		if !otherFound {
+			t.Errorf("request did not preserve %s=%s", otherCookieName, otherCookieValue)
+		}
+		wantPrefix := buildSecret(validRootCookie, 10000000)
+		wantPrefix = wantPrefix[:len(wantPrefix)-8]
+		if !strings.HasPrefix(got.secret, wantPrefix) {
+			t.Errorf("request Secret = %q, want prefix derived from %q", got.secret, validRootCookie)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signed request did not reach the API")
+	}
+}
+
 type snapshotThenRotatedJar struct {
 	mu sync.Mutex
 

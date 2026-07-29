@@ -124,12 +124,8 @@ func (c *Client) sessionCookie(requestURL string) string {
 
 func (c *Client) sessionClientAndCookie(requestURL string) (*http.Client, string) {
 	client, _, cookies := c.sessionClientCookies(requestURL)
-	for _, cookie := range cookies {
-		if cookie.Name == kuwoSessionCookie {
-			return client, cookie.Value
-		}
-	}
-	return client, ""
+	cookie, _ := selectedSessionCookie(cookies)
+	return client, cookie
 }
 
 func (c *Client) sessionClientCookies(requestURL string) (*http.Client, http.CookieJar, []*http.Cookie) {
@@ -154,6 +150,29 @@ func (c *Client) sessionClientCookies(requestURL string) (*http.Client, http.Coo
 		snapshot = append(snapshot, &copy)
 	}
 	return client, jar, snapshot
+}
+
+// selectedSessionCookie keeps every non-session cookie and reduces session
+// cookies to the first valid value in the Jar's request order. The resulting
+// slice is safe to attach to a signed request: it cannot send a more-specific
+// invalid or duplicate session value ahead of the value used for Secret.
+func selectedSessionCookie(cookies []*http.Cookie) (string, []*http.Cookie) {
+	filtered := make([]*http.Cookie, 0, len(cookies))
+	var selected *http.Cookie
+	for _, cookie := range cookies {
+		if cookie.Name != kuwoSessionCookie {
+			filtered = append(filtered, cookie)
+			continue
+		}
+		if selected == nil && validSessionCookie(cookie.Value) {
+			selected = cookie
+		}
+	}
+	if selected == nil {
+		return "", filtered
+	}
+	filtered = append(filtered, selected)
+	return selected.Value, filtered
 }
 
 func (c *Client) invalidateSession(requestURL string) {
