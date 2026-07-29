@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -43,7 +45,27 @@ var (
 	probeExtractedAudioCodec = detectExtractedAudioCodec
 	extractEmbeddedFLAC      = extractEmbeddedFLACFromContainer
 	remuxExtractedAudioM4A   = remuxExtractedAudioToM4A
+	downloadURLPattern       = regexp.MustCompile(`(?i)https?://[^\s]+`)
 )
+
+func downloadURLForLog(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed == nil {
+		return "[redacted]"
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if parsed.Host == "" || (scheme != "http" && scheme != "https") {
+		return "[redacted]"
+	}
+	return scheme + "://" + parsed.Host + "/[redacted]"
+}
+
+func downloadErrorForLog(err error) string {
+	if err == nil {
+		return ""
+	}
+	return downloadURLPattern.ReplaceAllString(err.Error(), "[redacted-url]")
+}
 
 func withForceNonSilent(ctx context.Context) context.Context {
 	if ctx == nil {
@@ -915,7 +937,7 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 	musicPath, picPath, releasePrepared, err := h.acquirePreparedMedia(ctx, platformName, trackID, actualQuality, plat, track, info, status.Message(), b, message, &songInfo, nil)
 	if err != nil {
 		if h.Logger != nil {
-			h.Logger.Error("failed to download and prepare", "platform", platformName, "trackID", trackID, "error", err)
+			h.Logger.Error("failed to download and prepare", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))
 		}
 		sendFailed(err)
 		return err
@@ -1161,7 +1183,7 @@ func (h *MusicHandler) loadDownloadInfo(ctx context.Context, status *statusSessi
 	info, err := h.getDownloadInfoSingleflight(ctx, platformName, trackID, quality)
 	if err != nil {
 		if h != nil && h.Logger != nil {
-			h.Logger.Error("failed to get download info", "platform", platformName, "trackID", trackID, "error", err)
+			h.Logger.Error("failed to get download info", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))
 		}
 		status.Edit(tr(ctx, "fetch_info_failed"))
 		return nil, err
@@ -1171,7 +1193,7 @@ func (h *MusicHandler) loadDownloadInfo(ctx context.Context, status *statusSessi
 		return nil, errors.New("download info unavailable")
 	}
 	if h != nil && h.Logger != nil {
-		h.Logger.Debug("download url", "platform", platformName, "trackID", trackID, "quality", info.Quality.String(), "url", info.URL)
+		h.Logger.Debug("download url", "platform", platformName, "trackID", trackID, "quality", info.Quality.String(), "url", downloadURLForLog(info.URL))
 	}
 	if info.Format == "" {
 		info.Format = "mp3"
@@ -1913,7 +1935,7 @@ func (h *MusicHandler) prepareCoverFiles(ctx context.Context, track *platform.Tr
 	if _, err := h.DownloadService.Download(ctx, &platform.DownloadInfo{URL: coverURL, Size: 0}, picPath, nil); err != nil {
 		_ = os.Remove(picPath)
 		if h.Logger != nil {
-			h.Logger.Warn("failed to download cover", "track", trackID, "url", coverURL, "error", err)
+			h.Logger.Warn("failed to download cover", "track", trackID, "url", downloadURLForLog(coverURL), "error", downloadErrorForLog(err))
 		}
 		return "", ""
 	}
@@ -2061,7 +2083,7 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 					}
 				} else {
 					if h.Logger != nil {
-						h.Logger.Error("upload worker failed", "platform", platformName, "trackID", trackID, "error", result.err)
+						h.Logger.Error("upload worker failed", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(result.err))
 					}
 					statusMessage = editMessageTextOrSend(cleanupCtx, statusBot, h.RateLimiter, statusMessage, taskMessage.Chat.ID, buildMusicInfoText(cleanupCtx, songCopy.SongName, songCopy.SongAlbum, formatFileInfo(songCopy.FileExt, songCopy.MusicSize), userVisibleDownloadError(cleanupCtx, result.err)))
 				}

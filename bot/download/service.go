@@ -45,6 +45,14 @@ type inflightDownload struct {
 	closed    bool
 }
 
+type downloadPolicy struct {
+	headers     map[string]string
+	validateURL func(string) error
+}
+
+type downloadPolicyContextKey struct{}
+type prevalidatedURLContextKey struct{}
+
 type DownloadServiceOptions struct {
 	Timeout              time.Duration
 	Proxy                string
@@ -88,6 +96,22 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 
 	client := &http.Client{
 		Transport: transport,
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if policy, ok := req.Context().Value(downloadPolicyContextKey{}).(downloadPolicy); ok {
+			if policy.validateURL != nil {
+				if err := policy.validateURL(req.URL.String()); err != nil {
+					return err
+				}
+			}
+			for key, value := range policy.headers {
+				req.Header.Set(key, value)
+			}
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
 	}
 
 	s := &DownloadService{
@@ -157,6 +181,28 @@ func (s *DownloadService) Download(ctx context.Context, info *platform.DownloadI
 	}
 	if info.Downloader != nil {
 		return info.Downloader(ctx, info, destPath, progress)
+	}
+
+	policy := immutableDownloadPolicy(info)
+	if len(policy.headers) > 0 || policy.validateURL != nil {
+		baseURL := strings.TrimSpace(rewriteNeteaseHost(info.URL))
+		if baseURL == "" {
+			baseURL = strings.TrimSpace(info.URL)
+		}
+		if policy.validateURL != nil {
+			if err := policy.validateURL(baseURL); err != nil {
+				return 0, err
+			}
+		}
+		ctx = context.WithValue(ctx, downloadPolicyContextKey{}, policy)
+		ctx = context.WithValue(ctx, prevalidatedURLContextKey{}, baseURL)
+		infoCopy := *info
+		infoCopy.Headers = policy.headers
+		written, err := s.downloadToPath(ctx, &infoCopy, destPath, progress)
+		if err == nil {
+			copyDownloadMetadata(info, &infoCopy)
+		}
+		return written, err
 	}
 
 	key := strings.TrimSpace(rewriteNeteaseHost(info.URL))
@@ -244,6 +290,18 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 	for idx, raw := range urls {
 		info.URL = raw
 		baseURL := rewriteNeteaseHost(raw)
+		if info.ValidateURL != nil {
+			prevalidated, _ := ctx.Value(prevalidatedURLContextKey{}).(string)
+			if prevalidated != baseURL {
+				if err := info.ValidateURL(baseURL); err != nil {
+					lastErr = err
+					if idx < len(urls)-1 {
+						continue
+					}
+					return 0, err
+				}
+			}
+		}
 
 		// Sources advertising MaxChunkSize (e.g. googlevideo) reject plain GET,
 		// HEAD, and oversized ranges with 403. They MUST go through the bounded
@@ -327,6 +385,31 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 		}
 	}
 	return 0, lastErr
+}
+
+func immutableDownloadPolicy(info *platform.DownloadInfo) downloadPolicy {
+	if info == nil {
+		return downloadPolicy{}
+	}
+	policy := downloadPolicy{validateURL: info.ValidateURL}
+	if len(info.Headers) > 0 {
+		policy.headers = make(map[string]string, len(info.Headers))
+		for key, value := range info.Headers {
+			policy.headers[key] = value
+		}
+	}
+	return policy
+}
+
+func copyDownloadMetadata(destination, source *platform.DownloadInfo) {
+	if destination == nil || source == nil {
+		return
+	}
+	destination.URL = source.URL
+	destination.Size = source.Size
+	if strings.TrimSpace(destination.Format) == "" {
+		destination.Format = source.Format
+	}
 }
 
 func candidateDownloadURLs(info *platform.DownloadInfo) []string {

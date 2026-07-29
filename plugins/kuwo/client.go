@@ -32,6 +32,8 @@ type kuwoEndpoints struct {
 	home   string
 	search string
 	detail string
+	mobile string
+	play   string
 }
 
 type Client struct {

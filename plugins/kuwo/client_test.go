@@ -2,6 +2,7 @@ package kuwo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,29 @@ func TestGetTrackDetailScalarDrift(t *testing.T) {
 		server.Close()
 		if err != nil || track == nil || track.ID != "41378936" {
 			t.Fatalf("fixture %s: track=%#v access=%#v err=%v", fixture, track, access, err)
+		}
+	}
+}
+
+func TestRejectPreviewAccessUsesOnlyExplicitSignals(t *testing.T) {
+	benign := []json.RawMessage{
+		json.RawMessage(`{"feeType":1,"pay":"1","hasLossless":true,"unknown":{"nested":1}}`),
+		json.RawMessage(`{"cannotOnlinePlay":0,"listen_fragment":"0"}`),
+		json.RawMessage(`null`),
+	}
+	for _, payInfo := range benign {
+		if err := validateTrackAccess(trackAccess{isTrial: true, payInfo: payInfo}); err != nil {
+			t.Errorf("validateTrackAccess(%s) = %v", payInfo, err)
+		}
+	}
+	for _, access := range []trackAccess{
+		{isListenFee: true},
+		{payInfo: json.RawMessage(`{"cannotOnlinePlay":"1"}`)},
+		{payInfo: json.RawMessage(`{"listen_fragment":true}`)},
+	} {
+		err := validateTrackAccess(access)
+		if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, errPaidTrack) {
+			t.Errorf("validateTrackAccess(%#v) = %v", access, err)
 		}
 	}
 }
