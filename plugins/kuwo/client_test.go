@@ -88,7 +88,7 @@ func TestSearchConvertsScalarDriftFixtures(t *testing.T) {
 		`{"data":{"list":[{"rid":"MUSIC_41378936","name":"Song","artist":"Alice & Bob","album":"Album","duration":"234","pic":"cover"}]}}`,
 		`{"data":{"list":[{"rid":41378936,"name":"Song","artist":"Alice","album":"Album","duration":234,"pic":"cover","isListenFee":false,"unknown":true}]}}`,
 		`{"data":{"list":[{"rid":null,"name":true,"artist":null,"duration":null},{"rid":"MUSIC_41378936","name":"Song","artist":"Alice","duration":true}]}}`,
-		`{"abslist":[{"MUSICRID":"MUSIC_41378936","NAME":"Search title","SONGNAME":"Song","ARTIST":"Alice","ALBUM":"Album","DURATION":"234","web_albumpic_short":"cover","payInfo":{"play":"1"}}]}`,
+		`{"abslist":[{"MUSICRID":"MUSIC_41378936","NAME":"Search title","SONGNAME":"Song","ARTIST":"Alice","ALBUM":"Album","DURATION":"234","web_albumpic_short":"cover.jpg","payInfo":{"play":"1"}}]}`,
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture[:20], func(t *testing.T) {
@@ -105,7 +105,23 @@ func TestSearchConvertsScalarDriftFixtures(t *testing.T) {
 			if tracks[0].Duration != 234*time.Second && !strings.Contains(fixture, `"duration":true`) {
 				t.Errorf("Duration = %s, want 234s", tracks[0].Duration)
 			}
+			if strings.Contains(fixture, `"abslist"`) {
+				track := tracks[0]
+				if track.Title != "Search title" || len(track.Artists) != 1 || track.Artists[0].Name != "Alice" || track.Album == nil || track.Album.Title != "Album" || track.CoverURL != "https://img1.kuwo.cn/star/albumcover/cover.jpg" {
+					t.Fatalf("abslist track = %#v, want all live fields converted", track)
+				}
+			}
 		})
+	}
+}
+
+func TestGetTrackRejectsMismatchedResponseRID(t *testing.T) {
+	server := kuwoFixtureServer(t, `{"data":{"rid":"MUSIC_99999999","name":"Substituted"}}`)
+	defer server.Close()
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
+	track, err := client.GetTrack(context.Background(), "MUSIC_41378936")
+	if track != nil || !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("GetTrack() = %#v, %v, want unavailable error for requested RID", track, err)
 	}
 }
 

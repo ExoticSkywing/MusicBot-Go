@@ -51,15 +51,48 @@ func validSessionCookie(value string) bool {
 }
 
 func (c *Client) ensureSession(ctx context.Context) error {
+	return c.ensureSessionForURL(ctx, c.endpoints.home)
+}
+
+func (c *Client) ensureSessionForURL(ctx context.Context, signedURL string) error {
 	if c == nil {
 		return fmt.Errorf("kuwo: nil client")
 	}
-	c.sessionMu.Lock()
-	defer c.sessionMu.Unlock()
-	if cookie := c.sessionCookie(); validSessionCookie(cookie) && c.now().Before(c.sessionExpires) {
-		return nil
-	}
+	for {
+		c.sessionMu.Lock()
+		if cookie := c.sessionCookie(signedURL); validSessionCookie(cookie) && c.now().Before(c.sessionExpires) {
+			c.sessionMu.Unlock()
+			return nil
+		}
+		if c.sessionRefreshing {
+			ready := c.sessionReady
+			c.sessionMu.Unlock()
+			select {
+			case <-ready:
+				continue
+			case <-ctx.Done():
+				return fmt.Errorf("kuwo: wait for session refresh: %w", ctx.Err())
+			}
+		}
+		ready := make(chan struct{})
+		c.sessionRefreshing = true
+		c.sessionReady = ready
+		c.sessionMu.Unlock()
 
+		err := c.refreshSession(ctx)
+		c.sessionMu.Lock()
+		if err == nil {
+			c.sessionExpires = c.now().Add(sessionTTL)
+		}
+		c.sessionRefreshing = false
+		c.sessionReady = nil
+		close(ready)
+		c.sessionMu.Unlock()
+		return err
+	}
+}
+
+func (c *Client) refreshSession(ctx context.Context) error {
 	homeURL, err := url.Parse(c.endpoints.home)
 	if err != nil {
 		return fmt.Errorf("kuwo: parse homepage URL: %w", err)
@@ -77,22 +110,21 @@ func (c *Client) ensureSession(ctx context.Context) error {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("kuwo: homepage returned HTTP %d", resp.StatusCode)
 	}
-	if cookie := c.sessionCookie(); !validSessionCookie(cookie) {
+	if cookie := c.sessionCookie(homeURL.String()); !validSessionCookie(cookie) {
 		return fmt.Errorf("kuwo: homepage did not return a valid session cookie")
 	}
-	c.sessionExpires = c.now().Add(sessionTTL)
 	return nil
 }
 
-func (c *Client) sessionCookie() string {
+func (c *Client) sessionCookie(requestURL string) string {
 	if c == nil || c.httpClient() == nil || c.httpClient().Jar == nil {
 		return ""
 	}
-	homeURL, err := url.Parse(c.endpoints.home)
+	endpoint, err := url.Parse(requestURL)
 	if err != nil {
 		return ""
 	}
-	for _, cookie := range c.httpClient().Jar.Cookies(homeURL) {
+	for _, cookie := range c.httpClient().Jar.Cookies(endpoint) {
 		if cookie.Name == kuwoSessionCookie {
 			return cookie.Value
 		}
@@ -100,16 +132,16 @@ func (c *Client) sessionCookie() string {
 	return ""
 }
 
-func (c *Client) invalidateSession() {
+func (c *Client) invalidateSession(requestURL string) {
 	if c == nil {
 		return
 	}
 	c.sessionMu.Lock()
 	defer c.sessionMu.Unlock()
-	c.invalidateSessionLocked()
+	c.invalidateSessionLocked(requestURL)
 }
 
-func (c *Client) invalidateSessionLocked() {
+func (c *Client) invalidateSessionLocked(requestURL string) {
 	c.sessionExpires = time.Time{}
 	client := c.httpClient()
 	if client == nil || client.Jar == nil {
@@ -120,4 +152,9 @@ func (c *Client) invalidateSessionLocked() {
 		return
 	}
 	client.Jar.SetCookies(homeURL, []*http.Cookie{{Name: kuwoSessionCookie, Value: "", Path: "/", MaxAge: -1}})
+	endpoint, err := url.Parse(requestURL)
+	if err != nil || endpoint.Path == "/" || endpoint.Path == "" {
+		return
+	}
+	client.Jar.SetCookies(endpoint, []*http.Cookie{{Name: kuwoSessionCookie, Value: "", Path: endpoint.Path, MaxAge: -1}})
 }

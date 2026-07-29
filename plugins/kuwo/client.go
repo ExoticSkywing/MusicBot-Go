@@ -42,8 +42,10 @@ type Client struct {
 	endpoints       kuwoEndpoints
 	now             func() time.Time
 
-	sessionMu      sync.Mutex
-	sessionExpires time.Time
+	sessionMu         sync.Mutex
+	sessionExpires    time.Time
+	sessionRefreshing bool
+	sessionReady      chan struct{}
 }
 
 func NewClient(timeout time.Duration, logger bot.Logger) *Client {
@@ -189,15 +191,18 @@ func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDeta
 	if !ok {
 		return nil, access, platform.NewNotFoundError("kuwo", "track", trackID)
 	}
+	if detail.ID != trackID {
+		return nil, access, platform.NewUnavailableError("kuwo", "track", trackID)
+	}
 	return &detail, access, nil
 }
 
 func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byte, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := c.ensureSession(ctx); err != nil {
+		if err := c.ensureSessionForURL(ctx, endpoint); err != nil {
 			return nil, err
 		}
-		cookie := c.sessionCookie()
+		cookie := c.sessionCookie(endpoint)
 		if !validSessionCookie(cookie) {
 			return nil, fmt.Errorf("kuwo: missing valid session cookie")
 		}
@@ -236,9 +241,12 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return nil, platform.NewRateLimitedError("kuwo")
 		}
-		if attempt == 0 && invalidSessionResponse(resp.StatusCode, body) {
-			c.invalidateSession()
-			continue
+		if invalidSessionResponse(resp.StatusCode, body) {
+			if attempt == 0 {
+				c.invalidateSession(endpoint)
+				continue
+			}
+			return nil, fmt.Errorf("kuwo: API session invalid after refresh (HTTP %d)", resp.StatusCode)
 		}
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return nil, fmt.Errorf("kuwo: API returned HTTP %d", resp.StatusCode)

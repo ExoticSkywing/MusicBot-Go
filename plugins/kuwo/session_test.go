@@ -2,6 +2,7 @@ package kuwo
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -88,13 +89,15 @@ func TestSessionCachesCookieAndRefreshesOnce(t *testing.T) {
 
 func TestSessionRefreshesOnceForEveryInvalidResponseSignal(t *testing.T) {
 	for _, response := range []struct {
-		name   string
-		status int
-		body   string
+		name      string
+		status    int
+		body      string
+		permanent bool
 	}{
 		{name: "unauthorized", status: http.StatusUnauthorized},
 		{name: "forbidden", status: http.StatusForbidden},
 		{name: "illegal body", status: http.StatusOK, body: `{"msg":"The request is illegal!"}`},
+		{name: "permanently illegal body", status: http.StatusOK, body: `{"msg":"The request is illegal!"}`, permanent: true},
 	} {
 		t.Run(response.name, func(t *testing.T) {
 			homeCalls, apiCalls := 0, 0
@@ -105,7 +108,7 @@ func TestSessionRefreshesOnceForEveryInvalidResponseSignal(t *testing.T) {
 					return
 				}
 				apiCalls++
-				if apiCalls == 1 {
+				if apiCalls == 1 || response.permanent {
 					w.WriteHeader(response.status)
 					_, _ = w.Write([]byte(response.body))
 					return
@@ -114,7 +117,12 @@ func TestSessionRefreshesOnceForEveryInvalidResponseSignal(t *testing.T) {
 			}))
 			defer server.Close()
 			client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
-			if _, err := client.Search(context.Background(), "test", 1); err != nil {
+			_, err := client.Search(context.Background(), "test", 1)
+			if response.permanent {
+				if err == nil {
+					t.Fatal("Search() unexpectedly accepted a permanently illegal response")
+				}
+			} else if err != nil {
 				t.Fatalf("Search() = %v", err)
 			}
 			if homeCalls != 2 || apiCalls != 2 {
@@ -137,7 +145,7 @@ func TestSessionSignsEveryRequestWithLatestCookie(t *testing.T) {
 		call := len(secrets)
 		mu.Unlock()
 		if call == 1 {
-			http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: "qrstuvwxyzABCDEF", Path: "/"})
+			http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: "qrstuvwxyzABCDEF", Path: "/search"})
 		}
 		_, _ = w.Write([]byte(`{"data":{"list":[]}}`))
 	}))
@@ -164,6 +172,48 @@ func TestSessionSignsEveryRequestWithLatestCookie(t *testing.T) {
 		if err != nil || nonce < 10000000 || nonce >= 100000000 {
 			t.Errorf("Secret[%d] nonce = %q, want encoded eight-digit decimal nonce", i, secrets[i][len(secrets[i])-8:])
 		}
+	}
+}
+
+func TestSessionWaiterReturnsWhenRefreshContextIsCancelled(t *testing.T) {
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Fatal("unexpected API request")
+		}
+		select {
+		case <-refreshStarted:
+		default:
+			close(refreshStarted)
+		}
+		<-releaseRefresh
+		http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: "abcdefghijklmnop", Path: "/"})
+	}))
+	defer server.Close()
+	var releaseOnce sync.Once
+	defer func() { releaseOnce.Do(func() { close(releaseRefresh) }) }()
+
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
+	leaderErr := make(chan error, 1)
+	go func() { leaderErr <- client.ensureSession(context.Background()) }()
+	<-refreshStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	waiterErr := make(chan error, 1)
+	go func() { waiterErr <- client.ensureSession(ctx) }()
+	select {
+	case err := <-waiterErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled waiter error = %v, want context cancellation", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("cancelled waiter did not return while a refresh was in progress")
+	}
+	releaseOnce.Do(func() { close(releaseRefresh) })
+	if err := <-leaderErr; err != nil {
+		t.Fatalf("refresh leader error = %v", err)
 	}
 }
 

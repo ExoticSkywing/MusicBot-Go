@@ -2,6 +2,7 @@ package kuwo
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"time"
 
@@ -107,6 +108,18 @@ func splitArtists(value string) []platform.Artist {
 	return artists
 }
 
+func normalizeCoverURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return value
+	}
+	return "https://img1.kuwo.cn/star/albumcover/" + strings.TrimLeft(value, "/")
+}
+
 func convertTrack(wire trackWire) (trackDetail, trackAccess, bool) {
 	id := normalizeRID(scalarText(wire.RID))
 	if id == "" {
@@ -130,7 +143,7 @@ func convertTrack(wire trackWire) (trackDetail, trackAccess, bool) {
 	}
 	cover := scalarText(wire.Cover)
 	if cover == "" {
-		cover = scalarText(wire.CoverShort)
+		cover = normalizeCoverURL(scalarText(wire.CoverShort))
 	}
 	track := platform.Track{
 		ID:       id,
