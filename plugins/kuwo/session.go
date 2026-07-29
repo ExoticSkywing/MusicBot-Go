@@ -123,25 +123,37 @@ func (c *Client) sessionCookie(requestURL string) string {
 }
 
 func (c *Client) sessionClientAndCookie(requestURL string) (*http.Client, string) {
-	if c == nil {
-		return nil, ""
-	}
-	endpoint, err := url.Parse(requestURL)
-	if err != nil {
-		return nil, ""
-	}
-	c.clientMu.RLock()
-	defer c.clientMu.RUnlock()
-	client := c.apiHTTPClient
-	if client == nil || client.Jar == nil {
-		return client, ""
-	}
-	for _, cookie := range client.Jar.Cookies(endpoint) {
+	client, _, cookies := c.sessionClientCookies(requestURL)
+	for _, cookie := range cookies {
 		if cookie.Name == kuwoSessionCookie {
 			return client, cookie.Value
 		}
 	}
 	return client, ""
+}
+
+func (c *Client) sessionClientCookies(requestURL string) (*http.Client, http.CookieJar, []*http.Cookie) {
+	if c == nil {
+		return nil, nil, nil
+	}
+	endpoint, err := url.Parse(requestURL)
+	if err != nil {
+		return nil, nil, nil
+	}
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	client := c.apiHTTPClient
+	if client == nil || client.Jar == nil {
+		return client, nil, nil
+	}
+	jar := client.Jar
+	cookies := jar.Cookies(endpoint)
+	snapshot := make([]*http.Cookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		copy := *cookie
+		snapshot = append(snapshot, &copy)
+	}
+	return client, jar, snapshot
 }
 
 func (c *Client) invalidateSession(requestURL string) {

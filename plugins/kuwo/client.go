@@ -199,7 +199,7 @@ func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDeta
 
 func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byte, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		client, cookie, err := c.signedSessionSnapshot(ctx, endpoint)
+		snapshot, err := c.signedSessionSnapshot(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -211,9 +211,12 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 		if err != nil {
 			return nil, fmt.Errorf("kuwo: create signed request: %w", err)
 		}
-		req.Header.Set("Secret", buildSecret(cookie, nonce))
+		req.Header.Set("Secret", buildSecret(snapshot.cookie, nonce))
 		req.Header.Set("Referer", referer)
 		req.Header.Set("User-Agent", kuwoUserAgent)
+		for _, cookie := range snapshot.cookies {
+			req.AddCookie(cookie)
+		}
 		reqID, err := uuidV4()
 		if err != nil {
 			return nil, err
@@ -226,10 +229,17 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 		query.Set("reqId", reqID)
 		requestURL.RawQuery = query.Encode()
 		req.URL = requestURL
-		resp, err := client.Do(req)
+		// Do must not consult the shared Jar again: the explicitly attached
+		// cookie snapshot is the same state used to derive Secret.
+		requestClient := *snapshot.client
+		requestClient.Jar = nil
+		resp, err := requestClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("kuwo: request API: %w", err)
 		}
+		// The request-scoped client intentionally has no Jar, so preserve normal
+		// session rotation for later requests through the captured shared Jar.
+		snapshot.jar.SetCookies(requestURL, resp.Cookies())
 		body, readErr := readLimited(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
@@ -253,20 +263,29 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 	return nil, fmt.Errorf("kuwo: session refresh retry exhausted")
 }
 
-func (c *Client) signedSessionSnapshot(ctx context.Context, endpoint string) (*http.Client, string, error) {
+type signedSessionSnapshot struct {
+	client  *http.Client
+	jar     http.CookieJar
+	cookies []*http.Cookie
+	cookie  string
+}
+
+func (c *Client) signedSessionSnapshot(ctx context.Context, endpoint string) (signedSessionSnapshot, error) {
 	for refresh := 0; refresh < 2; refresh++ {
 		if err := c.ensureSessionForURL(ctx, endpoint); err != nil {
-			return nil, "", err
+			return signedSessionSnapshot{}, err
 		}
-		client, cookie := c.sessionClientAndCookie(endpoint)
-		if validSessionCookie(cookie) {
-			return client, cookie, nil
+		client, jar, cookies := c.sessionClientCookies(endpoint)
+		for _, cookie := range cookies {
+			if cookie.Name == kuwoSessionCookie && validSessionCookie(cookie.Value) {
+				return signedSessionSnapshot{client: client, jar: jar, cookies: cookies, cookie: cookie.Value}, nil
+			}
 		}
 		// An invalidation may replace the client/Jar pair after ensureSession
 		// returns. Re-enter session establishment instead of signing with an
 		// empty replacement jar.
 	}
-	return nil, "", fmt.Errorf("kuwo: missing valid session cookie")
+	return signedSessionSnapshot{}, fmt.Errorf("kuwo: missing valid session cookie")
 }
 
 func readLimited(body io.Reader) ([]byte, error) {

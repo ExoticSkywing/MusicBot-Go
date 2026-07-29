@@ -315,6 +315,97 @@ func TestSessionInvalidationKeepsSignedRequestCookieAndSecretFromOneSnapshot(t *
 	}
 }
 
+func TestSessionBindsCookieSnapshotAndWritesResponseCookies(t *testing.T) {
+	const (
+		snapshotCookie = "abcdefghijklmnop"
+		rotatedCookie  = "qrstuvwxyzABCDEF"
+		responseCookie = "ponmlkjihgfedcba"
+	)
+
+	type observedRequest struct {
+		cookie string
+		secret string
+	}
+	requests := make(chan observedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		requests <- observedRequest{cookie: r.Header.Get("Cookie"), secret: r.Header.Get("Secret")}
+		http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: responseCookie, Path: "/"})
+		_, _ = w.Write([]byte(`{"data":{"list":[]}}`))
+	}))
+	defer server.Close()
+
+	jar := &snapshotThenRotatedJar{
+		current: &http.Cookie{Name: kuwoSessionCookie, Value: snapshotCookie},
+		rotated: &http.Cookie{Name: kuwoSessionCookie, Value: rotatedCookie},
+	}
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
+	client.clientMu.Lock()
+	client.apiHTTPClient.Jar = jar
+	client.clientMu.Unlock()
+	client.sessionMu.Lock()
+	client.sessionExpires = time.Now().Add(sessionTTL)
+	client.sessionMu.Unlock()
+
+	if _, err := client.Search(context.Background(), "test", 1); err != nil {
+		t.Fatalf("Search() = %v", err)
+	}
+	select {
+	case got := <-requests:
+		if !strings.Contains(got.cookie, kuwoSessionCookie+"="+snapshotCookie) {
+			t.Errorf("request Cookie = %q, want snapshot cookie", got.cookie)
+		}
+		if strings.Contains(got.cookie, kuwoSessionCookie+"="+rotatedCookie) {
+			t.Errorf("request Cookie = %q, must not re-read rotated cookie", got.cookie)
+		}
+		wantPrefix := buildSecret(snapshotCookie, 10000000)
+		wantPrefix = wantPrefix[:len(wantPrefix)-8]
+		if !strings.HasPrefix(got.secret, wantPrefix) {
+			t.Errorf("request Secret = %q, want prefix derived from snapshot cookie", got.secret)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signed request did not reach the API")
+	}
+	if got := client.sessionCookie(server.URL + "/search"); got != responseCookie {
+		t.Errorf("session cookie after response = %q, want response Set-Cookie value %q", got, responseCookie)
+	}
+}
+
+type snapshotThenRotatedJar struct {
+	mu sync.Mutex
+
+	current *http.Cookie
+	rotated *http.Cookie
+	reads   int
+	sets    int
+}
+
+func (j *snapshotThenRotatedJar) SetCookies(_ *url.URL, cookies []*http.Cookie) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.sets++
+	for _, cookie := range cookies {
+		if cookie.Name == kuwoSessionCookie {
+			copy := *cookie
+			j.current = &copy
+		}
+	}
+}
+
+func (j *snapshotThenRotatedJar) Cookies(_ *url.URL) []*http.Cookie {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.reads++
+	if j.sets == 0 && j.reads == 3 {
+		return []*http.Cookie{j.rotated}
+	}
+	return []*http.Cookie{j.current}
+}
+
 type pauseOnSecondCookieReadJar struct {
 	cookie   *http.Cookie
 	selected chan struct{}
