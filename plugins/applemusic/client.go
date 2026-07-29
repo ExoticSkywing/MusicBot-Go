@@ -592,21 +592,9 @@ func (c *Client) fetchDecrypted(_ context.Context, trackID string) (*platform.Do
 	}
 
 	downloadFn := func(ctx context.Context, info *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
-		decrypted, err := c.decryptTrack(ctx, trackID, c.wvDevice)
-		if err != nil {
+		// Decrypts straight to destPath — the track never sits in a []byte here.
+		if _, err := c.decryptTrackToFile(ctx, trackID, c.wvDevice, destPath); err != nil {
 			return 0, fmt.Errorf("applemusic: decrypt track %s: %w", trackID, err)
-		}
-
-		if err := func() error {
-			f, err := createFile(destPath)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = f.Write(decrypted)
-			return err
-		}(); err != nil {
-			return 0, err
 		}
 
 		// Decryption yields a fragmented MP4, which won't show a progress bar /
@@ -918,14 +906,26 @@ func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality pl
 			return 0, err
 		}
 
-		// Download the single byte-range mp4.
-		encData, err := c.downloadURL(ctx, media.MP4URL)
+		// Stream the encrypted mp4 to a scratch file rather than buffering it.
+		// A lossless track is tens of megabytes and a []byte here would stay
+		// resident for this whole closure — i.e. through decrypt, remux and
+		// alacfix — which is what used to push the container past its memory
+		// limit and get the process OOM-killed on small hosts.
+		encPath := destPath + ".enc"
+		encSize, err := c.downloadToFile(ctx, media.MP4URL, encPath)
 		if err != nil {
 			return 0, fmt.Errorf("download encrypted mp4: %w", err)
 		}
+		defer os.Remove(encPath)
 		if progress != nil {
-			progress(int64(len(encData))/2, int64(len(encData)))
+			progress(encSize/2, encSize)
 		}
+
+		encFile, err := os.Open(encPath)
+		if err != nil {
+			return 0, fmt.Errorf("open encrypted mp4: %w", err)
+		}
+		defer encFile.Close()
 
 		f, err := createFile(destPath)
 		if err != nil {
@@ -933,13 +933,16 @@ func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality pl
 		}
 
 		// Decrypt via the wrapper (FairPlay cbcs, per-fragment/per-sample).
-		if err := wrapper.DecryptEnhancedHLS(ctx, trackID, bytes.NewReader(encData), media.SegKeys, f); err != nil {
+		if err := wrapper.DecryptEnhancedHLS(ctx, trackID, encFile, media.SegKeys, f); err != nil {
 			f.Close()
 			return 0, fmt.Errorf("wrapper decrypt: %w", err)
 		}
 		if err := f.Close(); err != nil {
 			return 0, fmt.Errorf("close output: %w", err)
 		}
+		// Release the ciphertext before the remux/alacfix passes below.
+		encFile.Close()
+		_ = os.Remove(encPath)
 
 		// The wrapper emits a fragmented MP4 (samples in moof/trun, moov's stsz
 		// advertises 0 samples); remux to progressive first so it shows a
@@ -1052,6 +1055,44 @@ func (c *Client) downloadURL(ctx context.Context, targetURL string) ([]byte, err
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, targetURL)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// downloadToFile streams a URL straight to path and returns the bytes written,
+// never holding the body in memory.
+//
+// This is the path used for encrypted track data, which can be tens of
+// megabytes for lossless: buffering it would dominate the process's memory
+// footprint for the entire download→decrypt→remux→alacfix chain.
+func (c *Client) downloadToFile(ctx context.Context, targetURL, path string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", appleMusicUA)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HTTP %d for %s", resp.StatusCode, targetURL)
+	}
+
+	f, err := createFile(path)
+	if err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(f, resp.Body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return 0, fmt.Errorf("write %s: %w", path, err)
+	}
+	return n, nil
 }
 
 // createFile creates a file for writing, creating parent directories as needed.

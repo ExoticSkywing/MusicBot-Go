@@ -239,7 +239,9 @@ func RunVerifyCookie(ctx context.Context, cfg *config.Config, logger *logpkg.Log
 		}
 		device = d
 	}
-	wv, err := native.DownloadWidevineMP4(ctx, nativeHTTP, native.WebAuth{Bearer: wt.AccessToken, ClientToken: wt.ClientToken}, device, trackID, 0)
+	// Decrypt straight to disk as proof the whole chain works.
+	outPath := filepath.Join(filepath.Dir(statePath), "spotify-verify-"+trackID+".m4a")
+	wv, err := native.DownloadWidevineMP4(ctx, nativeHTTP, native.WebAuth{Bearer: wt.AccessToken, ClientToken: wt.ClientToken}, device, trackID, 0, outPath)
 	if wv != nil {
 		for _, s := range wv.Steps {
 			fmt.Println("  •", s)
@@ -250,12 +252,7 @@ func RunVerifyCookie(ctx context.Context, cfg *config.Config, logger *logpkg.Log
 		return err
 	}
 
-	// Write the decrypted MP4 to disk as proof the whole chain works.
-	outPath := filepath.Join(filepath.Dir(statePath), "spotify-verify-"+trackID+".m4a")
-	if werr := os.WriteFile(outPath, wv.MP4, 0o644); werr != nil {
-		return fmt.Errorf("写出解密文件失败: %w", werr)
-	}
-	fmt.Printf("\n✅ 成功！解密的 AAC 已写入: %s (%d 字节, %d kbps)\n", outPath, len(wv.MP4), wv.Bitrate/1000)
+	fmt.Printf("\n✅ 成功！解密的 AAC 已写入: %s (%d 字节, %d kbps)\n", outPath, wv.Size, wv.Bitrate/1000)
 	return nil
 }
 

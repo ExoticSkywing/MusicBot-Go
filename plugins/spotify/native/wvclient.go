@@ -139,10 +139,11 @@ func (c *WidevineClient) ensureDevice() (*widevine.Device, error) {
 	return c.device, nil
 }
 
-// Download resolves a Spotify track id to decrypted, playable MP4 (AAC) bytes.
-// preferredBitrate selects the tier in kbps (0 = highest available, ~256). On a
-// token-expiry error the cached token is dropped so the next call refreshes.
-func (c *WidevineClient) Download(ctx context.Context, trackID string, preferredBitrate int) (*WidevineResult, error) {
+// Download resolves a Spotify track id and writes the decrypted, playable MP4
+// (AAC) to destPath. preferredBitrate selects the tier in kbps (0 = highest
+// available, ~256). On a token-expiry error the cached token is dropped so the
+// next call refreshes.
+func (c *WidevineClient) Download(ctx context.Context, trackID string, preferredBitrate int, destPath string) (*WidevineResult, error) {
 	auth, err := c.WebAuth(ctx)
 	if err != nil {
 		return nil, err
@@ -152,7 +153,7 @@ func (c *WidevineClient) Download(ctx context.Context, trackID string, preferred
 		return nil, err
 	}
 
-	res, err := DownloadWidevineMP4(ctx, c.httpClient, auth, device, trackID, preferredBitrate)
+	res, err := DownloadWidevineMP4(ctx, c.httpClient, auth, device, trackID, preferredBitrate, destPath)
 	if err != nil {
 		// Drop the token so a stale-token failure self-heals next call.
 		c.mu.Lock()

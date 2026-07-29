@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 
 	widevine "github.com/iyear/gowidevine"
@@ -365,31 +367,75 @@ func acquireContentKey(ctx context.Context, hc *http.Client, auth WebAuth, devic
 }
 
 // downloadAndDecryptMP4 fetches the encrypted CENC MP4 from the CDN and decrypts
-// it in pure Go, returning a playable MP4 (AAC) byte stream.
-func downloadAndDecryptMP4(ctx context.Context, hc *http.Client, cdnURL string, keys []*widevine.Key) ([]byte, error) {
+// it in pure Go, writing the playable MP4 (AAC) stream to dst.
+//
+// The ciphertext is spooled to a scratch file instead of being buffered: the
+// previous version held the ciphertext, the plaintext and the returned copy at
+// once, three times the track size. (gowidevine parses the whole mp4 internally,
+// so one copy still lives inside the library — that buffer is not ours to fix.)
+//
+// On failure dst may already hold partial output, so a caller that retries must
+// supply a fresh destination for each attempt.
+func downloadAndDecryptMP4(ctx context.Context, hc *http.Client, cdnURL string, keys []*widevine.Key, dst io.Writer) error {
 	parsed, err := url.Parse(cdnURL)
 	if err != nil {
-		return nil, fmt.Errorf("bad cdn url: %w", err)
+		return fmt.Errorf("bad cdn url: %w", err)
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cdn download: %w", err)
+		return fmt.Errorf("cdn download: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("cdn HTTP %d: %s", resp.StatusCode, string(b))
+		return fmt.Errorf("cdn HTTP %d: %s", resp.StatusCode, string(b))
 	}
-	enc, err := io.ReadAll(resp.Body)
+
+	tmp, err := os.CreateTemp("", "spotify-cenc-*.mp4")
 	if err != nil {
-		return nil, fmt.Errorf("read cdn body: %w", err)
+		return fmt.Errorf("create scratch file: %w", err)
 	}
-	var out bytes.Buffer
-	if err := widevine.DecryptMP4Auto(bytes.NewReader(enc), keys, &out); err != nil {
-		return nil, fmt.Errorf("decrypt mp4: %w", err)
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		return fmt.Errorf("read cdn body: %w", err)
 	}
-	return out.Bytes(), nil
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind scratch file: %w", err)
+	}
+	if err := widevine.DecryptMP4Auto(tmp, keys, dst); err != nil {
+		return fmt.Errorf("decrypt mp4: %w", err)
+	}
+	return nil
+}
+
+// decryptToFile runs downloadAndDecryptMP4 into a newly created file at path,
+// returning the number of bytes written. The file is removed on failure so a
+// failed attempt never leaves a partial track behind.
+func decryptToFile(ctx context.Context, hc *http.Client, cdnURL string, keys []*widevine.Key, path string) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return 0, err
+	}
+	err = downloadAndDecryptMP4(ctx, hc, cdnURL, keys, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return 0, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return 0, err
+	}
+	return fi.Size(), nil
 }
 
 // BatchTryDevices resolves a track once (track-playback -> storage-resolve ->
@@ -448,7 +494,10 @@ func BatchTryDevices(ctx context.Context, hc *http.Client, auth WebAuth, trackID
 				}
 				continue
 			}
-			dec, decryptErr := downloadAndDecryptMP4(ctx, hc, cdnURL, keys)
+			// Diagnostic path: the caller inspects the decrypted bytes, so the
+			// plaintext is buffered here. The ciphertext copy is still avoided.
+			var decBuf bytes.Buffer
+			decryptErr := downloadAndDecryptMP4(ctx, hc, cdnURL, keys, &decBuf)
 			if decryptErr != nil {
 				attemptErrs = append(attemptErrs, fmt.Errorf("%s %dk: %w", path, file.Bitrate/1000, decryptErr))
 				if onProgress != nil {
@@ -456,6 +505,7 @@ func BatchTryDevices(ctx context.Context, hc *http.Client, auth WebAuth, trackID
 				}
 				continue
 			}
+			dec := decBuf.Bytes()
 			if onProgress != nil {
 				onProgress(progressIdx, totalAttempts, path, fmt.Sprintf("WORKS at %dk — %d bytes decrypted", file.Bitrate/1000, len(dec)))
 			}
@@ -562,8 +612,11 @@ type WidevineResult struct {
 	Bitrate int
 	CDNURL  string
 	NumKeys int
-	MP4     []byte
-	Steps   []string
+	// Size is the byte length of the decrypted track written to the caller's
+	// destination path. The audio itself is streamed to disk rather than
+	// returned, so a multi-megabyte track never sits in this struct.
+	Size  int64
+	Steps []string
 }
 
 // DownloadWidevineMP4 runs the complete Widevine AAC chain for a track using a
@@ -572,7 +625,7 @@ type WidevineResult struct {
 // preferredBitrate selects the initial tier in kbps (0 = highest). Lower
 // available tiers are tried when a higher tier is unavailable for the account.
 // The step trace is populated for diagnostics regardless of success.
-func DownloadWidevineMP4(ctx context.Context, hc *http.Client, auth WebAuth, device *widevine.Device, trackID string, preferredBitrate int) (*WidevineResult, error) {
+func DownloadWidevineMP4(ctx context.Context, hc *http.Client, auth WebAuth, device *widevine.Device, trackID string, preferredBitrate int, destPath string) (*WidevineResult, error) {
 	res := &WidevineResult{}
 	add := func(f string, a ...any) { res.Steps = append(res.Steps, fmt.Sprintf(f, a...)) }
 
@@ -626,14 +679,21 @@ func DownloadWidevineMP4(ctx context.Context, hc *http.Client, auth WebAuth, dev
 		res.NumKeys = len(keys)
 		add("widevine license ok: %d key(s)", len(keys))
 
-		mp4, decryptErr := downloadAndDecryptMP4(ctx, hc, cdnURL, keys)
+		// Decrypt into a per-attempt scratch file: a failed candidate must not
+		// leave partial output at destPath, and a later candidate may succeed.
+		attemptPath := destPath + ".attempt"
+		size, decryptErr := decryptToFile(ctx, hc, cdnURL, keys, attemptPath)
 		if decryptErr != nil {
 			attemptErrs = append(attemptErrs, fmt.Errorf("%dk decrypt: %w", file.Bitrate/1000, decryptErr))
 			add("candidate %dk failed: %v", file.Bitrate/1000, decryptErr)
 			continue
 		}
-		res.MP4 = mp4
-		add("decrypt ok: %d bytes of playable MP4/AAC", len(mp4))
+		if err := os.Rename(attemptPath, destPath); err != nil {
+			_ = os.Remove(attemptPath)
+			return res, fmt.Errorf("finalise output: %w", err)
+		}
+		res.Size = size
+		add("decrypt ok: %d bytes of playable MP4/AAC", size)
 		return res, nil
 	}
 

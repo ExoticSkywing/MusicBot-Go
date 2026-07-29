@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	mp4 "github.com/Eyevinn/mp4ff/mp4"
@@ -30,21 +31,27 @@ var widevineSystemID = []byte{
 //  5. Acquire license from Apple's Widevine server
 //  6. Extract content key and decrypt the mp4
 //
-// Returns the decrypted m4a bytes.
+// Writes the decrypted m4a to destPath and returns the number of bytes written.
+//
+// The ciphertext is streamed to a scratch file and the plaintext is written
+// straight to destPath, so neither the encrypted nor the decrypted track is
+// held in memory here. (gowidevine still parses the whole mp4 internally, so
+// the ciphertext is resident inside the library for the duration of the
+// decrypt; that buffer is outside this package's control.)
 //
 // Requires:
 //   - A valid media-user-token (for WebPlayback + license acquisition)
 //   - Widevine L3 device credentials (client_id.bin + private_key.pem)
 //     embedded at build time or loaded at runtime.
-func (c *Client) decryptTrack(ctx context.Context, trackID string, device *widevine.Device) ([]byte, error) {
+func (c *Client) decryptTrackToFile(ctx context.Context, trackID string, device *widevine.Device, destPath string) (int64, error) {
 	if device == nil {
-		return nil, fmt.Errorf("widevine device not configured")
+		return 0, fmt.Errorf("widevine device not configured")
 	}
 
 	// Step 1: Get WebPlayback assets.
 	wpAssets, err := c.callWebPlayback(ctx, trackID)
 	if err != nil {
-		return nil, fmt.Errorf("webplayback: %w", err)
+		return 0, fmt.Errorf("webplayback: %w", err)
 	}
 
 	// Select ctrp256 (Widevine CENC, AAC 256kbps).
@@ -59,32 +66,34 @@ func (c *Client) decryptTrack(ctx context.Context, trackID string, device *widev
 		selected = &wpAssets[0]
 	}
 	if selected == nil {
-		return nil, fmt.Errorf("no assets in webplayback response")
+		return 0, fmt.Errorf("no assets in webplayback response")
 	}
 
 	hlsURL := strings.TrimSpace(selected.URL)
 	if hlsURL == "" {
-		return nil, fmt.Errorf("empty HLS URL")
+		return 0, fmt.Errorf("empty HLS URL")
 	}
 
 	// Step 2: Parse m3u8 to get mp4 URL and key info.
 	m3u8Body, err := c.downloadURL(ctx, hlsURL)
 	if err != nil {
-		return nil, fmt.Errorf("fetch m3u8: %w", err)
+		return 0, fmt.Errorf("fetch m3u8: %w", err)
 	}
 
 	mp4URL, kidB64, uriPrefix, err := parseWidevineHLS(hlsURL, string(m3u8Body))
 	if err != nil {
-		return nil, fmt.Errorf("parse m3u8: %w", err)
+		return 0, fmt.Errorf("parse m3u8: %w", err)
 	}
 
-	// Step 3: Download encrypted mp4.
-	encData, err := c.downloadURL(ctx, mp4URL)
+	// Step 3: Stream the encrypted mp4 to a scratch file next to the output.
+	encPath := destPath + ".enc"
+	encSize, err := c.downloadToFile(ctx, mp4URL, encPath)
 	if err != nil {
-		return nil, fmt.Errorf("download encrypted mp4: %w", err)
+		return 0, fmt.Errorf("download encrypted mp4: %w", err)
 	}
+	defer os.Remove(encPath)
 	if c.logger != nil {
-		c.logger.Debug("applemusic: downloaded encrypted mp4", "size", len(encData))
+		c.logger.Debug("applemusic: downloaded encrypted mp4", "size", encSize)
 	}
 
 	// Step 4: Build PSSH and get license.
@@ -93,42 +102,58 @@ func (c *Client) decryptTrack(ctx context.Context, trackID string, device *widev
 	// the KID in a Widevine PSSH box first.
 	kidBytes, err := base64.StdEncoding.DecodeString(kidB64)
 	if err != nil {
-		return nil, fmt.Errorf("decode KID: %w", err)
+		return 0, fmt.Errorf("decode KID: %w", err)
 	}
 
 	pssh, err := buildWidevinePSSH(kidBytes)
 	if err != nil {
-		return nil, fmt.Errorf("build PSSH: %w", err)
+		return 0, fmt.Errorf("build PSSH: %w", err)
 	}
 
 	cdm := widevine.NewCDM(device)
 	challenge, parseLicense, err := cdm.GetLicenseChallenge(pssh, widevinepb.LicenseType_AUTOMATIC, false)
 	if err != nil {
-		return nil, fmt.Errorf("license challenge: %w", err)
+		return 0, fmt.Errorf("license challenge: %w", err)
 	}
 
 	// Step 5: Acquire license from Apple.
 	licenseResp, err := c.acquireLicense(ctx, challenge, trackID, uriPrefix, kidB64)
 	if err != nil {
-		return nil, fmt.Errorf("acquire license: %w", err)
+		return 0, fmt.Errorf("acquire license: %w", err)
 	}
 
 	keys, err := parseLicense(licenseResp)
 	if err != nil {
-		return nil, fmt.Errorf("parse license: %w", err)
+		return 0, fmt.Errorf("parse license: %w", err)
 	}
 	if c.logger != nil {
 		c.logger.Debug("applemusic: got widevine keys", "count", len(keys))
 	}
 
-	// Step 6: Decrypt mp4.
-	var decBuf bytes.Buffer
-	err = widevine.DecryptMP4Auto(bytes.NewReader(encData), keys, &decBuf)
+	// Step 6: Decrypt straight from the scratch file into the output file.
+	encFile, err := os.Open(encPath)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt mp4: %w", err)
+		return 0, fmt.Errorf("open encrypted mp4: %w", err)
+	}
+	defer encFile.Close()
+
+	out, err := createFile(destPath)
+	if err != nil {
+		return 0, err
+	}
+	if err := widevine.DecryptMP4Auto(encFile, keys, out); err != nil {
+		out.Close()
+		return 0, fmt.Errorf("decrypt mp4: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return 0, fmt.Errorf("close output: %w", err)
 	}
 
-	return decBuf.Bytes(), nil
+	fi, err := os.Stat(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat output: %w", err)
+	}
+	return fi.Size(), nil
 }
 
 // callWebPlayback calls the Apple Music WebPlayback API and returns the asset list.

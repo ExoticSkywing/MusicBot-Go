@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -568,14 +569,27 @@ func alacReadPacketLocations(data []byte, stbl alacAtom) ([]alacPacketLoc, error
 // findAlacTracks returns one entry per audio track whose first sample entry
 // in stsd has format == 'alac'. All other tracks (video, AAC audio, etc.)
 // are silently skipped.
-func findAlacTracks(data []byte) ([]alacTrackData, error) {
-	if len(data) < 8 {
-		return nil, errors.New("file too small")
+// findAlacTracks parses an already-extracted moov box and returns the ALAC
+// tracks it declares.
+//
+// It takes the moov rather than the whole file because the sample tables are
+// all the parsing needs: packet locations come from stco/stsz as absolute file
+// offsets, so the caller can read each packet on demand instead of holding the
+// media payload — which is essentially the entire file — in memory.
+func findAlacTracks(moovData []byte) ([]alacTrackData, error) {
+	if len(moovData) < 8 {
+		return nil, errors.New("moov too small")
 	}
-	moov, ok := alacFindChild(data, 0, len(data), "moov")
-	if !ok {
-		return nil, errors.New("no moov atom (not an MP4/M4A?)")
+	// moovData is the complete box, so its body starts just after the header.
+	bodyOff := 8
+	if binary.BigEndian.Uint32(moovData[0:4]) == 1 {
+		bodyOff = 16 // 64-bit largesize form
 	}
+	if len(moovData) < bodyOff {
+		return nil, errors.New("moov too small")
+	}
+	data := moovData
+	moov := alacAtom{typ: "moov", hdrOff: 0, bodyOff: bodyOff, endOff: len(moovData)}
 
 	var tracks []alacTrackData
 	for _, trak := range alacFindAllChildren(data, moov.bodyOff, moov.endOff, "trak") {
@@ -687,14 +701,34 @@ func alacPatchInPlace(data []byte, off int64, size int, bodyEndBit int) bool {
 
 // fixALACFile patches malformed ALAC packets in the file at path, in place.
 // It is the simplified, single-file entry point for this package (equivalent
-// to the upstream Run(path, force=true) with no separate output path): the
-// file is always rewritten when it contains at least one ALAC track.
+// to the upstream Run(path, force=true) with no separate output path).
+//
+// Only the moov box and a single packet are resident at any moment. This runs
+// last in the download→decrypt→remux→alacfix chain on tracks that reach tens of
+// megabytes, and reading the whole file here used to be the third full-size
+// copy of the same track — enough, on a small host, to hit the container memory
+// limit and get the process OOM-killed.
 func fixALACFile(path string) error {
-	data, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
-	tracks, err := findAlacTracks(data)
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	moovData, err := readMoovBox(f, fi.Size())
+	if err != nil {
+		return err
+	}
+	if moovData == nil {
+		return errors.New("no moov atom (not an MP4/M4A?)")
+	}
+
+	tracks, err := findAlacTracks(moovData)
 	if err != nil {
 		return err
 	}
@@ -712,6 +746,7 @@ func fixALACFile(path string) error {
 
 	patched := 0
 	var report []bad
+	var pkt []byte // reused across packets
 
 	for _, td := range tracks {
 		params := td.params
@@ -719,7 +754,17 @@ func fixALACFile(path string) error {
 			td.trackID, len(td.locs), params.maxSamplesPerFrame, params.sampleSize, params.channels)
 
 		for idx, loc := range td.locs {
-			pkt := data[loc.offset : loc.offset+int64(loc.size)]
+			if loc.size <= 0 {
+				continue
+			}
+			if cap(pkt) < loc.size {
+				pkt = make([]byte, loc.size)
+			}
+			pkt = pkt[:loc.size]
+			if _, err := f.ReadAt(pkt, loc.offset); err != nil {
+				return fmt.Errorf("read packet at %d: %w", loc.offset, err)
+			}
+
 			bodyEnd := alacFindBodyEndBit(pkt, &params)
 			if bodyEnd < 0 {
 				continue
@@ -734,21 +779,65 @@ func fixALACFile(path string) error {
 					continue
 				}
 			}
-			if alacPatchInPlace(data, loc.offset, loc.size, bodyEnd) {
+			// Offset 0: the patch applies within the packet buffer itself.
+			if alacPatchInPlace(pkt, 0, loc.size, bodyEnd) {
+				if _, err := f.WriteAt(pkt, loc.offset); err != nil {
+					return fmt.Errorf("write packet at %d: %w", loc.offset, err)
+				}
 				patched++
 				report = append(report, bad{td.trackID, idx, loc.offset, loc.size, bodyEnd})
 			}
 		}
 	}
 
-	// force == true: always write back, even when no packet needed patching.
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Upstream rewrites the file unconditionally (force=true). Writing only the
+	// modified packets is equivalent — the untouched bytes would be rewritten
+	// with identical content — and avoids a full-size rewrite.
+	if err := f.Sync(); err != nil {
 		return err
 	}
+
 	fmt.Printf("Patched %d packet(s).\n", patched)
 	for _, r := range report {
 		fmt.Printf("  track #%d packet #%d  file_offset=0x%x  size=%d  body_ends_at_bit=%d  tail_overwritten=[%d..%d)\n",
 			r.trackID, r.idx, r.off, r.size, r.bodyEndBit, r.bodyEndBit, r.size*8)
 	}
 	return nil
+}
+
+// readMoovBox walks the top-level boxes and reads just the moov into memory,
+// returning nil when the file has none. The mdat payload — nearly the whole
+// file — is skipped over rather than read.
+func readMoovBox(r io.ReaderAt, fileSize int64) ([]byte, error) {
+	hdr := make([]byte, 16)
+	for off := int64(0); off+8 <= fileSize; {
+		if _, err := r.ReadAt(hdr[:8], off); err != nil {
+			return nil, fmt.Errorf("read box header at %d: %w", off, err)
+		}
+		size := int64(binary.BigEndian.Uint32(hdr[0:4]))
+		typ := string(hdr[4:8])
+		hdrLen := int64(8)
+		switch size {
+		case 0:
+			size = fileSize - off // box runs to EOF
+		case 1:
+			if _, err := r.ReadAt(hdr[8:16], off+8); err != nil {
+				return nil, fmt.Errorf("read largesize at %d: %w", off, err)
+			}
+			size = int64(binary.BigEndian.Uint64(hdr[8:16]))
+			hdrLen = 16
+		}
+		if size < hdrLen || off+size > fileSize {
+			return nil, fmt.Errorf("malformed box %q at %d: size %d", typ, off, size)
+		}
+		if typ == "moov" {
+			buf := make([]byte, size)
+			if _, err := r.ReadAt(buf, off); err != nil {
+				return nil, fmt.Errorf("read moov at %d: %w", off, err)
+			}
+			return buf, nil
+		}
+		off += size
+	}
+	return nil, nil
 }

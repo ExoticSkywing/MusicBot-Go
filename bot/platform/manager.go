@@ -291,10 +291,17 @@ func (c *compositePlatform) GetLyrics(ctx context.Context, trackID string) (*Lyr
 	return nil, ErrUnsupported
 }
 
+// maxRecognitionAudioBytes bounds the excerpt buffered for fingerprinting.
+// Recognition providers match on a short sample, not the whole track, so this
+// is generous for the purpose while keeping a large upload from being held in
+// memory for the entire provider chain.
+const maxRecognitionAudioBytes = 16 << 20 // 16 MiB
+
 func (c *compositePlatform) RecognizeAudio(ctx context.Context, audioData io.Reader) (*Track, error) {
 	// Buffer the audio data so fallback providers can re-read it after
-	// the first provider consumes the reader.
-	data, err := io.ReadAll(audioData)
+	// the first provider consumes the reader. The cap matters because this
+	// buffer stays live across every provider attempt.
+	data, err := io.ReadAll(io.LimitReader(audioData, maxRecognitionAudioBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read audio data: %w", err)
 	}

@@ -122,22 +122,21 @@ func (n *nativeSource) BuildDownloadInfo(ctx context.Context, trackID string, qu
 
 	downloadFn := func(ctx context.Context, info *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 		// The whole Widevine chain (web token -> manifest -> storage-resolve ->
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			return 0, err
+		}
+
 		// license -> CENC decrypt) runs here, lazily, so a DRM/region failure
 		// surfaces as a download error rather than at info-build time.
-		wv, err := n.client.Download(ctx, trackID, bitrate)
+		// The track is decrypted straight to destPath, never into a []byte.
+		wv, err := n.client.Download(ctx, trackID, bitrate, destPath)
 		if err != nil {
 			return 0, err
 		}
 		info.Bitrate = wv.Bitrate / 1000
 		info.Quality = spotifyQualityForBitrate(info.Bitrate)
 
-		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-			return 0, err
-		}
-		if err := os.WriteFile(destPath, wv.MP4, 0o644); err != nil {
-			return 0, err
-		}
-		n := int64(len(wv.MP4))
+		n := wv.Size
 		if progress != nil {
 			progress(n, n)
 		}

@@ -773,10 +773,14 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 		}
 	}
 	outputPath := destPath
-	outputData := decrypted
-	if err := os.WriteFile(outputPath, outputData, 0o644); err != nil {
+	if err := os.WriteFile(outputPath, decrypted, 0o644); err != nil {
 		return 0, err
 	}
+	// The media now lives on disk; drop the in-memory copies before handing off
+	// to ffmpeg, which works file-to-file.
+	encryptedData = nil
+	decrypted = nil
+
 	codecName, codecErr := sodaProbeAudioCodec(outputPath)
 	codecName = strings.ToLower(strings.TrimSpace(codecName))
 	if codecErr == nil {
@@ -792,14 +796,16 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 				}
 				return 0, fmt.Errorf("soda: extract playable flac from lossless container: %w", err)
 			}
-			extracted, readErr := os.ReadFile(extractedPath)
-			if readErr != nil {
+			// Check the result by size rather than reading it back: ffmpeg has
+			// already written the finished file.
+			fi, statErr := os.Stat(extractedPath)
+			if statErr != nil {
 				if c != nil && c.logger != nil {
-					c.logger.Warn("soda: failed to read extracted flac after successful extraction", "path", extractedPath, "error", readErr)
+					c.logger.Warn("soda: failed to stat extracted flac after successful extraction", "path", extractedPath, "error", statErr)
 				}
-				return 0, fmt.Errorf("soda: read extracted flac: %w", readErr)
+				return 0, fmt.Errorf("soda: stat extracted flac: %w", statErr)
 			}
-			if len(extracted) == 0 {
+			if fi.Size() == 0 {
 				err := errors.New("extracted flac is empty")
 				if c != nil && c.logger != nil {
 					c.logger.Warn("soda: extracted flac is empty", "path", extractedPath)
@@ -808,19 +814,17 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 			}
 			_ = os.Remove(outputPath)
 			outputPath = extractedPath
-			outputData = extracted
 			info.Format = "flac"
 			info.Headers["X-Soda-Container"] = "mp4(flac)"
 			if c != nil && c.logger != nil {
-				c.logger.Debug("soda: extracted playable flac from audio container", "path", outputPath, "size", len(outputData))
+				c.logger.Debug("soda: extracted playable flac from audio container", "path", outputPath, "size", fi.Size())
 			}
 		case "aac", "alac":
 			repackedPath := strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".m4a"
 			if repackedPath != outputPath {
-				if repackedData, changed, err := repackSodaM4AIfNeeded(ctx, outputPath, repackedPath); err == nil && changed {
+				if changed, err := repackSodaM4AIfNeeded(ctx, outputPath, repackedPath); err == nil && changed {
 					_ = os.Remove(outputPath)
 					outputPath = repackedPath
-					outputData = repackedData
 					info.Format = "m4a"
 				}
 			}
@@ -828,16 +832,22 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 	} else if c != nil && c.logger != nil {
 		c.logger.Debug("soda: ffprobe codec detection failed", "err", codecErr)
 	}
-	if err := os.WriteFile(outputPath, outputData, 0o644); err != nil {
+
+	// No final write-back: whichever branch ran left the finished file on disk
+	// already. Re-reading it just to write identical bytes cost two more
+	// full-size copies of the track.
+	finalInfo, err := os.Stat(outputPath)
+	if err != nil {
 		return 0, err
 	}
+	n := finalInfo.Size()
 	if c != nil && c.logger != nil {
-		c.logger.Debug("soda: download finished", "final_path", outputPath, "final_format", info.Format, "final_size", len(outputData))
+		c.logger.Debug("soda: download finished", "final_path", outputPath, "final_format", info.Format, "final_size", n)
 	}
 	if progress != nil {
-		progress(int64(len(outputData)), int64(len(outputData)))
+		progress(n, n)
 	}
-	return int64(len(outputData)), nil
+	return n, nil
 }
 
 func (c *Client) fetchPlayInfos(ctx context.Context, playerInfoURL string) ([]sodaPlayInfo, error) {
@@ -1877,23 +1887,25 @@ func validateSodaAudioFile(ctx context.Context, filePath, expectedCodec string) 
 	return nil
 }
 
-func repackSodaM4AIfNeeded(ctx context.Context, srcPath, dstPath string) ([]byte, bool, error) {
+// repackSodaM4AIfNeeded remuxes an AAC/ALAC stream into an .m4a container at
+// dstPath and reports whether it did anything.
+//
+// It deliberately does not return the file contents: ffmpeg has already written
+// them, and reading a whole track back only for the caller to write it out
+// again cost two extra full-size copies.
+func repackSodaM4AIfNeeded(ctx context.Context, srcPath, dstPath string) (bool, error) {
 	codecName, err := probeAudioCodec(srcPath)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	codecName = strings.ToLower(strings.TrimSpace(codecName))
 	if codecName != "aac" && codecName != "alac" {
-		return nil, false, nil
+		return false, nil
 	}
 	if err := remuxAudioContainer(ctx, srcPath, dstPath); err != nil {
-		return nil, false, err
+		return false, err
 	}
-	data, err := os.ReadFile(dstPath)
-	if err != nil {
-		return nil, false, err
-	}
-	return data, true, nil
+	return true, nil
 }
 
 func probeAudioCodec(filePath string) (string, error) {
