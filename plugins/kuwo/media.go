@@ -34,7 +34,7 @@ var (
 	errPreviewMedia          = errors.New("kuwo: preview media")
 	errTrackIdentityMismatch = errors.New("kuwo: track identity mismatch")
 	errTrackDurationMismatch = errors.New("kuwo: track duration mismatch")
-	errUntrustedMediaHost    = errors.New("kuwo: untrusted media host")
+	errUnsafeMediaURL        = errors.New("kuwo: unsafe media URL")
 	errTerminalCandidate     = errors.New("kuwo: terminal media error")
 )
 
@@ -79,21 +79,21 @@ func mediaHeaders() map[string]string {
 func validateMediaURL(rawURL, format string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return errors.New("kuwo: invalid media URL")
+		return errUnsafeMediaURL
 	}
 	if parsed.User != nil || parsed.Port() != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("kuwo: unsafe media URL")
+		return errUnsafeMediaURL
 	}
 	if parsed.Host != parsed.Hostname() {
-		return errors.New("kuwo: explicit media port is not allowed")
+		return errUnsafeMediaURL
 	}
 	host := strings.ToLower(parsed.Hostname())
 	labels := strings.Split(host, ".")
 	if len(labels) != 3 || labels[1] != "kuwo" || labels[2] != "cn" {
-		return errUntrustedMediaHost
+		return errUnsafeMediaURL
 	}
 	if !strings.HasPrefix(labels[0], "kw-") && !strings.HasSuffix(labels[0], "-sycdn") {
-		return errUntrustedMediaHost
+		return errUnsafeMediaURL
 	}
 	extension := strings.ToLower(path.Ext(parsed.EscapedPath()))
 	if extension != "."+strings.ToLower(format) || (extension != ".flac" && extension != ".mp3") {
@@ -103,9 +103,13 @@ func validateMediaURL(rawURL, format string) error {
 }
 
 func normalizeMediaURL(rawURL, format string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", errors.New("kuwo: empty media URL")
+	}
+	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", errors.New("kuwo: invalid media URL")
+		return "", errUnsafeMediaURL
 	}
 	parsed.Scheme = "https"
 	normalized := parsed.String()
@@ -513,15 +517,15 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	}
 	rawURL, err := normalizeMediaURL(scalarText(data.URL.scalar()), candidate.format)
 	if err != nil {
-		if errors.Is(err, errUntrustedMediaHost) {
-			return nil, terminalUnavailable(errUntrustedMediaHost)
+		if errors.Is(err, errUnsafeMediaURL) {
+			return nil, terminalUnavailable(err)
 		}
 		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, candidate.format, detail.Duration)
 	if err != nil {
-		if errors.Is(err, errUntrustedMediaHost) {
-			return nil, terminalUnavailable(errUntrustedMediaHost)
+		if errors.Is(err, errUnsafeMediaURL) {
+			return nil, terminalUnavailable(err)
 		}
 		return nil, err
 	}
@@ -576,15 +580,15 @@ func (c *Client) resolveWebDownload(ctx context.Context, detail *trackDetail) (*
 	}
 	rawURL, err := normalizeMediaURL(webURL, "mp3")
 	if err != nil {
-		if errors.Is(err, errUntrustedMediaHost) {
-			return nil, terminalUnavailable(errUntrustedMediaHost)
+		if errors.Is(err, errUnsafeMediaURL) {
+			return nil, terminalUnavailable(err)
 		}
 		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, "mp3", detail.Duration)
 	if err != nil {
-		if errors.Is(err, errUntrustedMediaHost) {
-			return nil, terminalUnavailable(errUntrustedMediaHost)
+		if errors.Is(err, errUnsafeMediaURL) {
+			return nil, terminalUnavailable(err)
 		}
 		return nil, err
 	}

@@ -355,75 +355,93 @@ func TestResolveDownloadRejectsFalse320AndFallsBack(t *testing.T) {
 }
 
 func TestResolveDownloadUntrustedMobileHostIsTerminal(t *testing.T) {
-	for _, tt := range []struct {
-		name        string
-		firstURL    string
-		redirectURL string
+	unsafeURLs := []struct {
+		name string
+		url  string
 	}{
-		{
-			name:     "response URL",
-			firstURL: "https://evil.test/signed.mp3",
-		},
-		{
-			name:        "probe redirect",
-			firstURL:    "https://er-sycdn.kuwo.cn/redirect.mp3",
-			redirectURL: "https://evil.test/signed.mp3",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var mobileCalls atomic.Int32
-			var webCalls atomic.Int32
-			var evilHits atomic.Int32
-			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				switch req.URL.Host {
-				case "www.kuwo.cn":
-					if req.URL.Path == "/" {
-						return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+		{name: "plain", url: "https://evil.test/signed.mp3"},
+		{name: "query", url: "https://evil.test/signed.mp3?token=x"},
+		{name: "userinfo", url: "https://user@evil.test/signed.mp3"},
+		{name: "explicit port", url: "https://evil.test:443/signed.mp3"},
+		{name: "fragment", url: "https://evil.test/signed.mp3#fragment"},
+		{name: "http scheme", url: "http://evil.test/signed.mp3"},
+	}
+	sources := []struct {
+		name       string
+		response   bool
+		initialURL string
+	}{
+		{name: "response URL", response: true},
+		{name: "probe redirect", initialURL: "https://er-sycdn.kuwo.cn/redirect.mp3"},
+	}
+
+	for _, source := range sources {
+		for _, unsafeURL := range unsafeURLs {
+			t.Run(source.name+"/"+unsafeURL.name, func(t *testing.T) {
+				firstURL := source.initialURL
+				redirectURL := unsafeURL.url
+				if source.response {
+					firstURL = unsafeURL.url
+					redirectURL = ""
+				}
+
+				var mobileCalls atomic.Int32
+				var webCalls atomic.Int32
+				var evilHits atomic.Int32
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					switch req.URL.Hostname() {
+					case "www.kuwo.cn":
+						if req.URL.Path == "/" {
+							return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+						}
+						if strings.Contains(req.URL.Path, "playUrl") {
+							webCalls.Add(1)
+							return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+						}
+						return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+					case "mobi.kuwo.cn":
+						call := mobileCalls.Add(1)
+						if call == 1 {
+							return response(http.StatusOK, nil, []byte(fmt.Sprintf(
+								`{"code":200,"data":{"rid":41378936,"url":%q,"format":"mp3","bitrate":320,"duration":213,"type":0}}`,
+								firstURL,
+							))), nil
+						}
+						return response(http.StatusOK, nil, []byte(
+							`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/fallback.mp3","format":"mp3","bitrate":128,"duration":213,"type":0}}`,
+						)), nil
+					case "er-sycdn.kuwo.cn":
+						if redirectURL != "" && req.URL.Path == "/redirect.mp3" {
+							return response(http.StatusFound, map[string]string{"Location": redirectURL}, nil), nil
+						}
+						return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
+					case "evil.test":
+						evilHits.Add(1)
+						return response(http.StatusOK, nil, nil), nil
+					default:
+						t.Fatalf("unexpected request %s", req.URL)
+						return nil, nil
 					}
-					if strings.Contains(req.URL.Path, "playUrl") {
-						webCalls.Add(1)
-						return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
-					}
-					return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
-				case "mobi.kuwo.cn":
-					call := mobileCalls.Add(1)
-					if call == 1 {
-						return response(http.StatusOK, nil, []byte(fmt.Sprintf(
-							`{"code":200,"data":{"rid":41378936,"url":%q,"format":"mp3","bitrate":320,"duration":213,"type":0}}`,
-							tt.firstURL,
-						))), nil
-					}
-					return response(http.StatusOK, nil, []byte(
-						`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/fallback.mp3","format":"mp3","bitrate":128,"duration":213,"type":0}}`,
-					)), nil
-				case "er-sycdn.kuwo.cn":
-					if tt.redirectURL != "" && req.URL.Path == "/redirect.mp3" {
-						return response(http.StatusFound, map[string]string{"Location": tt.redirectURL}, nil), nil
-					}
-					return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
-				case "evil.test":
-					evilHits.Add(1)
-					return response(http.StatusOK, nil, nil), nil
-				default:
-					t.Fatalf("unexpected request %s", req.URL)
-					return nil, nil
+				})
+				client := NewClient(time.Second, nil)
+				client.apiHTTPClient.Transport = transport
+				client.mediaHTTPClient.Transport = transport
+
+				_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
+				if !errors.Is(err, platform.ErrUnavailable) {
+					t.Fatalf("error = %v, want ErrUnavailable", err)
+				}
+				if !errors.Is(err, errUnsafeMediaURL) {
+					t.Fatalf("error = %v, want unsafe media URL classification", err)
+				}
+				if mobileCalls.Load() != 1 || webCalls.Load() != 0 {
+					t.Fatalf("mobile calls = %d, web calls = %d; unsafe URL must be terminal", mobileCalls.Load(), webCalls.Load())
+				}
+				if evilHits.Load() != 0 {
+					t.Fatalf("unsafe target was requested %d times", evilHits.Load())
 				}
 			})
-			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
-			client.mediaHTTPClient.Transport = transport
-
-			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
-			if !errors.Is(err, platform.ErrUnavailable) {
-				t.Fatalf("error = %v, want ErrUnavailable", err)
-			}
-			if mobileCalls.Load() != 1 || webCalls.Load() != 0 {
-				t.Fatalf("mobile calls = %d, web calls = %d; untrusted host must be terminal", mobileCalls.Load(), webCalls.Load())
-			}
-			if evilHits.Load() != 0 {
-				t.Fatalf("untrusted redirect target was requested %d times", evilHits.Load())
-			}
-		})
+		}
 	}
 }
 
@@ -657,12 +675,21 @@ func TestResolveDownloadMalformedCriticalMobileFieldsAreTerminal(t *testing.T) {
 func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
+		firstURL      string
 		firstMetadata string
 	}{
+		{name: "empty URL", firstURL: `""`, firstMetadata: `"format":"mp3","bitrate":320`},
+		{name: "suffix mismatch", firstURL: `"https://er-sycdn.kuwo.cn/first.flac"`, firstMetadata: `"format":"mp3","bitrate":320`},
+		{name: "bitrate mismatch", firstMetadata: `"format":"mp3","bitrate":128`},
+		{name: "format mismatch", firstMetadata: `"format":"flac","bitrate":320`},
 		{name: "bitrate object", firstMetadata: `"format":"mp3","bitrate":{}`},
 		{name: "format array", firstMetadata: `"format":[],"bitrate":320`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			firstURL := tt.firstURL
+			if firstURL == "" {
+				firstURL = `"https://er-sycdn.kuwo.cn/first.mp3"`
+			}
 			var mobileCalls []string
 			var mediaCalls atomic.Int32
 			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -676,7 +703,7 @@ func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
 					br := req.URL.Query().Get("br")
 					mobileCalls = append(mobileCalls, br)
 					if br == "320kmp3" {
-						body := `{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/first.mp3",` +
+						body := `{"code":200,"data":{"rid":41378936,"url":` + firstURL + `,` +
 							tt.firstMetadata + `,"duration":213,"type":0}}`
 						return response(http.StatusOK, nil, []byte(body)), nil
 					}
