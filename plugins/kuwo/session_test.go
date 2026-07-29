@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,6 +236,106 @@ func TestSessionInvalidationReplacesPathScopedCookieBeforeDetailRetry(t *testing
 	if homeCalls != 2 || detailCalls != 2 {
 		t.Fatalf("calls home=%d detail=%d, want 2 each", homeCalls, detailCalls)
 	}
+}
+
+func TestSessionInvalidationKeepsSignedRequestCookieAndSecretFromOneSnapshot(t *testing.T) {
+	const sessionCookie = "abcdefghijklmnop"
+
+	type observedRequest struct {
+		cookie string
+		secret string
+	}
+	requests := make(chan observedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		requests <- observedRequest{cookie: r.Header.Get("Cookie"), secret: r.Header.Get("Secret")}
+		_, _ = w.Write([]byte(`{"data":{"list":[]}}`))
+	}))
+	defer server.Close()
+
+	jar := &pauseOnSecondCookieReadJar{
+		cookie:   &http.Cookie{Name: kuwoSessionCookie, Value: sessionCookie},
+		selected: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{home: server.URL + "/", search: server.URL + "/search", detail: server.URL + "/detail"})
+	client.clientMu.Lock()
+	client.apiHTTPClient.Jar = jar
+	client.clientMu.Unlock()
+	client.sessionMu.Lock()
+	client.sessionExpires = time.Now().Add(sessionTTL)
+	client.sessionMu.Unlock()
+
+	searchResult := make(chan error, 1)
+	go func() {
+		_, err := client.Search(context.Background(), "test", 1)
+		searchResult <- err
+	}()
+	<-jar.selected
+
+	invalidated := make(chan struct{})
+	go func() {
+		client.invalidateSession(server.URL + "/search")
+		close(invalidated)
+	}()
+
+	// A coherent client/Jar snapshot keeps invalidation from replacing the jar
+	// until its cookie has been selected. The pre-fix implementation lets this
+	// complete here and later sends through the replacement client.
+	select {
+	case <-invalidated:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(jar.release)
+
+	if err := <-searchResult; err != nil {
+		t.Fatalf("Search() = %v", err)
+	}
+	select {
+	case got := <-requests:
+		if !strings.Contains(got.cookie, kuwoSessionCookie+"="+sessionCookie) {
+			t.Errorf("request Cookie = %q, want the cookie used to build Secret", got.cookie)
+		}
+		wantPrefix := buildSecret(sessionCookie, 10000000)
+		wantPrefix = wantPrefix[:len(wantPrefix)-8]
+		if !strings.HasPrefix(got.secret, wantPrefix) {
+			t.Errorf("request Secret = %q, want prefix derived from %q", got.secret, sessionCookie)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signed request did not reach the API")
+	}
+	select {
+	case <-invalidated:
+	case <-time.After(time.Second):
+		t.Fatal("session invalidation did not complete")
+	}
+}
+
+type pauseOnSecondCookieReadJar struct {
+	cookie   *http.Cookie
+	selected chan struct{}
+	release  chan struct{}
+
+	mu    sync.Mutex
+	reads int
+}
+
+func (j *pauseOnSecondCookieReadJar) SetCookies(_ *url.URL, _ []*http.Cookie) {}
+
+func (j *pauseOnSecondCookieReadJar) Cookies(_ *url.URL) []*http.Cookie {
+	j.mu.Lock()
+	j.reads++
+	read := j.reads
+	j.mu.Unlock()
+	if read == 2 {
+		close(j.selected)
+		<-j.release
+	}
+	return []*http.Cookie{j.cookie}
 }
 
 func TestSessionWaiterReturnsWhenRefreshContextIsCancelled(t *testing.T) {

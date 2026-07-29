@@ -199,12 +199,9 @@ func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDeta
 
 func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byte, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := c.ensureSessionForURL(ctx, endpoint); err != nil {
+		client, cookie, err := c.signedSessionSnapshot(ctx, endpoint)
+		if err != nil {
 			return nil, err
-		}
-		cookie := c.sessionCookie(endpoint)
-		if !validSessionCookie(cookie) {
-			return nil, fmt.Errorf("kuwo: missing valid session cookie")
 		}
 		nonce, err := randomNonce()
 		if err != nil {
@@ -229,7 +226,7 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 		query.Set("reqId", reqID)
 		requestURL.RawQuery = query.Encode()
 		req.URL = requestURL
-		resp, err := c.httpClient().Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("kuwo: request API: %w", err)
 		}
@@ -254,6 +251,22 @@ func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byt
 		return body, nil
 	}
 	return nil, fmt.Errorf("kuwo: session refresh retry exhausted")
+}
+
+func (c *Client) signedSessionSnapshot(ctx context.Context, endpoint string) (*http.Client, string, error) {
+	for refresh := 0; refresh < 2; refresh++ {
+		if err := c.ensureSessionForURL(ctx, endpoint); err != nil {
+			return nil, "", err
+		}
+		client, cookie := c.sessionClientAndCookie(endpoint)
+		if validSessionCookie(cookie) {
+			return client, cookie, nil
+		}
+		// An invalidation may replace the client/Jar pair after ensureSession
+		// returns. Re-enter session establishment instead of signing with an
+		// empty replacement jar.
+	}
+	return nil, "", fmt.Errorf("kuwo: missing valid session cookie")
 }
 
 func readLimited(body io.Reader) ([]byte, error) {

@@ -118,19 +118,30 @@ func (c *Client) refreshSession(ctx context.Context) error {
 }
 
 func (c *Client) sessionCookie(requestURL string) string {
-	if c == nil || c.httpClient() == nil || c.httpClient().Jar == nil {
-		return ""
+	_, cookie := c.sessionClientAndCookie(requestURL)
+	return cookie
+}
+
+func (c *Client) sessionClientAndCookie(requestURL string) (*http.Client, string) {
+	if c == nil {
+		return nil, ""
 	}
 	endpoint, err := url.Parse(requestURL)
 	if err != nil {
-		return ""
+		return nil, ""
 	}
-	for _, cookie := range c.httpClient().Jar.Cookies(endpoint) {
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	client := c.apiHTTPClient
+	if client == nil || client.Jar == nil {
+		return client, ""
+	}
+	for _, cookie := range client.Jar.Cookies(endpoint) {
 		if cookie.Name == kuwoSessionCookie {
-			return cookie.Value
+			return client, cookie.Value
 		}
 	}
-	return ""
+	return client, ""
 }
 
 func (c *Client) invalidateSession(requestURL string) {
