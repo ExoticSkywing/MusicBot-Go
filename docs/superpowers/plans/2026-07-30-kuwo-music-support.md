@@ -506,6 +506,8 @@ git commit -m "feat(kuwo): decode synchronized lyrics"
 - 创建：`plugins/kuwo/platform.go`
 - 创建：`plugins/kuwo/platform_test.go`
 - 创建：`plugins/kuwo/register.go`
+- 修改：`bot/telegram/handler/playlist.go`
+- 修改：`bot/telegram/handler/playlist_test.go`
 
 - [ ] **步骤 1：编写失败的平台能力和歌单分页测试**
 
@@ -528,7 +530,15 @@ func TestPlatformCapabilities(t *testing.T) {
 }
 ```
 
-歌单测试用 `platform.WithPlaylistOffset(ctx, 100)` 和 `platform.WithPlaylistLimit(ctx, 25)`，断言上游收到 `pn=5`、`rn=25`，结果保留总数、当前页曲目、创建者和规范 URL。完整歌单 envelope 与曲目 fixture 覆盖分页、总数、ID、时长和状态的字符串/数字/布尔/`null`/缺失/未知字段变体；无合法 ID 的条目被过滤，而错误 envelope 不能转换成空成功。
+歌单测试用 `platform.WithPlaylistOffset(ctx, 100)` 和 `platform.WithPlaylistLimit(ctx, 25)`，断言上游收到 `pn=5`、`rn=25`，结果保留总数、当前页曲目、创建者和规范 URL。再用非对齐 `offset=3, limit=2` 证明 helper 先请求 `pn=2,rn=2`、丢弃页内首项并在需要时续取 `pn=3`，最终仍返回从全局 offset 3 开始的两首。
+
+完整歌单 envelope 与曲目 fixture 覆盖：
+
+- `code`、`data.id`、`total`、曲目 RID 和时长的字符串/数字/布尔/`null`/缺失变体；
+- `desc` 为空时回退 `info`，创建者按 `userName→uname`，封面按 `img700→img500→img300→img`；
+- 付费曲目仍保留用于浏览，无合法 ID 的条目被过滤，未知复合字段被忽略；
+- `code=-1` 返回 `ErrNotFound`；缺失/非法 code、`data=null`、响应 ID 错配不能转换成空成功；
+- `code=200`、合法 metadata、空 `musicList` 是成功的末页。
 
 再断言：
 
@@ -536,6 +546,7 @@ func TestPlatformCapabilities(t *testing.T) {
 - `KuwoPlatform.GetPlaylist(ctx, id)` 从 context 读取分页后调用四参数 Client helper。
 - `GetArtist`、`GetAlbum`、`RecognizeAudio` 满足 `ErrUnsupported`。
 - nil Client 的可用能力返回 `ErrUnavailable`，不会 panic。
+- `shouldLazyLoadCollection("kuwo") == true`，否则总数大于默认 50 的歌单无法在 UI 继续翻页。
 
 - [ ] **步骤 2：运行测试验证正确失败**
 
@@ -551,7 +562,17 @@ Client helper 的签名：
 func (c *Client) GetPlaylist(ctx context.Context, playlistID string, offset, limit int) (*platform.Playlist, error)
 ```
 
-`limit<=0` 使用 50，限制在 1 到 100；页码为 `offset/limit + 1`。保留总曲数但只返回当前页。
+负 `offset` 归零；`limit<=0` 使用 50，最大 100。页码为 `offset/limit + 1`，且必须先规范化 limit 再做除法。对于 `offset%limit != 0`，丢弃首个上游页的页内前缀并在需要时请求下一页，精确返回最多 limit 首。每个成功页都要求 `code=200`、data 非空、响应 ID 与请求 ID 一致；`code=-1` 返回 `ErrNotFound`，合法空末页成功。
+
+歌单字段优先级为：
+
+```text
+Description: desc → info
+CoverURL:    img700 → img500 → img300 → img
+Creator:     userName → uname
+```
+
+`total` 必须存在且能解析为非负整数。歌单中的付费曲目仍转换用于浏览，下载层再决定是否可播放。
 
 `KuwoPlatform` 必须精确实现：
 
@@ -577,12 +598,14 @@ Hi-Res 能力为 false，因为最高实测是普通 FLAC；无损仍通过实�
 
 `register.go` 读取 `timeout`，非正数使用 20 秒，调用 `NewClient` 和 `SetAPIProxy(cfg.ResolveAPIProxyConfig("kuwo"))`，以 `platformplugins.Register("kuwo", buildContribution)` 注册。
 
+在 `bot/telegram/handler/playlist.go` 的 collection lazy-load 平台集合中加入 `kuwo`，并在 `playlist_test.go` 固定该行为。
+
 - [ ] **步骤 4：运行插件和竞态测试**
 
 运行：
 
 ```bash
-go test ./plugins/kuwo -count=1
+go test ./plugins/kuwo ./bot/telegram/handler -count=1
 go test -race ./plugins/kuwo ./bot/platform -count=1
 ```
 
@@ -591,7 +614,7 @@ go test -race ./plugins/kuwo ./bot/platform -count=1
 - [ ] **步骤 5：提交**
 
 ```bash
-git add plugins/kuwo/client.go plugins/kuwo/client_test.go plugins/kuwo/platform.go plugins/kuwo/platform_test.go plugins/kuwo/register.go
+git add plugins/kuwo/client.go plugins/kuwo/client_test.go plugins/kuwo/platform.go plugins/kuwo/platform_test.go plugins/kuwo/register.go bot/telegram/handler/playlist.go bot/telegram/handler/playlist_test.go
 git commit -m "feat(kuwo): add playlists and platform adapter"
 ```
 
