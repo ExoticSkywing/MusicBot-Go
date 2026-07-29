@@ -19,6 +19,7 @@ go.work
 # IDE
 .vscode/
 .idea/
+.worktrees/
 *.swp
 *.swo
 *~
