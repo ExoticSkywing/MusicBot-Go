@@ -9,6 +9,7 @@ func TestURLMatcher(t *testing.T) {
 		ok          bool
 	}{
 		{"https://www.kuwo.cn/play_detail/41378936", "41378936", true},
+		{"https://WWW.KUWO.CN./play_detail/41378936", "41378936", true},
 		{"https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=41378936", "41378936", true},
 		{"https://www.kuwo.cn.evil.example/play_detail/41378936", "", false},
 		{"https://www.kuwo.cn/play_detail/not-a-track", "", false},

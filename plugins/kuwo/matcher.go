@@ -79,7 +79,8 @@ func parseKuwoURL(rawURL string) (*url.URL, bool) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, false
 	}
-	switch strings.ToLower(parsed.Hostname()) {
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	switch hostname {
 	case "kuwo.cn", "www.kuwo.cn", "m.kuwo.cn":
 		return parsed, true
 	default:
