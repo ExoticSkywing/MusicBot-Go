@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"time"
 )
@@ -141,20 +142,21 @@ func (c *Client) invalidateSession(requestURL string) {
 	c.invalidateSessionLocked(requestURL)
 }
 
-func (c *Client) invalidateSessionLocked(requestURL string) {
+func (c *Client) invalidateSessionLocked(_ string) {
 	c.sessionExpires = time.Time{}
-	client := c.httpClient()
-	if client == nil || client.Jar == nil {
+	c.clientMu.Lock()
+	defer c.clientMu.Unlock()
+	if c.apiHTTPClient == nil {
 		return
 	}
-	homeURL, err := url.Parse(c.endpoints.home)
+	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return
 	}
-	client.Jar.SetCookies(homeURL, []*http.Cookie{{Name: kuwoSessionCookie, Value: "", Path: "/", MaxAge: -1}})
-	endpoint, err := url.Parse(requestURL)
-	if err != nil || endpoint.Path == "/" || endpoint.Path == "" {
-		return
-	}
-	client.Jar.SetCookies(endpoint, []*http.Cookie{{Name: kuwoSessionCookie, Value: "", Path: endpoint.Path, MaxAge: -1}})
+	// The API client owns this anonymous session jar. Replacing the client
+	// pointer avoids guessing cookie paths and leaves in-flight requests on
+	// their immutable client/jar pair.
+	client := *c.apiHTTPClient
+	client.Jar = jar
+	c.apiHTTPClient = &client
 }

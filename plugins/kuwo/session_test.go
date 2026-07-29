@@ -175,6 +175,68 @@ func TestSessionSignsEveryRequestWithLatestCookie(t *testing.T) {
 	}
 }
 
+func TestSessionInvalidationReplacesPathScopedCookieBeforeDetailRetry(t *testing.T) {
+	const (
+		initialRootCookie = "abcdefghijklmnop"
+		stalePathCookie   = "qrstuvwxyzABCDEF"
+		freshRootCookie   = "ZYXWVUTSRQPONMLK"
+	)
+
+	homeCalls, detailCalls := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			homeCalls++
+			cookie := initialRootCookie
+			if homeCalls == 2 {
+				cookie = freshRootCookie
+			}
+			http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: cookie, Path: "/"})
+		case "/api/www/music/musicInfo":
+			detailCalls++
+			secret := r.Header.Get("Secret")
+			wantCookie := initialRootCookie
+			if detailCalls == 2 {
+				wantCookie = freshRootCookie
+				if strings.Contains(r.Header.Get("Cookie"), stalePathCookie) {
+					t.Errorf("retry Cookie header retained stale path cookie: %q", r.Header.Get("Cookie"))
+				}
+			}
+			wantSecretPrefix := buildSecret(wantCookie, 10000000)
+			wantSecretPrefix = wantSecretPrefix[:len(wantSecretPrefix)-8]
+			if !strings.HasPrefix(secret, wantSecretPrefix) {
+				t.Errorf("detail Secret = %q, want prefix derived from %q", secret, wantCookie)
+			}
+			if detailCalls == 1 {
+				// No Path means cookiejar scopes this to /api/www/music.
+				http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: stalePathCookie})
+				_, _ = w.Write([]byte(`{"msg":"The request is illegal!"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"rid":"41378936","name":"Song"}}`))
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home:   server.URL + "/",
+		search: server.URL + "/search",
+		detail: server.URL + "/api/www/music/musicInfo",
+	})
+	track, err := client.GetTrack(context.Background(), "41378936")
+	if err != nil {
+		t.Fatalf("GetTrack() = %v", err)
+	}
+	if track == nil || track.ID != "41378936" {
+		t.Fatalf("GetTrack() = %#v, want requested track", track)
+	}
+	if homeCalls != 2 || detailCalls != 2 {
+		t.Fatalf("calls home=%d detail=%d, want 2 each", homeCalls, detailCalls)
+	}
+}
+
 func TestSessionWaiterReturnsWhenRefreshContextIsCancelled(t *testing.T) {
 	refreshStarted := make(chan struct{})
 	releaseRefresh := make(chan struct{})
