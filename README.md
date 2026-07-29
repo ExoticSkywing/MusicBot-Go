@@ -109,7 +109,7 @@ media_user_token = YOUR_TOKEN      # 登录 music.apple.com 后从浏览器 Cook
 | `/login <平台> auto on\|off\|status [秒]` | 自动续期开关 |
 | `/login applemusic lang [语言]` | 查看 / 设置 Apple Music 元数据语言 |
 | `/reload` | 重载配置与动态脚本插件 |
-| `/rmcache <平台>\|all` | 清除缓存 |
+| `/rmcache <平台>\|all` | 清除 Telegram 文件 ID 缓存（不操作临时媒体目录） |
 | `/wl add\|del\|list [chatID]` | 白名单管理（需 `EnableWhitelist = true`） |
 
 ## Apple Music 无损（Hi-Res/Atmos）

@@ -607,13 +607,17 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 	return strings.TrimSpace(truncated)
 }
 
-func cleanupFiles(paths ...string) {
+func cleanupFiles(paths ...string) error {
+	var cleanupErrs []error
 	for _, p := range paths {
 		if p == "" {
 			continue
 		}
-		_ = os.RemoveAll(p)
+		if err := os.RemoveAll(p); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove %q: %w", p, err))
+		}
 	}
+	return errors.Join(cleanupErrs...)
 }
 
 func buildMusicInfoText(ctx context.Context, songName, songAlbum, fileInfo, suffix string) string {

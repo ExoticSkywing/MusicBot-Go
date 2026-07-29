@@ -105,7 +105,10 @@ func suppressDownloadRejectedMessage(ctx context.Context) bool {
 	return ok && value
 }
 
-var errDownloadQueueOverloaded = errors.New("download queue overloaded")
+var (
+	errDownloadQueueOverloaded = errors.New("download queue overloaded")
+	errUploadShuttingDown      = errors.New("upload queue is shutting down")
+)
 
 // MusicHandler handles /music and related commands.
 type MusicHandler struct {
@@ -139,16 +142,24 @@ type MusicHandler struct {
 	UploadBot          *telego.Bot
 	RateLimiter        *telegram.RateLimiter
 	ResourceLimiter    *ResourceRateLimiter
+	// uploadLifecycleMu protects worker acceptance, active tasks, and shutdown.
+	uploadLifecycleMu sync.Mutex
+	uploadAccepting   bool
+	uploadCancel      context.CancelFunc
+	uploadWG          sync.WaitGroup
+	uploadTaskSeq     uint64
+	activeUploads     map[uint64]uploadTask
 	// queueMu protects queuedStatus/statusDirty state.
 	queueMu           sync.RWMutex
 	queuedStatus      []queuedStatus
 	statusDirty       bool
 	trackFetchGroup   singleflight.Group
 	downloadInfoGroup singleflight.Group
-	prepareGroup      singleflight.Group
-	// prepareMu protects preparedInFlight map only.
-	prepareMu        sync.Mutex
-	preparedInFlight map[string]*preparedArtifactState
+	// prepareMu protects preparedInFlight and prepareShuttingDown.
+	prepareMu           sync.Mutex
+	preparedInFlight    map[string]*preparedArtifactState
+	prepareShuttingDown bool
+	prepareWG           sync.WaitGroup
 	// inlineMu protects inlineInFlight map only.
 	inlineMu       sync.Mutex
 	inlineInFlight map[string]*inlineProcessCall
@@ -209,20 +220,23 @@ type DownloadQueueSnapshot struct {
 }
 
 type uploadTask struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	enqueuedAt time.Time
-	b          *telego.Bot
-	statusBot  *telego.Bot
-	statusMsg  *telego.Message
-	message    *telego.Message
-	songInfo   botpkg.SongInfo
-	musicPath  string
-	picPath    string
-	cleanup    []string
-	resultCh   chan uploadResult
-	onDone     func(uploadResult)
-	loc        *i18n.Localizer
+	id          uint64
+	ctx         context.Context
+	cancel      context.CancelFunc
+	enqueuedAt  time.Time
+	b           *telego.Bot
+	statusBot   *telego.Bot
+	statusMsg   *telego.Message
+	message     *telego.Message
+	songInfo    botpkg.SongInfo
+	musicPath   string
+	picPath     string
+	cleanup     []string
+	cleanupDone func()
+	finishOnce  *sync.Once
+	resultCh    chan uploadResult
+	onDone      func(uploadResult)
+	loc         *i18n.Localizer
 	// cacheHit marks a task whose status message already shows the localized
 	// "cache hit" text, so the worker must not overwrite it with "uploading".
 	// Replaces the previous fragile strings.Contains(hitCache) check, which
@@ -251,7 +265,10 @@ type inlineProcessCall struct {
 type preparedArtifactState struct {
 	waiters  int
 	ready    bool
+	done     chan struct{}
 	artifact *preparedArtifact
+	err      error
+	cancel   context.CancelFunc
 }
 
 type preparedArtifact struct {
@@ -276,6 +293,16 @@ func (h *MusicHandler) StartWorker(ctx context.Context) {
 	if h.CacheDir == "" {
 		h.CacheDir = "./cache"
 	}
+	if stats, err := CleanupStaleCacheEntries(h.CacheDir, 0); err != nil {
+		if h.Logger != nil {
+			h.Logger.Warn("failed to clean stale cache entries", "cache_dir", h.CacheDir, "error", err)
+		}
+	} else if h.Logger != nil && (stats.RemovedFiles > 0 || stats.RemovedDirectories > 0) {
+		h.Logger.Info("cleaned stale cache entries",
+			"cache_dir", h.CacheDir,
+			"removed_files", stats.RemovedFiles,
+			"removed_directories", stats.RemovedDirectories)
+	}
 	ensureDir(h.CacheDir)
 	if h.Limiter == nil {
 		h.Limiter = make(chan struct{}, 4)
@@ -289,10 +316,29 @@ func (h *MusicHandler) StartWorker(ctx context.Context) {
 	if h.UploadWorkerCount <= 0 {
 		h.UploadWorkerCount = 1
 	}
+
+	h.uploadLifecycleMu.Lock()
 	if h.UploadQueue == nil {
 		h.UploadQueue = make(chan uploadTask, h.UploadQueueSize)
+	}
+	if h.activeUploads == nil {
+		h.activeUploads = make(map[uint64]uploadTask)
+	}
+	startWorkers := h.uploadCancel == nil
+	var workerCtx context.Context
+	if startWorkers {
+		workerCtx, h.uploadCancel = context.WithCancel(detachContext(ctx))
+		h.uploadAccepting = true
+		h.uploadWG.Add(h.UploadWorkerCount)
+	}
+	h.uploadLifecycleMu.Unlock()
+
+	if startWorkers {
 		for i := 0; i < h.UploadWorkerCount; i++ {
-			go h.runUploadWorker(ctx)
+			go func() {
+				defer h.uploadWG.Done()
+				h.runUploadWorker(workerCtx)
+			}()
 		}
 	}
 	go h.runStatusRefresher(ctx)
@@ -1235,14 +1281,33 @@ func normalizeCleanupPaths(paths []string) []string {
 	return result
 }
 
-func (h *MusicHandler) releasePreparedWaiter(key string) {
-	if h == nil {
+func preparedAudioCleanupPaths(initialPath string) []string {
+	initialPath = strings.TrimSpace(initialPath)
+	if initialPath == "" {
+		return nil
+	}
+	base := strings.TrimSuffix(initialPath, filepath.Ext(initialPath))
+	return normalizeCleanupPaths([]string{
+		initialPath,
+		initialPath + ".parts",
+		initialPath + ".prog.m4a",
+		base + ".flac",
+		base + ".m4a",
+		base + ".mp4",
+		base + ".mp3",
+		base + ".extracting.flac",
+		base + ".rewritten.flac",
+	})
+}
+
+func (h *MusicHandler) releasePreparedWaiter(key string, expected *preparedArtifactState) {
+	if h == nil || expected == nil {
 		return
 	}
 	var cleanup []string
 	h.prepareMu.Lock()
 	state, ok := h.preparedInFlight[key]
-	if !ok {
+	if !ok || state != expected {
 		h.prepareMu.Unlock()
 		return
 	}
@@ -1257,8 +1322,27 @@ func (h *MusicHandler) releasePreparedWaiter(key string) {
 	}
 	h.prepareMu.Unlock()
 	if len(cleanup) > 0 {
-		cleanupFiles(cleanup...)
+		if err := cleanupFiles(cleanup...); err != nil && h.Logger != nil {
+			h.Logger.Warn("failed to clean prepared artifacts", "key", key, "error", err)
+		}
 	}
+}
+
+func (h *MusicHandler) preparedRelease(key string, state *preparedArtifactState) func() {
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			h.releasePreparedWaiter(key, state)
+		})
+	}
+}
+
+func (h *MusicHandler) preparedDownloadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := defaultMusicProcessTimeout
+	if h != nil && h.ProcessTimeout > 0 {
+		timeout = h.ProcessTimeout
+	}
+	return context.WithTimeout(detachContext(ctx), timeout)
 }
 
 func (h *MusicHandler) acquirePreparedMedia(
@@ -1276,91 +1360,135 @@ func (h *MusicHandler) acquirePreparedMedia(
 	if h == nil {
 		return "", "", nil, errors.New("music handler not configured")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	key := fmt.Sprintf("prepared:%s:%s:%s", strings.TrimSpace(platformName), strings.TrimSpace(trackID), strings.TrimSpace(quality))
 
+	var sharedCtx context.Context
+	var sharedCancel context.CancelFunc
+	startDownload := false
 	h.prepareMu.Lock()
+	if h.prepareShuttingDown {
+		h.prepareMu.Unlock()
+		return "", "", nil, errUploadShuttingDown
+	}
 	if h.preparedInFlight == nil {
 		h.preparedInFlight = make(map[string]*preparedArtifactState)
 	}
 	state := h.preparedInFlight[key]
 	if state == nil {
-		state = &preparedArtifactState{}
+		sharedCtx, sharedCancel = h.preparedDownloadContext(ctx)
+		state = &preparedArtifactState{
+			done:   make(chan struct{}),
+			cancel: sharedCancel,
+		}
+		h.prepareWG.Add(1)
 		h.preparedInFlight[key] = state
+		startDownload = true
 	}
 	state.waiters++
+	if state.ready {
+		artifact := state.artifact
+		stateErr := state.err
+		h.prepareMu.Unlock()
+
+		if stateErr != nil {
+			h.releasePreparedWaiter(key, state)
+			return "", "", nil, stateErr
+		}
+		if artifact == nil {
+			h.releasePreparedWaiter(key, state)
+			return "", "", nil, errors.New("invalid prepared artifact state")
+		}
+		if err := ctx.Err(); err != nil {
+			h.releasePreparedWaiter(key, state)
+			return "", "", nil, err
+		}
+		applyPreparedSongInfo(songInfo, artifact.info)
+		return artifact.musicPath, artifact.picPath, h.preparedRelease(key, state), nil
+	}
+	done := state.done
 	h.prepareMu.Unlock()
 
-	resultCh := h.prepareGroup.DoChan(key, func() (interface{}, error) {
-		sharedCtx := detachContext(ctx)
+	if startDownload {
 		localSongInfo := botpkg.SongInfo{}
 		if songInfo != nil {
 			localSongInfo = *songInfo
 		}
-		musicPath, picPath, cleanupList, downloadErr := h.downloadAndPrepareFromPlatform(sharedCtx, plat, track, trackID, cloneDownloadInfo(info), msg, b, message, &localSongInfo, externalProgress)
+		downloadInfo := cloneDownloadInfo(info)
+		go func() {
+			defer h.prepareWG.Done()
+			defer sharedCancel()
 
-		artifact := &preparedArtifact{}
-		if downloadErr == nil {
-			artifact.musicPath = musicPath
-			artifact.picPath = picPath
-			artifact.info = capturePreparedSongInfo(&localSongInfo)
-			artifact.cleanup = normalizeCleanupPaths(append(cleanupList, musicPath, picPath))
-		} else {
-			cleanupFiles(normalizeCleanupPaths(append(cleanupList, musicPath, picPath))...)
-			artifact = nil
-		}
+			musicPath, picPath, cleanupList, downloadErr := h.downloadAndPrepareFromPlatform(sharedCtx, plat, track, trackID, downloadInfo, msg, b, message, &localSongInfo, externalProgress)
 
-		var cleanupNow []string
-		h.prepareMu.Lock()
-		state := h.preparedInFlight[key]
-		if state == nil {
-			state = &preparedArtifactState{}
-			h.preparedInFlight[key] = state
-		}
-		state.ready = true
-		state.artifact = artifact
-		if state.waiters == 0 {
-			if artifact != nil {
-				cleanupNow = append(cleanupNow, artifact.cleanup...)
+			artifact := &preparedArtifact{}
+			if downloadErr == nil {
+				artifact.musicPath = musicPath
+				artifact.picPath = picPath
+				artifact.info = capturePreparedSongInfo(&localSongInfo)
+				artifact.cleanup = normalizeCleanupPaths(append(cleanupList, musicPath, picPath))
+			} else {
+				if cleanupErr := cleanupFiles(normalizeCleanupPaths(append(cleanupList, musicPath, picPath))...); cleanupErr != nil && h.Logger != nil {
+					h.Logger.Warn("failed to clean unsuccessful prepared artifacts", "key", key, "error", cleanupErr)
+				}
+				artifact = nil
 			}
-			delete(h.preparedInFlight, key)
-		}
-		h.prepareMu.Unlock()
-		if len(cleanupNow) > 0 {
-			cleanupFiles(cleanupNow...)
-		}
 
-		if downloadErr != nil {
-			return nil, downloadErr
-		}
-		return artifact, nil
-	})
+			var cleanupNow []string
+			h.prepareMu.Lock()
+			state.ready = true
+			state.cancel = nil
+			if h.preparedInFlight[key] == state {
+				state.artifact = artifact
+				state.err = downloadErr
+				if state.waiters == 0 {
+					if artifact != nil {
+						cleanupNow = append(cleanupNow, artifact.cleanup...)
+					}
+					delete(h.preparedInFlight, key)
+				}
+			} else {
+				state.artifact = nil
+				state.err = errors.New("prepared artifact superseded")
+				if artifact != nil {
+					cleanupNow = append(cleanupNow, artifact.cleanup...)
+				}
+			}
+			close(state.done)
+			h.prepareMu.Unlock()
+			if len(cleanupNow) > 0 {
+				if err := cleanupFiles(cleanupNow...); err != nil && h.Logger != nil {
+					h.Logger.Warn("failed to clean unclaimed prepared artifacts", "key", key, "error", err)
+				}
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
-		h.releasePreparedWaiter(key)
+		h.releasePreparedWaiter(key, state)
 		return "", "", nil, ctx.Err()
-	case result := <-resultCh:
-		if result.Err != nil {
-			h.releasePreparedWaiter(key)
-			return "", "", nil, result.Err
+	case <-done:
+		h.prepareMu.Lock()
+		artifact := state.artifact
+		stateErr := state.err
+		h.prepareMu.Unlock()
+		if stateErr != nil {
+			h.releasePreparedWaiter(key, state)
+			return "", "", nil, stateErr
 		}
-		artifact, ok := result.Val.(*preparedArtifact)
-		if !ok || artifact == nil {
-			h.releasePreparedWaiter(key)
+		if artifact == nil {
+			h.releasePreparedWaiter(key, state)
 			return "", "", nil, errors.New("invalid prepared artifact result")
 		}
 		if err := ctx.Err(); err != nil {
-			h.releasePreparedWaiter(key)
+			h.releasePreparedWaiter(key, state)
 			return "", "", nil, err
 		}
 		applyPreparedSongInfo(songInfo, artifact.info)
-		var releaseOnce sync.Once
-		releaseFn := func() {
-			releaseOnce.Do(func() {
-				h.releasePreparedWaiter(key)
-			})
-		}
-		return artifact.musicPath, artifact.picPath, releaseFn, nil
+		return artifact.musicPath, artifact.picPath, h.preparedRelease(key, state), nil
 	}
 }
 
@@ -1576,8 +1704,21 @@ func (h *MusicHandler) shouldSilentAutoFetch(message *telego.Message) bool {
 	return !strings.HasPrefix(strings.TrimSpace(message.Text), "/")
 }
 
-func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat platform.Platform, track *platform.Track, trackID string, info *platform.DownloadInfo, msg *telego.Message, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, externalProgress func(written, total int64)) (string, string, []string, error) {
-	cleanupList := make([]string, 0, 4)
+func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat platform.Platform, track *platform.Track, trackID string, info *platform.DownloadInfo, msg *telego.Message, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, externalProgress func(written, total int64)) (musicPath string, picPath string, cleanupList []string, retErr error) {
+	cleanupList = make([]string, 0, 4)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			retErr = fmt.Errorf("prepare media panic: %v", recovered)
+			musicPath = ""
+			picPath = ""
+			if cleanupErr := cleanupFiles(cleanupList...); cleanupErr != nil && h.Logger != nil {
+				h.Logger.Warn("failed to clean media after prepare panic", "trackID", trackID, "error", cleanupErr)
+			}
+			if h.Logger != nil {
+				h.Logger.Error("prepare media panic", "trackID", trackID, "error", recovered, "stack", string(debug.Stack()))
+			}
+		}
+	}()
 	if h.DownloadService == nil {
 		return "", "", cleanupList, errors.New("download service not configured")
 	}
@@ -1600,6 +1741,7 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	stamp := time.Now().UnixMicro()
 	musicFileName := fmt.Sprintf("%d-%s.%s", stamp, sanitizeFileName(track.Title), info.Format)
 	filePath := filepath.Join(h.CacheDir, musicFileName)
+	cleanupList = append(cleanupList, preparedAudioCleanupPaths(filePath)...)
 
 	lastProgressText := ""
 	lastProgressAt := time.Time{}
@@ -1661,7 +1803,9 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	}
 
 	if _, err := h.DownloadService.Download(ctx, info, filePath, progress); err != nil {
-		_ = os.Remove(filePath)
+		if cleanupErr := cleanupFiles(cleanupList...); cleanupErr != nil && h.Logger != nil {
+			h.Logger.Warn("failed to clean download artifacts", "path", filePath, "error", cleanupErr)
+		}
 		return "", "", cleanupList, err
 	}
 	if h != nil && h.Logger != nil {
@@ -1731,6 +1875,7 @@ func (h *MusicHandler) prepareCoverFiles(ctx context.Context, track *platform.Tr
 
 	picPath := filepath.Join(h.CacheDir, fmt.Sprintf("%d-%s", stamp, path.Base(coverURL)))
 	if _, err := h.DownloadService.Download(ctx, &platform.DownloadInfo{URL: coverURL, Size: 0}, picPath, nil); err != nil {
+		_ = os.Remove(picPath)
 		if h.Logger != nil {
 			h.Logger.Warn("failed to download cover", "track", trackID, "url", coverURL, "error", err)
 		}
@@ -1817,7 +1962,6 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 	}
 	resultCh := make(chan uploadResult, 1)
 	uploadCtx, cancel := context.WithCancel(baseCtx)
-	cleanupCtx := detachContext(baseCtx)
 	uploadBot := b
 	if h.UploadBot != nil {
 		uploadBot = h.UploadBot
@@ -1828,21 +1972,25 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 	taskMessage := message
 	statusMessage := statusMsg
 	task := uploadTask{
-		ctx:        uploadCtx,
-		cancel:     cancel,
-		enqueuedAt: time.Now(),
-		b:          uploadBot,
-		statusBot:  statusBot,
-		statusMsg:  statusMsg,
-		message:    message,
-		songInfo:   songCopy,
-		musicPath:  musicPath,
-		picPath:    picPath,
-		cleanup:    cleanupCopy,
-		resultCh:   resultCh,
-		loc:        reqLoc,
-		cacheHit:   musicPath == "",
+		ctx:         uploadCtx,
+		cancel:      cancel,
+		enqueuedAt:  time.Now(),
+		b:           uploadBot,
+		statusBot:   statusBot,
+		statusMsg:   statusMsg,
+		message:     message,
+		songInfo:    songCopy,
+		musicPath:   musicPath,
+		picPath:     picPath,
+		cleanup:     cleanupCopy,
+		cleanupDone: cleanupDone,
+		finishOnce:  &sync.Once{},
+		resultCh:    resultCh,
+		loc:         reqLoc,
+		cacheHit:    musicPath == "",
 		onDone: func(result uploadResult) {
+			cleanupCtx, cleanupCancel := context.WithTimeout(detachContext(baseCtx), 30*time.Second)
+			defer cleanupCancel()
 			if result.message != nil && result.message.Audio != nil {
 				songCopy.FileID = result.message.Audio.FileID
 				if result.message.Audio.Thumbnail != nil {
@@ -1873,27 +2021,192 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 					statusMessage = editMessageTextOrSend(cleanupCtx, statusBot, h.RateLimiter, statusMessage, taskMessage.Chat.ID, buildMusicInfoText(cleanupCtx, songCopy.SongName, songCopy.SongAlbum, formatFileInfo(songCopy.FileExt, songCopy.MusicSize), userVisibleDownloadError(cleanupCtx, result.err)))
 				}
 			}
-			cleanupFiles(cleanupCopy...)
-			if cleanupDone != nil {
-				cleanupDone()
-			}
 		},
 	}
+
+	h.uploadLifecycleMu.Lock()
+	if !h.uploadAccepting || h.UploadQueue == nil {
+		h.uploadLifecycleMu.Unlock()
+		h.finishUploadTask(task, uploadResult{err: errUploadShuttingDown}, false)
+		return errUploadShuttingDown
+	}
+	h.uploadTaskSeq++
+	task.id = h.uploadTaskSeq
 	select {
 	case h.UploadQueue <- task:
+		h.uploadLifecycleMu.Unlock()
 		if h.Logger != nil && h.EnableQueueObservability {
 			h.Logger.Debug("upload task enqueued", "platform", platformName, "trackID", trackID, "queue_len", len(h.UploadQueue), "queue_cap", cap(h.UploadQueue))
 		}
 		return nil
 	default:
-		cancel()
+		h.uploadLifecycleMu.Unlock()
 		if h.Logger != nil && h.EnableQueueObservability {
 			h.Logger.Warn("upload queue full", "platform", platformName, "trackID", trackID, "queue_len", len(h.UploadQueue), "queue_cap", cap(h.UploadQueue))
 		}
-		if cleanupDone != nil {
-			cleanupDone()
+		err := errors.New("upload queue is full")
+		h.finishUploadTask(task, uploadResult{err: err}, false)
+		return err
+	}
+}
+
+func (h *MusicHandler) beginActiveUpload(task uploadTask) bool {
+	if h == nil {
+		return false
+	}
+	h.uploadLifecycleMu.Lock()
+	defer h.uploadLifecycleMu.Unlock()
+	if !h.uploadAccepting {
+		return false
+	}
+	if h.activeUploads == nil {
+		h.activeUploads = make(map[uint64]uploadTask)
+	}
+	h.activeUploads[task.id] = task
+	return true
+}
+
+func (h *MusicHandler) endActiveUpload(taskID uint64) {
+	if h == nil {
+		return
+	}
+	h.uploadLifecycleMu.Lock()
+	delete(h.activeUploads, taskID)
+	h.uploadLifecycleMu.Unlock()
+}
+
+func (h *MusicHandler) finishUploadTask(task uploadTask, result uploadResult, runSideEffects bool) {
+	if h == nil {
+		return
+	}
+	finishOnce := task.finishOnce
+	if finishOnce == nil {
+		finishOnce = &sync.Once{}
+	}
+	finishOnce.Do(func() {
+		if task.cancel != nil {
+			task.cancel()
 		}
-		return errors.New("upload queue is full")
+		if err := cleanupFiles(task.cleanup...); err != nil && h.Logger != nil {
+			h.Logger.Warn("failed to clean upload artifacts",
+				"platform", task.songInfo.Platform,
+				"trackID", task.songInfo.TrackID,
+				"error", err)
+		}
+		if task.cleanupDone != nil {
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil && h.Logger != nil {
+						h.Logger.Error("upload cleanup callback panic",
+							"platform", task.songInfo.Platform,
+							"trackID", task.songInfo.TrackID,
+							"error", recovered,
+							"stack", string(debug.Stack()))
+					}
+				}()
+				task.cleanupDone()
+			}()
+		}
+
+		h.removeQueuedStatus(task.statusMsg)
+		if task.resultCh != nil {
+			select {
+			case task.resultCh <- result:
+			default:
+			}
+		}
+
+		if runSideEffects && task.onDone != nil {
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil && h.Logger != nil {
+						h.Logger.Error("upload completion callback panic",
+							"platform", task.songInfo.Platform,
+							"trackID", task.songInfo.TrackID,
+							"error", recovered,
+							"stack", string(debug.Stack()))
+					}
+				}()
+				task.onDone(result)
+			}()
+		}
+	})
+}
+
+// BeginUploadShutdown stops accepting uploads, cancels active work, and
+// immediately finalizes queued work. It is safe to call more than once.
+func (h *MusicHandler) BeginUploadShutdown() {
+	if h == nil {
+		return
+	}
+
+	h.uploadLifecycleMu.Lock()
+	h.uploadAccepting = false
+	workerCancel := h.uploadCancel
+	active := make([]uploadTask, 0, len(h.activeUploads))
+	for _, task := range h.activeUploads {
+		active = append(active, task)
+	}
+	h.uploadLifecycleMu.Unlock()
+
+	if workerCancel != nil {
+		workerCancel()
+	}
+	for _, task := range active {
+		if task.cancel != nil {
+			task.cancel()
+		}
+	}
+
+	for {
+		select {
+		case task, ok := <-h.UploadQueue:
+			if !ok {
+				goto queueDrained
+			}
+			h.finishUploadTask(task, uploadResult{err: errUploadShuttingDown}, false)
+		default:
+			goto queueDrained
+		}
+	}
+
+queueDrained:
+	h.prepareMu.Lock()
+	h.prepareShuttingDown = true
+	prepareCancels := make([]context.CancelFunc, 0, len(h.preparedInFlight))
+	for _, state := range h.preparedInFlight {
+		if state != nil && state.cancel != nil {
+			prepareCancels = append(prepareCancels, state.cancel)
+		}
+	}
+	h.prepareMu.Unlock()
+	for _, cancel := range prepareCancels {
+		cancel()
+	}
+}
+
+// ShutdownUploads always initiates cleanup, then waits for upload workers.
+// The context limits only the wait; it never suppresses the cleanup phase.
+func (h *MusicHandler) ShutdownUploads(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	h.BeginUploadShutdown()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.uploadWG.Wait()
+		h.prepareWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1949,6 +2262,35 @@ func (h *MusicHandler) runStatusRefresher(ctx context.Context) {
 }
 
 func (h *MusicHandler) processUploadTask(task uploadTask) {
+	if !h.beginActiveUpload(task) {
+		h.finishUploadTask(task, uploadResult{err: errUploadShuttingDown}, false)
+		return
+	}
+	defer h.endActiveUpload(task.id)
+
+	result := uploadResult{}
+	limiterHeld := false
+	defer func() {
+		if limiterHeld {
+			<-h.UploadLimiter
+		}
+		if recovered := recover(); recovered != nil {
+			if h.Logger != nil {
+				h.Logger.Error("upload task panic",
+					"platform", task.songInfo.Platform, "trackID", task.songInfo.TrackID,
+					"error", recovered, "stack", string(debug.Stack()))
+			}
+			result = uploadResult{err: fmt.Errorf("upload task panic: %v", recovered)}
+		}
+		runSideEffects := true
+		if task.ctx != nil && task.ctx.Err() != nil {
+			h.uploadLifecycleMu.Lock()
+			runSideEffects = h.uploadAccepting
+			h.uploadLifecycleMu.Unlock()
+		}
+		h.finishUploadTask(task, result, runSideEffects)
+	}()
+
 	if h != nil && h.Logger != nil && h.EnableQueueObservability && !task.enqueuedAt.IsZero() {
 		wait := time.Since(task.enqueuedAt)
 		if wait > 2*time.Second {
@@ -1958,49 +2300,18 @@ func (h *MusicHandler) processUploadTask(task uploadTask) {
 
 	h.dequeueQueuedStatus(task.statusMsg)
 
-	// finalize 统一收尾：调用 onDone（写库/删状态消息/清理临时文件）、从状态队列移除、
-	// 唤醒可能的等待方。无论正常返回还是 panic，都必须恰好执行一次，否则会泄漏临时文件。
-	var finalized bool
-	finalize := func(result uploadResult) {
-		if finalized {
-			return
-		}
-		finalized = true
-		if task.onDone != nil {
-			task.onDone(result)
-		}
-		h.removeQueuedStatus(task.statusMsg)
-		if task.resultCh != nil {
-			task.resultCh <- result
-		}
-	}
-
 	if task.ctx != nil {
 		select {
 		case <-task.ctx.Done():
-			finalize(uploadResult{err: task.ctx.Err()})
+			result.err = task.ctx.Err()
 			return
 		case h.UploadLimiter <- struct{}{}:
+			limiterHeld = true
 		}
 	} else {
 		h.UploadLimiter <- struct{}{}
+		limiterHeld = true
 	}
-
-	// 已持有 UploadLimiter 令牌：用 defer 保证 panic 时也能释放令牌并完成收尾，
-	// 否则唯一的上传 worker 会随 goroutine 一同死亡、令牌永久泄漏。
-	result := uploadResult{}
-	defer func() {
-		<-h.UploadLimiter
-		if r := recover(); r != nil {
-			if h.Logger != nil {
-				h.Logger.Error("upload task panic",
-					"platform", task.songInfo.Platform, "trackID", task.songInfo.TrackID,
-					"error", r, "stack", string(debug.Stack()))
-			}
-			result = uploadResult{err: fmt.Errorf("upload task panic: %v", r)}
-		}
-		finalize(result)
-	}()
 
 	if task.statusMsg != nil && task.statusBot != nil {
 		// On a cache hit the status message already shows the localized "cache hit"
@@ -3477,7 +3788,12 @@ func normalizeExtractedAudioPath(filePath, currentExt string) (string, string) {
 		newPath := strings.TrimSuffix(trimmedPath, filepath.Ext(trimmedPath)) + ".flac"
 		if newPath != trimmedPath {
 			if err := extractEmbeddedFLAC(ctx, trimmedPath, newPath); err == nil {
-				return newPath, "flac"
+				if removeErr := os.Remove(trimmedPath); removeErr == nil || os.IsNotExist(removeErr) {
+					return newPath, "flac"
+				}
+				_ = os.Remove(newPath)
+			} else {
+				_ = os.Remove(newPath)
 			}
 		}
 		return trimmedPath, "flac"
@@ -3485,7 +3801,12 @@ func normalizeExtractedAudioPath(filePath, currentExt string) (string, string) {
 		newPath := strings.TrimSuffix(trimmedPath, filepath.Ext(trimmedPath)) + ".m4a"
 		if newPath != trimmedPath {
 			if err := remuxExtractedAudioM4A(ctx, trimmedPath, newPath); err == nil {
-				return newPath, "m4a"
+				if removeErr := os.Remove(trimmedPath); removeErr == nil || os.IsNotExist(removeErr) {
+					return newPath, "m4a"
+				}
+				_ = os.Remove(newPath)
+			} else {
+				_ = os.Remove(newPath)
 			}
 		}
 		return trimmedPath, "m4a"

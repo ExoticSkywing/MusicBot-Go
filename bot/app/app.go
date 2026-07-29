@@ -46,6 +46,7 @@ type App struct {
 	PluginSettingDefinitions []botpkg.PluginSettingDefinition
 	Build                    BuildInfo
 	botHandler               *th.BotHandler
+	musicHandler             *handler.MusicHandler
 }
 
 func registerContribution(
@@ -490,6 +491,7 @@ func (a *App) Start(ctx context.Context) error {
 		PluginSettingDefinitions:  a.PluginSettingDefinitions,
 	}
 	musicHandler.Artist = &handler.ArtistHandler{PlatformManager: a.PlatformManager, RateLimiter: rateLimiter, ResourceLimiter: resourceLimiter, Logger: a.Logger}
+	a.musicHandler = musicHandler
 	musicHandler.StartWorker(ctx)
 
 	settingsHandler := &handler.SettingsHandler{
@@ -943,6 +945,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 		}
 		a.botHandler = nil
 	}
+	if a.musicHandler != nil {
+		a.musicHandler.BeginUploadShutdown()
+	}
 
 	if a.RecognizeService != nil {
 		if err := a.RecognizeService.Stop(); err != nil {
@@ -971,6 +976,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 			}
 		}
 		a.DownloadPool = nil
+	}
+	if a.musicHandler != nil {
+		if err := a.musicHandler.ShutdownUploads(ctx); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("shutdown upload workers: %w", err)
+			}
+		}
+		a.musicHandler = nil
 	}
 
 	// 关闭平台插件持有的后台守护协程（如 bilibili/kugou 的 Cookie 自动续期）。

@@ -40,7 +40,7 @@ func TestNormalizeExtractedAudioPath_FLACContainerToFLAC(t *testing.T) {
 		if err := os.WriteFile(gotDst, []byte("flac"), 0o644); err != nil {
 			return err
 		}
-		return os.Remove(gotSrc)
+		return nil
 	}
 	remuxExtractedAudioM4A = func(context.Context, string, string) error {
 		return errors.New("should not remux flac")
@@ -108,7 +108,7 @@ func TestNormalizeExtractedAudioPath_AACOrALACContainerToM4A(t *testing.T) {
 				if err := os.WriteFile(gotDst, []byte("m4a"), 0o644); err != nil {
 					return err
 				}
-				return os.Remove(gotSrc)
+				return nil
 			}
 
 			gotPath, gotExt := normalizeExtractedAudioPath(srcPath, "mp4")
@@ -126,5 +126,44 @@ func TestNormalizeExtractedAudioPath_AACOrALACContainerToM4A(t *testing.T) {
 				t.Fatalf("expected source removed, stat err = %v", err)
 			}
 		})
+	}
+}
+
+func TestNormalizeExtractedAudioPath_RemovesPartialOutputOnConversionFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "track.mp4")
+	dstPath := filepath.Join(tmpDir, "track.flac")
+	if err := os.WriteFile(srcPath, []byte("container"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	originalProbe := probeExtractedAudioCodec
+	originalExtract := extractEmbeddedFLAC
+	originalRemux := remuxExtractedAudioM4A
+	t.Cleanup(func() {
+		probeExtractedAudioCodec = originalProbe
+		extractEmbeddedFLAC = originalExtract
+		remuxExtractedAudioM4A = originalRemux
+	})
+
+	probeExtractedAudioCodec = func(string) (string, error) {
+		return "flac", nil
+	}
+	extractEmbeddedFLAC = func(_ context.Context, _, gotDst string) error {
+		if err := os.WriteFile(gotDst, []byte("partial"), 0o644); err != nil {
+			return err
+		}
+		return errors.New("conversion failed")
+	}
+
+	gotPath, gotExt := normalizeExtractedAudioPath(srcPath, "mp4")
+	if gotPath != srcPath || gotExt != "flac" {
+		t.Fatalf("fallback = (%q, %q), want (%q, flac)", gotPath, gotExt, srcPath)
+	}
+	if _, err := os.Stat(srcPath); err != nil {
+		t.Fatalf("source should be preserved after failed conversion: %v", err)
+	}
+	if _, err := os.Stat(dstPath); !os.IsNotExist(err) {
+		t.Fatalf("partial output should be removed, stat err = %v", err)
 	}
 }
