@@ -529,9 +529,9 @@ func (s *DownloadService) tryMultipartDownload(ctx context.Context, baseURL stri
 		_ = os.Remove(destPath)
 		return 0, fmt.Errorf("multipart download failed (will retry with single-thread): %w", err)
 	}
-	if info.Size > 0 && written < info.Size {
+	if info.Size > 0 && written != info.Size {
 		_ = os.Remove(destPath)
-		return 0, fmt.Errorf("incomplete multipart download: got %d bytes, expected %d", written, info.Size)
+		return 0, fmt.Errorf("multipart download size mismatch: got %d bytes, expected %d", written, info.Size)
 	}
 	return written, nil
 }

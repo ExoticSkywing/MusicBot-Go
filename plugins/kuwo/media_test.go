@@ -80,6 +80,7 @@ func TestValidateMediaURL(t *testing.T) {
 		"http://kw-er.kuwo.cn/a.flac",
 		"https://user@kw-er.kuwo.cn/a.flac",
 		"https://kw-er.kuwo.cn:443/a.flac",
+		"https://kw-er.kuwo.cn/a.flac?",
 		"https://kw-er.kuwo.cn/a.flac?token=secret",
 		"https://kw-er.kuwo.cn/a.flac#secret",
 		"https://kw-er.kuwo.cn.evil.test/a.flac",
@@ -540,6 +541,171 @@ func TestResolveDownloadTerminalIdentityAndTypeErrorsDoNotFallback(t *testing.T)
 			}
 			if webCalls != 0 {
 				t.Fatalf("web calls = %d", webCalls)
+			}
+		})
+	}
+}
+
+func TestResolveDownloadMalformedCriticalMobileFieldsAreTerminal(t *testing.T) {
+	fixtures := []struct {
+		name string
+		data string
+	}{
+		{"rid object", `"rid":{}`},
+		{"rid array", `"rid":[]`},
+		{"rid null", `"rid":null`},
+		{"rid missing", ``},
+		{"rid bool", `"rid":true`},
+		{"type object", `"type":{}`},
+		{"type array", `"type":[]`},
+		{"type null", `"type":null`},
+		{"type missing", ``},
+		{"type bool", `"type":false`},
+		{"type double zero", `"type":"00"`},
+		{"type plus zero", `"type":"+0"`},
+		{"type minus zero string", `"type":"-0"`},
+		{"type decimal zero string", `"type":"0.0"`},
+		{"type spaced zero", `"type":" 0 "`},
+		{"type numeric minus zero", `"type":-0`},
+		{"type numeric decimal zero", `"type":0.0`},
+		{"duration object", `"duration":{}`},
+		{"duration array", `"duration":[]`},
+		{"duration null", `"duration":null`},
+		{"duration missing", ``},
+		{"duration bool", `"duration":true`},
+	}
+
+	for _, tt := range fixtures {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := map[string]string{
+				"rid":      `"rid":41378936`,
+				"type":     `"type":0`,
+				"duration": `"duration":213`,
+			}
+			switch {
+			case strings.HasPrefix(tt.name, "rid "):
+				fields["rid"] = tt.data
+			case strings.HasPrefix(tt.name, "type "):
+				fields["type"] = tt.data
+			case strings.HasPrefix(tt.name, "duration "):
+				fields["duration"] = tt.data
+			default:
+				t.Fatalf("unclassified fixture %q", tt.name)
+			}
+			parts := []string{
+				fields["rid"],
+				`"url":"https://er-sycdn.kuwo.cn/mobile.mp3"`,
+				`"format":"mp3"`,
+				`"bitrate":128`,
+				fields["duration"],
+				fields["type"],
+			}
+			present := parts[:0]
+			for _, part := range parts {
+				if part != "" {
+					present = append(present, part)
+				}
+			}
+			fixture := `{"code":200,"data":{` + strings.Join(present, ",") + `}}`
+
+			var mobileCalls atomic.Int32
+			var webCalls atomic.Int32
+			var mediaCalls atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "www.kuwo.cn":
+					switch {
+					case req.URL.Path == "/":
+						return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+					case strings.Contains(req.URL.Path, "musicInfo"):
+						return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+					case strings.Contains(req.URL.Path, "playUrl"):
+						webCalls.Add(1)
+						return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+					}
+				case "mobi.kuwo.cn":
+					mobileCalls.Add(1)
+					return response(http.StatusOK, nil, []byte(fixture)), nil
+				case "er-sycdn.kuwo.cn":
+					mediaCalls.Add(1)
+					return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
+				}
+				t.Fatalf("unexpected request %s", req.URL)
+				return nil, nil
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+
+			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
+			if !errors.Is(err, platform.ErrUnavailable) {
+				t.Fatalf("error = %v, want ErrUnavailable", err)
+			}
+			if got := mobileCalls.Load(); got != 1 {
+				t.Fatalf("mobile calls = %d, want 1", got)
+			}
+			if got := webCalls.Load(); got != 0 {
+				t.Fatalf("web calls = %d, want 0", got)
+			}
+			if got := mediaCalls.Load(); got != 0 {
+				t.Fatalf("media calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		firstMetadata string
+	}{
+		{name: "bitrate object", firstMetadata: `"format":"mp3","bitrate":{}`},
+		{name: "format array", firstMetadata: `"format":[],"bitrate":320`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var mobileCalls []string
+			var mediaCalls atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "www.kuwo.cn":
+					if req.URL.Path == "/" {
+						return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+					}
+					return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+				case "mobi.kuwo.cn":
+					br := req.URL.Query().Get("br")
+					mobileCalls = append(mobileCalls, br)
+					if br == "320kmp3" {
+						body := `{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/first.mp3",` +
+							tt.firstMetadata + `,"duration":213,"type":0}}`
+						return response(http.StatusOK, nil, []byte(body)), nil
+					}
+					return response(http.StatusOK, nil, []byte(
+						`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/fallback.mp3","format":"mp3","bitrate":128,"duration":213,"type":"0"}}`,
+					)), nil
+				case "er-sycdn.kuwo.cn":
+					mediaCalls.Add(1)
+					return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
+				}
+				t.Fatalf("unexpected request %s", req.URL)
+				return nil, nil
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+
+			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
+			if err != nil {
+				t.Fatalf("GetDownloadInfo() = %v", err)
+			}
+			if info.Quality != platform.QualityStandard || info.Bitrate != 128 {
+				t.Fatalf("info = %#v", info)
+			}
+			if !slices.Equal(mobileCalls, []string{"320kmp3", "128kmp3"}) {
+				t.Fatalf("mobile calls = %v", mobileCalls)
+			}
+			if got := mediaCalls.Load(); got != 2 {
+				t.Fatalf("media range calls = %d, want 2 for the verified fallback only", got)
 			}
 		})
 	}

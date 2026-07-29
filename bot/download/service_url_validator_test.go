@@ -96,6 +96,77 @@ func TestDownloadSinglePreservesKnownSizeAndRejectsAnyMismatch(t *testing.T) {
 	}
 }
 
+func TestDownloadMultipartPreservesKnownSizeAndRejectsLongerSource(t *testing.T) {
+	const expectedSize = int64(9)
+	payload := []byte("0123456789")
+	for _, tt := range []struct {
+		name           string
+		headStatus     int
+		headSize       int
+		supportsRange  bool
+		rangeTotal     int
+		extraRangeByte bool
+	}{
+		{name: "HEAD longer without ranges", headStatus: http.StatusOK, headSize: len(payload)},
+		{name: "HEAD longer with ranges", headStatus: http.StatusOK, headSize: len(payload), supportsRange: true},
+		{name: "written longer without ranges", headStatus: http.StatusOK, headSize: int(expectedSize)},
+		{name: "range total longer", headStatus: http.StatusOK, headSize: int(expectedSize), supportsRange: true, rangeTotal: len(payload)},
+		{name: "range body longer", headStatus: http.StatusOK, headSize: int(expectedSize), supportsRange: true, rangeTotal: int(expectedSize), extraRangeByte: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					if tt.supportsRange {
+						w.Header().Set("Accept-Ranges", "bytes")
+					}
+					if tt.headSize > 0 {
+						w.Header().Set("Content-Length", fmt.Sprint(tt.headSize))
+					}
+					w.WriteHeader(tt.headStatus)
+					return
+				}
+				if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+					var start, end int
+					if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+						t.Fatalf("Range = %q", rangeHeader)
+					}
+					total := len(payload)
+					if tt.rangeTotal > 0 {
+						total = tt.rangeTotal
+					}
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write(payload[start : end+1])
+					if tt.extraRangeByte {
+						_, _ = w.Write(payload[end+1 : end+2])
+					}
+					return
+				}
+				w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+				_, _ = w.Write(payload)
+			}))
+			defer server.Close()
+
+			info := &platform.DownloadInfo{
+				URL:     server.URL,
+				Headers: map[string]string{"X-Media-Policy": "verified"},
+				Size:    expectedSize,
+			}
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := newPolicyTestService(true).Download(context.Background(), info, dest, nil)
+			if err == nil {
+				t.Fatalf("Download() succeeded with %d bytes", written)
+			}
+			if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("mismatched destination still exists: %v", statErr)
+			}
+			if info.Size != expectedSize {
+				t.Fatalf("known size overwritten to %d, want %d", info.Size, expectedSize)
+			}
+		})
+	}
+}
+
 func TestDownloadURLValidatorChecksInitialAndRedirectTargets(t *testing.T) {
 	var finalHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

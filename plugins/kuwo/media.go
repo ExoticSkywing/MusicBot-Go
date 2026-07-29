@@ -81,7 +81,7 @@ func validateMediaURL(rawURL, format string) error {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return errors.New("kuwo: invalid media URL")
 	}
-	if parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if parsed.User != nil || parsed.Port() != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("kuwo: unsafe media URL")
 	}
 	if parsed.Host != parsed.Hostname() {
@@ -325,13 +325,45 @@ type mobilePlayResponse struct {
 	Data mobilePlayData `json:"data"`
 }
 
+// mobileJSONValue deliberately preserves composite and null values. The shared
+// jsonScalar rejects composites during decoding, which is the right default for
+// Kuwo's other response models. Mobile play responses need field-level
+// classification instead: malformed identity, type, or duration values are
+// terminal, while malformed quality metadata may still fall back to another
+// candidate.
+type mobileJSONValue struct {
+	raw json.RawMessage
+}
+
+func (v *mobileJSONValue) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	v.raw = append(v.raw[:0], trimmed...)
+	return nil
+}
+
+func (v mobileJSONValue) scalar() jsonScalar {
+	return jsonScalar{raw: v.raw}
+}
+
+// canonicalMediaTypeZero accepts only the numeric token 0 or a JSON string
+// whose value is exactly "0". In particular, numeric/string spellings such as
+// -0, 0.0, "+0", "00", and "-0" are not canonical mobile media types.
+func (v mobileJSONValue) canonicalMediaTypeZero() bool {
+	raw := bytes.TrimSpace(v.raw)
+	if bytes.Equal(raw, []byte("0")) {
+		return true
+	}
+	var text string
+	return json.Unmarshal(raw, &text) == nil && text == "0"
+}
+
 type mobilePlayData struct {
-	RID      jsonScalar `json:"rid"`
-	URL      jsonScalar `json:"url"`
-	Format   jsonScalar `json:"format"`
-	Bitrate  jsonScalar `json:"bitrate"`
-	Duration jsonScalar `json:"duration"`
-	Type     jsonScalar `json:"type"`
+	RID      mobileJSONValue `json:"rid"`
+	URL      mobileJSONValue `json:"url"`
+	Format   mobileJSONValue `json:"format"`
+	Bitrate  mobileJSONValue `json:"bitrate"`
+	Duration mobileJSONValue `json:"duration"`
+	Type     mobileJSONValue `json:"type"`
 }
 
 func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
@@ -453,15 +485,14 @@ func (c *Client) resolveMobileDownload(ctx context.Context, detail *trackDetail,
 }
 
 func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDetail, candidate mobileQuality, data mobilePlayData) (*platform.DownloadInfo, error) {
-	rid := normalizeRID(scalarText(data.RID))
+	rid := normalizeRID(scalarText(data.RID.scalar()))
 	if rid == "" || rid != detail.ID {
 		return nil, terminalUnavailable(errTrackIdentityMismatch)
 	}
-	mediaType, ok := data.Type.Int64()
-	if !ok || mediaType != 0 {
+	if !data.Type.canonicalMediaTypeZero() {
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
-	durationSeconds, ok := data.Duration.Int64()
+	durationSeconds, ok := data.Duration.scalar().Int64()
 	if !ok || durationSeconds <= 0 {
 		return nil, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
 	}
@@ -469,18 +500,18 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	if !durationsMatch(duration, detail.Duration) {
 		return nil, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
 	}
-	declaredBitrate, bitrateOK := data.Bitrate.Int64()
+	declaredBitrate, bitrateOK := data.Bitrate.scalar().Int64()
 	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
 	if !bitrateOK || declaredBitrate != int64(candidate.bitrate) {
 		return nil, errors.New("kuwo: candidate bitrate mismatch")
 	}
-	declaredFormat := strings.ToLower(scalarText(data.Format))
+	declaredFormat := strings.ToLower(scalarText(data.Format.scalar()))
 	if declaredFormat == "" || declaredFormat != candidate.format {
 		return nil, errors.New("kuwo: candidate format mismatch")
 	}
-	rawURL, err := normalizeMediaURL(scalarText(data.URL), candidate.format)
+	rawURL, err := normalizeMediaURL(scalarText(data.URL.scalar()), candidate.format)
 	if err != nil {
 		if errors.Is(err, errUntrustedMediaHost) {
 			return nil, terminalUnavailable(errUntrustedMediaHost)

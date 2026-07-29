@@ -177,6 +177,9 @@ func (md *MultipartDownloader) Download(ctx context.Context, rawURL string, info
 	if err != nil {
 		return md.downloadSingle(ctx, rawURL, info, destPath, info.Size, progress)
 	}
+	if info.Size > 0 && contentLength > 0 && contentLength != info.Size {
+		return 0, fmt.Errorf("download content length mismatch: got %d bytes, expected %d", contentLength, info.Size)
+	}
 
 	totalSize := contentLength
 	if totalSize <= 0 && info.Size > 0 {
@@ -416,6 +419,15 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 	if resp.StatusCode == http.StatusOK {
 		return errRangeNotSupported
 	}
+	contentRange := resp.Header.Get("Content-Range")
+	expectedContentRange := fmt.Sprintf("bytes %d-%d/%d", part.start, part.end, tracker.total)
+	if contentRange != expectedContentRange {
+		return fmt.Errorf("range content mismatch: got %q, expected %q", contentRange, expectedContentRange)
+	}
+	expectedSize := part.end - part.start + 1
+	if resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
+		return fmt.Errorf("range body size mismatch: got %d bytes, expected %d", resp.ContentLength, expectedSize)
+	}
 
 	// Create part file
 	file, err := os.Create(part.path)
@@ -433,7 +445,6 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 	defer bufPool.Put(bufp)
 	buf := *bufp
 	var written int64
-	expectedSize := part.end - part.start + 1
 
 	for {
 		if written >= expectedSize {
@@ -470,6 +481,13 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 			}
 			return err
 		}
+	}
+	extra, err := io.ReadAll(io.LimitReader(resp.Body, 1))
+	if err != nil {
+		return err
+	}
+	if len(extra) != 0 {
+		return fmt.Errorf("range body exceeds expected %d bytes", expectedSize)
 	}
 
 	// Verify part size
