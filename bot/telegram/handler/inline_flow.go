@@ -201,7 +201,7 @@ func runInlineMediaFlow(ctx context.Context, b *telego.Bot, deps inlineMediaFlow
 		songInfo, err := music.prepareInlineSongWithTimeoutFor(ctx, b, userID, chatID, userName, platformName, trackID, qualityOverride, progress, onQueued)
 		if err != nil {
 			if music.Logger != nil {
-				music.Logger.Error("failed to prepare inline song", "platform", platformName, "trackID", trackID, "error", err)
+				music.Logger.Error("failed to prepare inline song", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))
 			}
 			setInlineText(buildMusicInfoText(ctx, "", "", "", userVisibleDownloadError(ctx, err)), retryMarkup)
 			return

@@ -28,6 +28,74 @@ func newPolicyTestService(multipart bool) *DownloadService {
 	})
 }
 
+type downloadRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f downloadRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDownloadSinglePreservesKnownSizeAndRejectsAnyMismatch(t *testing.T) {
+	const expectedSize = int64(9)
+	for _, tt := range []struct {
+		name          string
+		contentLength int64
+		body          string
+		wantErr       bool
+	}{
+		{name: "declared short", contentLength: 5, body: "short", wantErr: true},
+		{name: "unknown short", contentLength: -1, body: "short", wantErr: true},
+		{name: "unknown long", contentLength: -1, body: "0123456789", wantErr: true},
+		{name: "exact", contentLength: expectedSize, body: "123456789"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var validatorCalls atomic.Int32
+			service := newPolicyTestService(false)
+			service.client.Transport = downloadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Header.Get("X-Media-Policy") != "verified" {
+					t.Fatalf("policy header = %q", req.Header.Get("X-Media-Policy"))
+				}
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        http.Header{"Content-Type": []string{"audio/flac"}},
+					Body:          io.NopCloser(strings.NewReader(tt.body)),
+					ContentLength: tt.contentLength,
+					Request:       req,
+				}, nil
+			})
+			info := &platform.DownloadInfo{
+				URL:     "https://kw-er.kuwo.cn/verified.flac",
+				Headers: map[string]string{"X-Media-Policy": "verified"},
+				Size:    expectedSize,
+				Format:  "flac",
+				ValidateURL: func(string) error {
+					validatorCalls.Add(1)
+					return nil
+				},
+			}
+			dest := filepath.Join(t.TempDir(), "audio.flac")
+			written, err := service.Download(context.Background(), info, dest, nil)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Download() succeeded with %d bytes", written)
+				}
+				if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("partial destination still exists: %v", statErr)
+				}
+			} else {
+				if err != nil || written != expectedSize {
+					t.Fatalf("Download() = (%d, %v), want (%d, nil)", written, err, expectedSize)
+				}
+			}
+			if info.Size != expectedSize {
+				t.Fatalf("known size overwritten to %d, want %d", info.Size, expectedSize)
+			}
+			if validatorCalls.Load() == 0 {
+				t.Fatal("URL validator was not called")
+			}
+		})
+	}
+}
+
 func TestDownloadURLValidatorChecksInitialAndRedirectTargets(t *testing.T) {
 	var finalHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

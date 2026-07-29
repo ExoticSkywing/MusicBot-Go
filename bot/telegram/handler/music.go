@@ -814,7 +814,7 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 
 	sendFailed := func(err error) {
 		if h.Logger != nil {
-			h.Logger.Error("failed to send music", "platform", platformName, "trackID", trackID, "error", err)
+			h.Logger.Error("failed to send music", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))
 		}
 		text := buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), userVisibleDownloadError(ctx, err))
 		status.Edit(text)

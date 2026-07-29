@@ -34,6 +34,7 @@ var (
 	errPreviewMedia          = errors.New("kuwo: preview media")
 	errTrackIdentityMismatch = errors.New("kuwo: track identity mismatch")
 	errTrackDurationMismatch = errors.New("kuwo: track duration mismatch")
+	errUntrustedMediaHost    = errors.New("kuwo: untrusted media host")
 	errTerminalCandidate     = errors.New("kuwo: terminal media error")
 )
 
@@ -89,10 +90,10 @@ func validateMediaURL(rawURL, format string) error {
 	host := strings.ToLower(parsed.Hostname())
 	labels := strings.Split(host, ".")
 	if len(labels) != 3 || labels[1] != "kuwo" || labels[2] != "cn" {
-		return errors.New("kuwo: untrusted media host")
+		return errUntrustedMediaHost
 	}
 	if !strings.HasPrefix(labels[0], "kw-") && !strings.HasSuffix(labels[0], "-sycdn") {
-		return errors.New("kuwo: untrusted media host")
+		return errUntrustedMediaHost
 	}
 	extension := strings.ToLower(path.Ext(parsed.EscapedPath()))
 	if extension != "."+strings.ToLower(format) || (extension != ".flac" && extension != ".mp3") {
@@ -481,10 +482,16 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	}
 	rawURL, err := normalizeMediaURL(scalarText(data.URL), candidate.format)
 	if err != nil {
+		if errors.Is(err, errUntrustedMediaHost) {
+			return nil, terminalUnavailable(errUntrustedMediaHost)
+		}
 		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, candidate.format, detail.Duration)
 	if err != nil {
+		if errors.Is(err, errUntrustedMediaHost) {
+			return nil, terminalUnavailable(errUntrustedMediaHost)
+		}
 		return nil, err
 	}
 	if candidate.format == "mp3" {
@@ -532,12 +539,22 @@ func (c *Client) resolveWebDownload(ctx context.Context, detail *trackDetail) (*
 		}
 		return nil, errors.New("kuwo: invalid web play response")
 	}
-	rawURL, err := normalizeMediaURL(scalarText(response.Data.URL), "mp3")
+	webURL := strings.TrimSpace(scalarText(response.Data.URL))
+	if webURL == "" {
+		return nil, terminalUnavailable()
+	}
+	rawURL, err := normalizeMediaURL(webURL, "mp3")
 	if err != nil {
+		if errors.Is(err, errUntrustedMediaHost) {
+			return nil, terminalUnavailable(errUntrustedMediaHost)
+		}
 		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, "mp3", detail.Duration)
 	if err != nil {
+		if errors.Is(err, errUntrustedMediaHost) {
+			return nil, terminalUnavailable(errUntrustedMediaHost)
+		}
 		return nil, err
 	}
 	if probe.bitrate < 102 || probe.bitrate > 154 {

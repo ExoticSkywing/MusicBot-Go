@@ -151,7 +151,7 @@ func (s *DownloadService) FillMetadata(info *platform.DownloadInfo, resp *http.R
 	isAudioContent := strings.HasPrefix(contentType, "audio/")
 	hasFilename := strings.Contains(contentDisposition, "filename")
 
-	if (isAudioContent || hasFilename) && resp.ContentLength > 0 {
+	if info.Size <= 0 && (isAudioContent || hasFilename) && resp.ContentLength > 0 {
 		info.Size = resp.ContentLength
 	}
 
@@ -349,9 +349,9 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 		for attempt := 0; attempt < s.maxRetries; attempt++ {
 			written, err := s.downloadOnce(ctx, baseURL, info, destPath, progress)
 			if err == nil {
-				if info.Size > 0 && written < info.Size {
+				if info.Size > 0 && written != info.Size {
 					_ = os.Remove(destPath)
-					return 0, fmt.Errorf("incomplete download: got %d bytes, expected %d", written, info.Size)
+					return 0, fmt.Errorf("download size mismatch: got %d bytes, expected %d", written, info.Size)
 				}
 				if s.checkMD5 && info.MD5 != "" {
 					if ok, err := util.VerifyMD5(destPath, info.MD5); err != nil || !ok {
@@ -553,6 +553,10 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
+	expectedSize := info.Size
+	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
+		return 0, fmt.Errorf("download content length mismatch: got %d bytes, expected %d", resp.ContentLength, expectedSize)
+	}
 
 	s.FillMetadata(info, resp)
 
@@ -592,6 +596,10 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	if written == 0 {
 		_ = os.Remove(destPath)
 		return 0, errors.New("download returned empty file")
+	}
+	if expectedSize > 0 && written != expectedSize {
+		_ = os.Remove(destPath)
+		return 0, fmt.Errorf("download size mismatch: got %d bytes, expected %d", written, expectedSize)
 	}
 	return written, nil
 }
