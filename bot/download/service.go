@@ -52,6 +52,7 @@ type downloadPolicy struct {
 
 type downloadPolicyContextKey struct{}
 type prevalidatedURLContextKey struct{}
+type downloadOwnedHeadersContextKey struct{}
 
 type DownloadServiceOptions struct {
 	Timeout              time.Duration
@@ -151,6 +152,9 @@ func setDownloadPolicyHeaders(req *http.Request, headers map[string]string) {
 		req.Header = make(http.Header)
 	}
 	for key, value := range headers {
+		if downloadOwnsHeader(req.Context(), key) {
+			continue
+		}
 		req.Header.Set(key, value)
 	}
 }
@@ -160,8 +164,57 @@ func deleteDownloadPolicyHeaders(req *http.Request, headers map[string]string) {
 		return
 	}
 	for key := range headers {
+		if downloadOwnsHeader(req.Context(), key) {
+			continue
+		}
 		req.Header.Del(key)
 	}
+}
+
+func withDownloadOwnedHeader(ctx context.Context, header string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	header = strings.ToLower(strings.TrimSpace(header))
+	if header == "" {
+		return ctx
+	}
+
+	owned := make(map[string]struct{})
+	if existing, ok := ctx.Value(downloadOwnedHeadersContextKey{}).(map[string]struct{}); ok {
+		for key := range existing {
+			owned[key] = struct{}{}
+		}
+	}
+	owned[header] = struct{}{}
+	return context.WithValue(ctx, downloadOwnedHeadersContextKey{}, owned)
+}
+
+func downloadOwnsHeader(ctx context.Context, header string) bool {
+	if ctx == nil {
+		return false
+	}
+	owned, ok := ctx.Value(downloadOwnedHeadersContextKey{}).(map[string]struct{})
+	if !ok {
+		return false
+	}
+	_, ok = owned[strings.ToLower(strings.TrimSpace(header))]
+	return ok
+}
+
+func wrapDownloadIntegrityReadError(err error, written, expected int64, subject string) error {
+	if err == nil || expected <= 0 || written == expected ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: %s read failed after %d of %d bytes: %w",
+		errDownloadIntegrity,
+		subject,
+		written,
+		expected,
+		err,
+	)
 }
 
 func redirectChainSameOrigin(req *http.Request, via []*http.Request) bool {
@@ -672,7 +725,7 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	written, err := util.CopyWithProgress(file, resp.Body, totalSize, throttledProgress)
 	closeErr := file.Close()
 	if err != nil {
-		return written, err
+		return written, wrapDownloadIntegrityReadError(err, written, expectedSize, "download body")
 	}
 	if closeErr != nil {
 		return written, closeErr

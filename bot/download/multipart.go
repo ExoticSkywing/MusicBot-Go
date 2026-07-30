@@ -255,7 +255,7 @@ func (md *MultipartDownloader) downloadSingle(ctx context.Context, rawURL string
 			if readErr == io.EOF {
 				break
 			}
-			return written, readErr
+			return written, wrapDownloadIntegrityReadError(readErr, written, expectedTotal, "download body")
 		}
 	}
 
@@ -323,9 +323,9 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 	// Download parts concurrently
 	parts := make([]*partDownload, numParts)
 	partCh := make(chan int, numParts)
-	errCh := make(chan error, numParts)
 	var wg sync.WaitGroup
 	var errOnce sync.Once
+	var firstErr error
 
 	// Launch worker goroutines
 	for i := 0; i < md.concurrency; i++ {
@@ -341,7 +341,7 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 				if err != nil {
 					part.err = err
 					errOnce.Do(func() {
-						errCh <- fmt.Errorf("part %d failed: %w", partIndex, err)
+						firstErr = fmt.Errorf("part %d failed: %w", partIndex, err)
 						cancel()
 					})
 					return
@@ -369,10 +369,9 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 	close(partCh)
 
 	wg.Wait()
-	close(errCh)
 
-	if len(errCh) > 0 {
-		return 0, <-errCh
+	if err := preferredMultipartError(parts, firstErr); err != nil {
+		return 0, err
 	}
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
@@ -388,8 +387,18 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 	return written, nil
 }
 
+func preferredMultipartError(parts []*partDownload, firstErr error) error {
+	for _, part := range parts {
+		if part != nil && errors.Is(part.err, errDownloadIntegrity) {
+			return fmt.Errorf("part %d failed: %w", part.index, part.err)
+		}
+	}
+	return firstErr
+}
+
 // downloadPart downloads a single part of the file
 func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, info *platform.DownloadInfo, part *partDownload, tracker *progressTracker) (retErr error) {
+	ctx = withDownloadOwnedHeader(ctx, "Range")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -479,12 +488,15 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 			if err == io.EOF {
 				break
 			}
-			return err
+			return wrapDownloadIntegrityReadError(err, written, expectedSize, "range body")
 		}
 	}
 	extra, err := io.ReadAll(io.LimitReader(resp.Body, 1))
 	if err != nil {
-		return err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("%w: failed to verify range body boundary: %w", errDownloadIntegrity, err)
 	}
 	if len(extra) != 0 {
 		return fmt.Errorf("%w: range body exceeds expected %d bytes", errDownloadIntegrity, expectedSize)

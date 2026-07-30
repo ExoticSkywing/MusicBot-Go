@@ -1,6 +1,7 @@
 package download
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -333,6 +334,314 @@ func TestDownloadMultipartPolicyRangeCannotOverrideInternalRange(t *testing.T) {
 	}
 	if rangeHits.Load() != 1 {
 		t.Fatalf("Range hits = %d, want 1", rangeHits.Load())
+	}
+}
+
+func TestDownloadMultipartPolicyRangeCannotOverrideInternalRangeOnRedirect(t *testing.T) {
+	const payload = "123456789"
+
+	for _, tt := range []struct {
+		name      string
+		crossHost bool
+		validator bool
+	}{
+		{name: "same origin"},
+		{name: "same origin with validator", validator: true},
+		{name: "cross origin", crossHost: true},
+		{name: "cross origin with validator", crossHost: true, validator: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				rangeMu   sync.Mutex
+				finalGets []string
+				target    *httptest.Server
+			)
+			target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !tt.crossHost && r.URL.Path == "/start" {
+					http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+					return
+				}
+				if r.URL.Path != "/final" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method == http.MethodHead {
+					w.Header().Set("Accept-Ranges", "bytes")
+					w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+					return
+				}
+
+				gotRange := r.Header.Get("Range")
+				rangeMu.Lock()
+				finalGets = append(finalGets, gotRange)
+				rangeMu.Unlock()
+
+				var start, end int
+				if _, err := fmt.Sscanf(gotRange, "bytes=%d-%d", &start, &end); err != nil ||
+					start < 0 || end < start || end >= len(payload) {
+					http.Error(w, "invalid range", http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+				w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = io.WriteString(w, payload[start:end+1])
+			}))
+			defer target.Close()
+
+			startURL := target.URL + "/start"
+			if tt.crossHost {
+				source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, target.URL+"/final", http.StatusTemporaryRedirect)
+				}))
+				defer source.Close()
+				startURL = source.URL + "/start"
+			}
+
+			info := &platform.DownloadInfo{
+				URL:     startURL,
+				Headers: map[string]string{"range": "bytes=0-0"},
+				Size:    int64(len(payload)),
+			}
+			if tt.validator {
+				info.ValidateURL = func(string) error { return nil }
+			}
+
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := newPolicyTestService(true).Download(context.Background(), info, dest, nil)
+			if err != nil || written != int64(len(payload)) {
+				t.Fatalf("Download() = (%d, %v)", written, err)
+			}
+
+			rangeMu.Lock()
+			gotFinalGets := append([]string(nil), finalGets...)
+			rangeMu.Unlock()
+			if len(gotFinalGets) != 1 || gotFinalGets[0] != "bytes=0-8" {
+				t.Fatalf("final GET Range values = %q, want [bytes=0-8]", gotFinalGets)
+			}
+		})
+	}
+}
+
+func TestDownloadConcurrentMultipartIntegrityConflictNeverFallsBack(t *testing.T) {
+	const (
+		totalSize = 2 * 1024 * 1024
+		partSize  = 1024 * 1024
+	)
+	payload := bytesOfSize(totalSize)
+
+	for _, tt := range []struct {
+		name         string
+		maxChunkSize int64
+	}{
+		{name: "optional multipart"},
+		{name: "required bounded chunks", maxChunkSize: partSize},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			service := newPolicyTestService(true)
+			allPrimaryRangesStarted := make(chan struct{})
+			var (
+				startedOnce   sync.Once
+				rangeStarts   atomic.Int32
+				plainHits     atomic.Int32
+				candidateHits atomic.Int32
+			)
+
+			service.client.Transport = downloadRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host == "candidate.invalid" {
+					candidateHits.Add(1)
+					rangeHeader := req.Header.Get("Range")
+					var start, end int
+					if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+						return nil, fmt.Errorf("candidate range %q: %w", rangeHeader, err)
+					}
+					body := payload[start : end+1]
+					return &http.Response{
+						StatusCode: http.StatusPartialContent,
+						Header: http.Header{
+							"Content-Range": []string{fmt.Sprintf("bytes %d-%d/%d", start, end, totalSize)},
+						},
+						Body:          io.NopCloser(bytes.NewReader(body)),
+						ContentLength: int64(len(body)),
+						Request:       req,
+					}, nil
+				}
+
+				if req.Method == http.MethodHead {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header: http.Header{
+							"Accept-Ranges": []string{"bytes"},
+						},
+						Body:          http.NoBody,
+						ContentLength: totalSize,
+						Request:       req,
+					}, nil
+				}
+
+				rangeHeader := req.Header.Get("Range")
+				if rangeHeader == "" {
+					plainHits.Add(1)
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(bytes.NewReader(payload)),
+						ContentLength: totalSize,
+						Request:       req,
+					}, nil
+				}
+
+				if rangeStarts.Add(1) == 2 {
+					startedOnce.Do(func() { close(allPrimaryRangesStarted) })
+				}
+				switch rangeHeader {
+				case "bytes=0-1048575":
+					<-allPrimaryRangesStarted
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          http.NoBody,
+						ContentLength: 0,
+						Request:       req,
+					}, nil
+				case "bytes=1048576-2097151":
+					<-req.Context().Done()
+					return &http.Response{
+						StatusCode: http.StatusPartialContent,
+						Header: http.Header{
+							"Content-Range": []string{"bytes 1048576-2097151/2097153"},
+						},
+						Body:          http.NoBody,
+						ContentLength: partSize,
+						Request:       req,
+					}, nil
+				default:
+					return nil, fmt.Errorf("unexpected primary range %q", rangeHeader)
+				}
+			})
+
+			info := &platform.DownloadInfo{
+				URL:           "https://primary.invalid/audio",
+				CandidateURLs: []string{"https://candidate.invalid/audio"},
+				Size:          totalSize,
+				MaxChunkSize:  tt.maxChunkSize,
+			}
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := service.Download(context.Background(), info, dest, nil)
+			if !errors.Is(err, errDownloadIntegrity) {
+				t.Fatalf("Download() = (%d, %v), want errDownloadIntegrity", written, err)
+			}
+			if rangeStarts.Load() != 2 {
+				t.Fatalf("primary Range requests = %d, want 2", rangeStarts.Load())
+			}
+			if plainHits.Load() != 0 {
+				t.Fatalf("plain GET fallback hits = %d, want 0", plainHits.Load())
+			}
+			if candidateHits.Load() != 0 {
+				t.Fatalf("candidate fallback hits = %d, want 0", candidateHits.Load())
+			}
+			if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("integrity-conflicted destination still exists: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestDownloadMultipartUnexpectedEOFKeepsIntegritySentinel(t *testing.T) {
+	const payload = "123456789"
+	var rangeHits, plainHits, candidateHits atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		case r.Header.Get("Range") != "":
+			rangeHits.Add(1)
+			w.Header().Set("Content-Range", "bytes 0-8/9")
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = io.WriteString(w, "short")
+		default:
+			plainHits.Add(1)
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			_, _ = io.WriteString(w, payload)
+		}
+	}))
+	defer server.Close()
+
+	candidate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		candidateHits.Add(1)
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer candidate.Close()
+
+	dest := filepath.Join(t.TempDir(), "audio.bin")
+	written, err := newPolicyTestService(true).Download(context.Background(), &platform.DownloadInfo{
+		URL:           server.URL,
+		CandidateURLs: []string{candidate.URL},
+		Size:          int64(len(payload)),
+	}, dest, nil)
+	if !errors.Is(err, errDownloadIntegrity) {
+		t.Fatalf("Download() = (%d, %v), want errDownloadIntegrity", written, err)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Download() error = %v, want wrapped io.ErrUnexpectedEOF", err)
+	}
+	if rangeHits.Load() != 1 || plainHits.Load() != 0 || candidateHits.Load() != 0 {
+		t.Fatalf("request hits: range=%d plain=%d candidate=%d, want 1/0/0",
+			rangeHits.Load(), plainHits.Load(), candidateHits.Load())
+	}
+	if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("integrity-conflicted destination still exists: %v", statErr)
+	}
+}
+
+func TestDownloadSingleUnexpectedEOFKeepsIntegritySentinel(t *testing.T) {
+	const payload = "123456789"
+
+	for _, multipart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multipart=%v", multipart), func(t *testing.T) {
+			var primaryGets, candidateHits atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+					return
+				}
+				primaryGets.Add(1)
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+				_, _ = io.WriteString(w, "short")
+			}))
+			defer server.Close()
+
+			candidate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				candidateHits.Add(1)
+				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+				_, _ = io.WriteString(w, payload)
+			}))
+			defer candidate.Close()
+
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := newPolicyTestService(multipart).Download(context.Background(), &platform.DownloadInfo{
+				URL:           server.URL,
+				CandidateURLs: []string{candidate.URL},
+				Size:          int64(len(payload)),
+			}, dest, nil)
+			if !errors.Is(err, errDownloadIntegrity) {
+				t.Fatalf("Download() = (%d, %v), want errDownloadIntegrity", written, err)
+			}
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("Download() error = %v, want wrapped io.ErrUnexpectedEOF", err)
+			}
+			if primaryGets.Load() != 1 || candidateHits.Load() != 0 {
+				t.Fatalf("request hits: primary GET=%d candidate=%d, want 1/0",
+					primaryGets.Load(), candidateHits.Load())
+			}
+			if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("integrity-conflicted destination still exists: %v", statErr)
+			}
+		})
 	}
 }
 
