@@ -144,7 +144,8 @@ func TestGetTrackConvertsDetailAndPreservesBenignAccess(t *testing.T) {
 	if track.ID != "41378936" || track.Title != "Song" || len(track.Artists) != 2 || track.Duration != 234*time.Second {
 		t.Fatalf("track = %#v", track)
 	}
-	if access.isListenFee || !access.isTrial || string(access.payInfo) != `{"play":"1","download":"0"}` {
+	listenFee, valid := parseAccessRestriction(access.listenFee)
+	if !valid || listenFee || !access.isTrial || string(access.payInfo) != `{"play":"1","download":"0"}` {
 		t.Fatalf("access = %#v", access)
 	}
 	if got, err := client.GetTrack(context.Background(), "41378936"); err != nil || got.ID != "41378936" {
@@ -173,6 +174,7 @@ func TestRejectPreviewAccessUsesOnlyExplicitSignals(t *testing.T) {
 	benign := []json.RawMessage{
 		json.RawMessage(`{"feeType":1,"pay":"1","hasLossless":true,"unknown":{"nested":1}}`),
 		json.RawMessage(`{"cannotOnlinePlay":0,"listen_fragment":"0"}`),
+		json.RawMessage(`{"cannotOnlinePlay":false,"listen_fragment":"false"}`),
 		json.RawMessage(`null`),
 	}
 	for _, payInfo := range benign {
@@ -181,9 +183,21 @@ func TestRejectPreviewAccessUsesOnlyExplicitSignals(t *testing.T) {
 		}
 	}
 	for _, access := range []trackAccess{
-		{isListenFee: true},
+		{listenFee: json.RawMessage(`true`)},
+		{listenFee: json.RawMessage(`1`)},
+		{listenFee: json.RawMessage(`null`)},
+		{listenFee: json.RawMessage(`"garbage"`)},
+		{listenFee: json.RawMessage(`0.5`)},
+		{listenFee: json.RawMessage(`{}`)},
 		{payInfo: json.RawMessage(`{"cannotOnlinePlay":"1"}`)},
 		{payInfo: json.RawMessage(`{"listen_fragment":true}`)},
+		{payInfo: json.RawMessage(`{"cannotOnlinePlay":1,"cannotOnlinePlay":0}`)},
+		{payInfo: json.RawMessage(`{"cannotOnlinePlay":{"unexpected":1}}`)},
+		{payInfo: json.RawMessage(`{"listen_fragment":[]}`)},
+		{payInfo: json.RawMessage(`{"cannotOnlinePlay":null}`)},
+		{payInfo: json.RawMessage(`{"listen_fragment":2}`)},
+		{payInfo: json.RawMessage(`[]`)},
+		{payInfo: json.RawMessage(`{`)},
 	} {
 		err := validateTrackAccess(access)
 		if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, errPaidTrack) {

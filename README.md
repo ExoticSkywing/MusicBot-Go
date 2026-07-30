@@ -11,11 +11,14 @@
 | 网易云音乐 | ✓ | ✓ | ✓ | ✓ | ✓ |
 | QQ 音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 酷狗音乐 | ✓ | ✓ | ✓ | ✓ | — |
+| 酷我音乐 | ✓ | ✓ | ✓ | Hi-Res / 无损 | — |
 | 汽水音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 哔哩哔哩 | ✓ | ✓ | ✓ | — | — |
 | Apple Music | ✓ | ✓ | ✓ | ✓ ¹ | — |
 
 ¹ Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
+
+酷我音乐无需配置账号即可使用公开曲目。无损与 Hi-Res 使用两条独立的原生 FLAC 流：无损请求 `2000kflac`，Hi-Res 请求 `4000kflac`；不会请求 `jymaster` / `20900kmflac` 超分母带。实现会校验 RID、解析档位、CDN URL、Range 长度、实际 FLAC STREAMINFO、时长和最终大小：无损必须是 44.1/48 kHz、16-bit 档，Hi-Res 必须至少达到 96 kHz、24-bit，不能只相信接口返回的质量标签。若 CDN 在有效 FLAC 后附加已知的 15 字节尾标记，下载器只在逐字节精确匹配时将其清除，再原子落盘；解析不可用时按请求档位逐级降级到经实际码率验证的较低音质。明确的付费或试听限制信号（`isListenFee`、`cannotOnlinePlay`、`listen_fragment`）不会降级到 MP3；只有请求无损 / Hi-Res 且公开 FLAC 直连通过全部校验时才会放行。RID 错配、虚标 Hi-Res 或明显短时长媒体始终会被拒绝。上述校验证明取得媒体的容器、码流和传输完整性符合预期，不证明录音母带来源。
 
 ## 快速开始
 

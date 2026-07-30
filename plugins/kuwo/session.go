@@ -98,23 +98,36 @@ func (c *Client) refreshSession(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("kuwo: parse homepage URL: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, homeURL.String(), nil)
-	if err != nil {
-		return fmt.Errorf("kuwo: create homepage request: %w", err)
-	}
-	req.Header.Set("User-Agent", kuwoUserAgent)
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
+	var resp *http.Response
+	for transportAttempt := 0; transportAttempt < 2; transportAttempt++ {
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, homeURL.String(), nil)
+		if requestErr != nil {
+			return fmt.Errorf("kuwo: create homepage request: %w", requestErr)
+		}
+		req.Header.Set("User-Agent", kuwoUserAgent)
+		resp, err = c.httpClient().Do(req)
+		if err == nil {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if transportAttempt == 0 && isRetryableKuwoAPITransportError(err) {
+			continue
+		}
 		return fmt.Errorf("kuwo: request homepage: %w", err)
 	}
 	defer resp.Body.Close()
+	// Kuwo's edge occasionally returns an HTTP error page after it has already
+	// issued the anonymous session cookie. The cookie, not the decorative page
+	// body, is the only artifact required to sign API requests.
+	if cookie := c.sessionCookie(homeURL.String()); validSessionCookie(cookie) {
+		return nil
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("kuwo: homepage returned HTTP %d", resp.StatusCode)
 	}
-	if cookie := c.sessionCookie(homeURL.String()); !validSessionCookie(cookie) {
-		return fmt.Errorf("kuwo: homepage did not return a valid session cookie")
-	}
-	return nil
+	return fmt.Errorf("kuwo: homepage did not return a valid session cookie")
 }
 
 func (c *Client) sessionCookie(requestURL string) string {

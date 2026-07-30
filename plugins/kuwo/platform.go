@@ -43,7 +43,7 @@ func (p *KuwoPlatform) Capabilities() platform.Capabilities {
 		Search:      true,
 		Lyrics:      true,
 		Recognition: false,
-		HiRes:       false,
+		HiRes:       true,
 	}
 }
 

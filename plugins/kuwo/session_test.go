@@ -3,6 +3,7 @@ package kuwo
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,6 +35,27 @@ func TestSessionRejectsInvalidHomepageCookies(t *testing.T) {
 				t.Fatal("ensureSession() unexpectedly accepted invalid cookie")
 			}
 		})
+	}
+}
+
+func TestSessionAcceptsValidCookieFromHomepageErrorResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{
+			Name:  kuwoSessionCookie,
+			Value: "abcdefghijklmnop",
+			Path:  "/",
+		})
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home:   server.URL + "/",
+		search: server.URL + "/search",
+		detail: server.URL + "/detail",
+	})
+	if err := client.ensureSession(context.Background()); err != nil {
+		t.Fatalf("ensureSession() = %v, want valid response cookie to win over homepage status", err)
 	}
 }
 
@@ -576,4 +598,74 @@ func TestSessionConcurrentUseIsRaceSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSignedGetRetriesTransientTransportEOF(t *testing.T) {
+	client := NewClient(time.Second, nil)
+	client.now = func() time.Time { return time.Unix(1700000000, 0) }
+	client.sessionExpires = client.now().Add(time.Hour)
+	homeURL, err := url.Parse(kuwoHomeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.apiHTTPClient.Jar.SetCookies(homeURL, []*http.Cookie{{
+		Name:  kuwoSessionCookie,
+		Value: "abcdefghijklmnop",
+		Path:  "/",
+	}})
+	var requests int
+	var requestIDs []string
+	client.apiHTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		requestIDs = append(requestIDs, req.URL.Query().Get("reqId"))
+		if requests == 1 {
+			return nil, io.EOF
+		}
+		return response(http.StatusOK, nil, []byte(`{"data":{"ok":true}}`)), nil
+	})
+
+	body, err := client.signedGet(
+		context.Background(),
+		kuwoDetailURL+"?mid=41378936",
+		kuwoHomeURL,
+	)
+	if err != nil {
+		t.Fatalf("signedGet() = %v", err)
+	}
+	if string(body) != `{"data":{"ok":true}}` {
+		t.Fatalf("body = %q", body)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(requestIDs) != 2 || requestIDs[0] == "" || requestIDs[0] == requestIDs[1] {
+		t.Fatalf("request IDs = %v, want two distinct non-empty IDs", requestIDs)
+	}
+}
+
+func TestRefreshSessionRetriesTransientTransportEOF(t *testing.T) {
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home: "https://www.kuwo.cn/",
+	})
+	var requests int
+	client.apiHTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return nil, io.EOF
+		}
+		return response(
+			http.StatusOK,
+			map[string]string{
+				"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
+			},
+			nil,
+		), nil
+	})
+
+	if err := client.refreshSession(context.Background()); err != nil {
+		t.Fatalf("refreshSession() = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
 }

@@ -6,15 +6,19 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/liuran001/MusicBot-Go/bot"
@@ -35,23 +39,27 @@ const (
 )
 
 type kuwoEndpoints struct {
-	home        string
-	search      string
-	detail      string
-	playlist    string
-	mobile      string
-	play        string
-	wordLyric   string
-	mobileLyric string
+	home            string
+	search          string
+	detail          string
+	playlist        string
+	mobile          string
+	legacy          string
+	qualityResolver string
+	play            string
+	wordLyric       string
+	mobileLyric     string
 }
 
 type Client struct {
-	clientMu        sync.RWMutex
-	apiHTTPClient   *http.Client
-	mediaHTTPClient *http.Client
-	logger          bot.Logger
-	endpoints       kuwoEndpoints
-	now             func() time.Time
+	clientMu           sync.RWMutex
+	apiHTTPClient      *http.Client
+	mediaHTTPClient    *http.Client
+	downloadHTTPClient *http.Client
+	downloadMaxRetries int
+	logger             bot.Logger
+	endpoints          kuwoEndpoints
+	now                func() time.Time
 
 	sessionMu         sync.Mutex
 	sessionExpires    time.Time
@@ -61,12 +69,13 @@ type Client struct {
 
 func NewClient(timeout time.Duration, logger bot.Logger) *Client {
 	return newClientWithEndpoints(timeout, logger, kuwoEndpoints{
-		home:        kuwoHomeURL,
-		search:      kuwoSearchURL,
-		detail:      kuwoDetailURL,
-		playlist:    kuwoPlaylistURL,
-		wordLyric:   kuwoWordLyricURL,
-		mobileLyric: kuwoMobileLyricURL,
+		home:            kuwoHomeURL,
+		search:          kuwoSearchURL,
+		detail:          kuwoDetailURL,
+		playlist:        kuwoPlaylistURL,
+		qualityResolver: kuwoDirectHiResResolveURL,
+		wordLyric:       kuwoWordLyricURL,
+		mobileLyric:     kuwoMobileLyricURL,
 	})
 }
 
@@ -97,12 +106,15 @@ func newClientWithEndpoints(timeout time.Duration, logger bot.Logger, endpoints 
 		timeout = 20 * time.Second
 	}
 	jar, _ := cookiejar.New(nil)
+	downloadClient, _ := newKuwoDownloadHTTPClient("", timeout)
 	return &Client{
-		apiHTTPClient:   &http.Client{Timeout: timeout, Jar: jar},
-		mediaHTTPClient: &http.Client{Timeout: timeout},
-		logger:          logger,
-		endpoints:       endpoints,
-		now:             time.Now,
+		apiHTTPClient:      &http.Client{Timeout: timeout, Jar: jar},
+		mediaHTTPClient:    &http.Client{Timeout: timeout},
+		downloadHTTPClient: downloadClient,
+		downloadMaxRetries: 3,
+		logger:             logger,
+		endpoints:          endpoints,
+		now:                time.Now,
 	}
 }
 
@@ -153,6 +165,172 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 	}
 	c.apiHTTPClient = client
 	return nil
+}
+
+// SetDownloadConfig configures the client used only by custom, streaming media
+// downloaders. Unlike API clients, it deliberately has no whole-request timeout:
+// dial/TLS/header phases are bounded while the caller's context owns the body
+// lifetime.
+func (c *Client) SetDownloadConfig(
+	rawProxy string,
+	timeout time.Duration,
+	maxRetries int,
+) error {
+	if c == nil {
+		return nil
+	}
+	client, err := newKuwoDownloadHTTPClient(rawProxy, timeout)
+	if err != nil {
+		return err
+	}
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+	c.clientMu.Lock()
+	probeTimeout := timeout
+	if c.mediaHTTPClient != nil && c.mediaHTTPClient.Timeout > 0 {
+		probeTimeout = c.mediaHTTPClient.Timeout
+	}
+	if probeTimeout <= 0 {
+		probeTimeout = 20 * time.Second
+	}
+	probeClient := *client
+	probeClient.Timeout = probeTimeout
+	c.mediaHTTPClient = &probeClient
+	c.downloadHTTPClient = client
+	c.downloadMaxRetries = maxRetries
+	c.clientMu.Unlock()
+	return nil
+}
+
+func (c *Client) downloadClientSnapshot() (*http.Client, int) {
+	if c == nil {
+		return nil, 0
+	}
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	if c.downloadHTTPClient == nil {
+		return nil, c.downloadMaxRetries
+	}
+	snapshot := *c.downloadHTTPClient
+	snapshot.Timeout = 0
+	return &snapshot, c.downloadMaxRetries
+}
+
+func newKuwoDownloadHTTPClient(rawProxy string, timeout time.Duration) (*http.Client, error) {
+	phaseTimeout := timeout
+	if phaseTimeout <= 0 || phaseTimeout > 10*time.Second {
+		phaseTimeout = 10 * time.Second
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// DownloadProxy is an explicit application setting. Do not silently inherit
+	// HTTP(S)_PROXY here: direct mode must resolve and validate the CDN target
+	// itself instead of validating an ambient proxy address.
+	transport.Proxy = nil
+	dialer := &net.Dialer{
+		Timeout:   phaseTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+	transport.DialContext = safeKuwoDownloadDialContext(dialer)
+	transport.TLSHandshakeTimeout = phaseTimeout
+	transport.ResponseHeaderTimeout = phaseTimeout
+	transport.ExpectContinueTimeout = time.Second
+	if proxyAddress := strings.TrimSpace(rawProxy); proxyAddress != "" {
+		if !strings.Contains(proxyAddress, "://") {
+			proxyAddress = "http://" + proxyAddress
+		}
+		proxyURL, err := url.Parse(proxyAddress)
+		if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+			return nil, errors.New("kuwo: invalid download proxy")
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+		// A user-selected proxy may intentionally be on a private network. In
+		// that mode the proxy owns target resolution, so restrict only direct
+		// CDN dials and leave the explicit proxy endpoint reachable.
+		transport.DialContext = dialer.DialContext
+	}
+	return &http.Client{Transport: transport}, nil
+}
+
+func safeKuwoDownloadDialContext(dialer *net.Dialer) func(
+	context.Context,
+	string,
+	string,
+) (net.Conn, error) {
+	if dialer == nil {
+		dialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, errors.New("kuwo: invalid download network address")
+		}
+		var resolved []net.IPAddr
+		if literal := net.ParseIP(host); literal != nil {
+			resolved = []net.IPAddr{{IP: literal}}
+		} else {
+			resolved, err = net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("kuwo: resolve download host: %w", err)
+			}
+		}
+		var lastErr error
+		for _, candidate := range resolved {
+			if !isPublicKuwoDownloadIP(candidate.IP) {
+				continue
+			}
+			ipText := candidate.IP.String()
+			if candidate.Zone != "" {
+				ipText += "%" + candidate.Zone
+			}
+			connection, dialErr := dialer.DialContext(
+				ctx,
+				network,
+				net.JoinHostPort(ipText, port),
+			)
+			if dialErr == nil {
+				return connection, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("kuwo: dial download host: %w", lastErr)
+		}
+		return nil, errors.New("kuwo: download host resolved to a disallowed address")
+	}
+}
+
+var kuwoDisallowedPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
+
+func isPublicKuwoDownloadIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() ||
+		address.IsPrivate() ||
+		address.IsLoopback() ||
+		address.IsLinkLocalUnicast() ||
+		address.IsMulticast() ||
+		address.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range kuwoDisallowedPublicPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
@@ -497,6 +675,12 @@ func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDeta
 	var response struct {
 		Data trackWire `json:"data"`
 	}
+	if err := validateUniqueJSONKeys(body); err != nil {
+		return nil, trackAccess{}, errors.Join(
+			platform.NewUnavailableError("kuwo", "track", trackID),
+			fmt.Errorf("kuwo: invalid track response JSON: %w", err),
+		)
+	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, trackAccess{}, fmt.Errorf("kuwo: decode track response: %w", err)
 	}
@@ -511,69 +695,94 @@ func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDeta
 }
 
 func (c *Client) signedGet(ctx context.Context, endpoint, referer string) ([]byte, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+sessionAttempts:
+	for sessionAttempt := 0; sessionAttempt < 2; sessionAttempt++ {
 		snapshot, err := c.signedSessionSnapshot(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
-		nonce, err := randomNonce()
-		if err != nil {
-			return nil, err
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
-			return nil, fmt.Errorf("kuwo: create signed request: %w", err)
-		}
-		req.Header.Set("Secret", buildSecret(snapshot.cookie, nonce))
-		req.Header.Set("Referer", referer)
-		req.Header.Set("User-Agent", kuwoUserAgent)
-		for _, cookie := range snapshot.cookies {
-			req.AddCookie(cookie)
-		}
-		reqID, err := uuidV4()
-		if err != nil {
-			return nil, err
-		}
-		requestURL, err := url.Parse(endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("kuwo: parse signed request URL: %w", err)
-		}
-		query := requestURL.Query()
-		query.Set("reqId", reqID)
-		requestURL.RawQuery = query.Encode()
-		req.URL = requestURL
-		// Do must not consult the shared Jar again: the explicitly attached
-		// cookie snapshot is the same state used to derive Secret.
-		requestClient := *snapshot.client
-		requestClient.Jar = nil
-		resp, err := requestClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("kuwo: request API: %w", err)
-		}
-		// The request-scoped client intentionally has no Jar, so preserve normal
-		// session rotation for later requests through the captured shared Jar.
-		snapshot.jar.SetCookies(requestURL, resp.Cookies())
-		body, readErr := readLimited(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, platform.NewRateLimitedError("kuwo")
-		}
-		if invalidSessionResponse(resp.StatusCode, body) {
-			if attempt == 0 {
-				c.invalidateSession(endpoint)
-				continue
+		for transportAttempt := 0; transportAttempt < 2; transportAttempt++ {
+			nonce, err := randomNonce()
+			if err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("kuwo: API session invalid after refresh (HTTP %d)", resp.StatusCode)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+			if err != nil {
+				return nil, fmt.Errorf("kuwo: create signed request: %w", err)
+			}
+			req.Header.Set("Secret", buildSecret(snapshot.cookie, nonce))
+			req.Header.Set("Referer", referer)
+			req.Header.Set("User-Agent", kuwoUserAgent)
+			for _, cookie := range snapshot.cookies {
+				req.AddCookie(cookie)
+			}
+			reqID, err := uuidV4()
+			if err != nil {
+				return nil, err
+			}
+			requestURL, err := url.Parse(endpoint)
+			if err != nil {
+				return nil, fmt.Errorf("kuwo: parse signed request URL: %w", err)
+			}
+			query := requestURL.Query()
+			query.Set("reqId", reqID)
+			requestURL.RawQuery = query.Encode()
+			req.URL = requestURL
+			// Do must not consult the shared Jar again: the explicitly attached
+			// cookie snapshot is the same state used to derive Secret.
+			requestClient := *snapshot.client
+			requestClient.Jar = nil
+			resp, err := requestClient.Do(req)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
+				if transportAttempt == 0 && isRetryableKuwoAPITransportError(err) {
+					continue
+				}
+				return nil, fmt.Errorf("kuwo: request API: %w", err)
+			}
+			// The request-scoped client intentionally has no Jar, so preserve normal
+			// session rotation for later requests through the captured shared Jar.
+			snapshot.jar.SetCookies(requestURL, resp.Cookies())
+			body, readErr := readLimited(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				return nil, readErr
+			}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				return nil, platform.NewRateLimitedError("kuwo")
+			}
+			if invalidSessionResponse(resp.StatusCode, body) {
+				if sessionAttempt == 0 {
+					c.invalidateSession(endpoint)
+					continue sessionAttempts
+				}
+				return nil, fmt.Errorf("kuwo: API session invalid after refresh (HTTP %d)", resp.StatusCode)
+			}
+			if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+				return nil, fmt.Errorf("kuwo: API returned HTTP %d", resp.StatusCode)
+			}
+			return body, nil
 		}
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			return nil, fmt.Errorf("kuwo: API returned HTTP %d", resp.StatusCode)
-		}
-		return body, nil
 	}
 	return nil, fmt.Errorf("kuwo: session refresh retry exhausted")
+}
+
+func isRetryableKuwoAPITransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) &&
+		(networkError.Timeout() || networkError.Temporary())
 }
 
 type signedSessionSnapshot struct {

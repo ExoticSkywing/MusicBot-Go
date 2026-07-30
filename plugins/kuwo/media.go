@@ -45,27 +45,57 @@ type mobileQuality struct {
 	quality platform.Quality
 }
 
+type losslessResolver uint8
+
+const (
+	resolvePlayableFLAC losslessResolver = iota + 1
+	resolvePlayableHiRes
+)
+
 type mediaProbe struct {
-	size     int64
-	format   string
-	bitrate  int
-	quality  platform.Quality
-	duration time.Duration
+	size          int64
+	format        string
+	bitrate       int
+	quality       platform.Quality
+	duration      time.Duration
+	sampleRate    int
+	bitsPerSample int
+	channels      int
+	totalSamples  uint64
+	flacHeader    [42]byte
+}
+
+type flacStreamInfo struct {
+	sampleRate    int
+	channels      int
+	bitsPerSample int
+	totalSamples  uint64
+	duration      time.Duration
 }
 
 func mobileQualityCandidates(quality platform.Quality) []mobileQuality {
 	standard := mobileQuality{br: "128kmp3", format: "mp3", bitrate: 128, quality: platform.QualityStandard}
 	high := mobileQuality{br: "320kmp3", format: "mp3", bitrate: 320, quality: platform.QualityHigh}
-	lossless := mobileQuality{br: "2000kflac", format: "flac", bitrate: 2000, quality: platform.QualityLossless}
 	switch quality {
 	case platform.QualityStandard:
 		return []mobileQuality{standard}
 	case platform.QualityHigh:
 		return []mobileQuality{high, standard}
 	case platform.QualityLossless, platform.QualityHiRes:
-		return []mobileQuality{lossless, high, standard}
+		return []mobileQuality{high, standard}
 	default:
 		return []mobileQuality{standard}
+	}
+}
+
+func losslessResolverPlan(quality platform.Quality) []losslessResolver {
+	switch quality {
+	case platform.QualityLossless:
+		return []losslessResolver{resolvePlayableFLAC}
+	case platform.QualityHiRes:
+		return []losslessResolver{resolvePlayableHiRes, resolvePlayableFLAC}
+	default:
+		return nil
 	}
 }
 
@@ -86,8 +116,13 @@ func parseSafeMediaURL(rawURL string) (*url.URL, error) {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, errUnsafeMediaURL
 	}
-	if parsed.User != nil || parsed.Port() != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if parsed.User != nil || parsed.Port() != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil, errUnsafeMediaURL
+	}
+	if parsed.RawQuery != "" {
+		if _, ok := parseMobileMediaPseudoQuery(parsed.RawQuery); !ok {
+			return nil, errUnsafeMediaURL
+		}
 	}
 	if parsed.Host != parsed.Hostname() {
 		return nil, errUnsafeMediaURL
@@ -108,11 +143,92 @@ func validateMediaURL(rawURL, format string) error {
 	if err != nil {
 		return err
 	}
+	if parsed.RawQuery != "" {
+		queryFormat, ok := parseMobileMediaPseudoQuery(parsed.RawQuery)
+		if !ok || queryFormat != strings.ToLower(format) {
+			return errUnsafeMediaURL
+		}
+	}
 	extension := strings.ToLower(path.Ext(parsed.EscapedPath()))
 	if extension != "."+strings.ToLower(format) || (extension != ".flac" && extension != ".mp3") {
 		return errors.New("kuwo: unexpected media suffix")
 	}
 	return nil
+}
+
+func parseMobileMediaPseudoQuery(rawQuery string) (string, bool) {
+	segments := strings.Split(rawQuery, "&")
+	if len(segments) != 6 {
+		return "", false
+	}
+	values := make(map[string]string, len(segments))
+	for _, segment := range segments {
+		name, value, found := strings.Cut(segment, "$")
+		if !found || name == "" || strings.Contains(value, "$") {
+			return "", false
+		}
+		if _, duplicate := values[name]; duplicate {
+			return "", false
+		}
+		switch name {
+		case "bitrate":
+			if value != "128" && value != "320" && value != "2000" {
+				return "", false
+			}
+		case "format":
+			if value != "mp3" && value != "flac" {
+				return "", false
+			}
+		case "source", "type":
+			if !isSafeMediaQueryToken(value, 128) {
+				return "", false
+			}
+		case "user":
+			if !isASCIIUnsignedDecimal(value, 32) {
+				return "", false
+			}
+		case "loginUid":
+			if value != "" && !isASCIIUnsignedDecimal(value, 32) {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+		values[name] = value
+	}
+	bitrate, hasBitrate := values["bitrate"]
+	queryFormat, hasFormat := values["format"]
+	_, hasSource := values["source"]
+	_, hasType := values["type"]
+	_, hasUser := values["user"]
+	_, hasLoginUID := values["loginUid"]
+	if !hasBitrate || !hasFormat || !hasSource || !hasType || !hasUser || !hasLoginUID {
+		return "", false
+	}
+	if (queryFormat == "flac" && bitrate != "2000") ||
+		(queryFormat == "mp3" && bitrate != "128" && bitrate != "320") {
+		return "", false
+	}
+	return queryFormat, true
+}
+
+func isSafeMediaQueryToken(value string, maximumLength int) bool {
+	if value == "" || len(value) > maximumLength {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '.' ||
+			character == '_' ||
+			character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeSafeMediaURL(rawURL string) (string, error) {
@@ -128,6 +244,12 @@ func normalizeSafeMediaURL(rawURL string) (string, error) {
 		return "", errUnsafeMediaURL
 	}
 	parsed.Scheme = "https"
+	// Some Kuwo CDN nodes append a bare query delimiter to an otherwise
+	// opaque media path. It carries no data, so canonicalize only that exact
+	// form while continuing to reject every non-empty query below.
+	if parsed.ForceQuery && parsed.RawQuery == "" {
+		parsed.ForceQuery = false
+	}
 	normalized := parsed.String()
 	if _, err := parseSafeMediaURL(normalized); err != nil {
 		return "", err
@@ -185,6 +307,7 @@ func readMediaRange(ctx context.Context, client *http.Client, rawURL string, sta
 		return nil, 0, fmt.Errorf("kuwo: create media probe: %w", err)
 	}
 	applyMediaHeaders(req)
+	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	resp, err := client.Do(req)
 	if err != nil {
@@ -223,35 +346,66 @@ func probeFLAC(ctx context.Context, client *http.Client, rawURL string, expected
 	if err != nil {
 		return mediaProbe{}, err
 	}
+	return parseFLACProbe(data, total, expectedDuration)
+}
+
+func parseFLACProbe(data []byte, total int64, expectedDuration time.Duration) (mediaProbe, error) {
+	streamInfo, err := parseFLACStreamInfo(data)
+	if err != nil {
+		return mediaProbe{}, err
+	}
+	if !durationsMatch(streamInfo.duration, expectedDuration) {
+		return mediaProbe{}, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
+	}
+	quality := platform.QualityLossless
+	if streamInfo.sampleRate > 48000 || streamInfo.bitsPerSample > 16 {
+		quality = platform.QualityHiRes
+	}
+	probe := mediaProbe{
+		size:          total,
+		format:        "flac",
+		bitrate:       averageBitrateKbps(total, streamInfo.duration),
+		quality:       quality,
+		duration:      streamInfo.duration,
+		sampleRate:    streamInfo.sampleRate,
+		bitsPerSample: streamInfo.bitsPerSample,
+		channels:      streamInfo.channels,
+		totalSamples:  streamInfo.totalSamples,
+	}
+	copy(probe.flacHeader[:], data[:len(probe.flacHeader)])
+	return probe, nil
+}
+
+func parseFLACStreamInfo(data []byte) (flacStreamInfo, error) {
+	if len(data) < 42 {
+		return flacStreamInfo{}, errors.New("kuwo: incomplete FLAC STREAMINFO")
+	}
 	if !bytes.Equal(data[:4], []byte("fLaC")) {
-		return mediaProbe{}, errors.New("kuwo: invalid FLAC signature")
+		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC signature")
 	}
 	if data[4]&0x7f != 0 || int(data[5])<<16|int(data[6])<<8|int(data[7]) != 34 {
-		return mediaProbe{}, errors.New("kuwo: invalid FLAC STREAMINFO")
+		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC STREAMINFO")
 	}
 	minBlock := binary.BigEndian.Uint16(data[8:10])
 	maxBlock := binary.BigEndian.Uint16(data[10:12])
 	if minBlock < 16 || maxBlock < 16 || minBlock > maxBlock {
-		return mediaProbe{}, errors.New("kuwo: invalid FLAC block size")
+		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC block size")
 	}
 	packed := binary.BigEndian.Uint64(data[18:26])
-	sampleRate := int64((packed >> 44) & 0xfffff)
+	sampleRate := int((packed >> 44) & 0xfffff)
 	channels := int((packed>>41)&7) + 1
 	bitsPerSample := int((packed>>36)&31) + 1
-	totalSamples := int64(packed & 0xfffffffff)
+	totalSamples := packed & 0xfffffffff
 	if sampleRate == 0 || totalSamples == 0 || channels < 1 || channels > 8 || bitsPerSample < 4 || bitsPerSample > 32 {
-		return mediaProbe{}, errors.New("kuwo: invalid FLAC audio parameters")
+		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC audio parameters")
 	}
 	duration := time.Duration(float64(totalSamples) / float64(sampleRate) * float64(time.Second))
-	if !durationsMatch(duration, expectedDuration) {
-		return mediaProbe{}, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
-	}
-	return mediaProbe{
-		size:     total,
-		format:   "flac",
-		bitrate:  averageBitrateKbps(total, duration),
-		quality:  platform.QualityLossless,
-		duration: duration,
+	return flacStreamInfo{
+		sampleRate:    sampleRate,
+		bitsPerSample: bitsPerSample,
+		channels:      channels,
+		totalSamples:  totalSamples,
+		duration:      duration,
 	}, nil
 }
 
@@ -402,10 +556,40 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTrackAccess(access); err != nil {
-		return nil, err
+	accessErr := validateTrackAccess(access)
+	resolverPlan := losslessResolverPlan(quality)
+	if accessErr != nil && len(resolverPlan) == 0 {
+		return nil, accessErr
 	}
 	var lastErr error
+	for _, resolver := range resolverPlan {
+		var (
+			info         *platform.DownloadInfo
+			candidateErr error
+		)
+		switch resolver {
+		case resolvePlayableFLAC:
+			info, candidateErr = c.resolvePlayableLossless(ctx, detail)
+		case resolvePlayableHiRes:
+			info, candidateErr = c.resolvePlayableHiRes(ctx, detail)
+		default:
+			continue
+		}
+		if candidateErr == nil {
+			return info, nil
+		}
+		if isTerminalMediaError(candidateErr) {
+			return nil, candidateErr
+		}
+		lastErr = candidateErr
+	}
+	// Paid/preview metadata must never fall through to ordinary MP3 candidates.
+	// A requested lossless tier may still use a public direct FLAC, but only
+	// after its selector, identity, duration, STREAMINFO, size, and URL have all
+	// passed the resolver-specific checks above.
+	if accessErr != nil {
+		return nil, accessErr
+	}
 	for _, candidate := range mobileQualityCandidates(quality) {
 		info, candidateErr := c.resolveMobileDownload(ctx, detail, candidate)
 		if candidateErr == nil {
@@ -430,31 +614,54 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 }
 
 func validateTrackAccess(access trackAccess) error {
-	if access.isListenFee {
+	restricted, valid := parseAccessRestriction(access.listenFee)
+	if !valid || restricted {
 		return terminalUnavailable(errPaidTrack)
 	}
 	if len(access.payInfo) == 0 || bytes.Equal(bytes.TrimSpace(access.payInfo), []byte("null")) {
 		return nil
 	}
+	if err := validateUniqueJSONKeys(access.payInfo); err != nil {
+		return terminalUnavailable(errPaidTrack)
+	}
 	var payInfo struct {
-		CannotOnlinePlay jsonScalar `json:"cannotOnlinePlay"`
-		ListenFragment   jsonScalar `json:"listen_fragment"`
+		CannotOnlinePlay json.RawMessage `json:"cannotOnlinePlay"`
+		ListenFragment   json.RawMessage `json:"listen_fragment"`
 	}
 	if err := json.Unmarshal(access.payInfo, &payInfo); err != nil {
-		return nil
-	}
-	if scalarTruthy(payInfo.CannotOnlinePlay) || scalarTruthy(payInfo.ListenFragment) {
 		return terminalUnavailable(errPaidTrack)
+	}
+	for _, raw := range []json.RawMessage{
+		payInfo.CannotOnlinePlay,
+		payInfo.ListenFragment,
+	} {
+		restricted, valid := parseAccessRestriction(raw)
+		if !valid || restricted {
+			return terminalUnavailable(errPaidTrack)
+		}
 	}
 	return nil
 }
 
-func scalarTruthy(value jsonScalar) bool {
+// parseAccessRestriction treats an absent field as unrestricted. Once a known
+// restriction field is present, only the explicit boolean/integer states used
+// by Kuwo are accepted; null, composites, and type drift fail closed.
+func parseAccessRestriction(raw json.RawMessage) (restricted, valid bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false, true
+	}
+	var value jsonScalar
+	if err := value.UnmarshalJSON(raw); err != nil || len(value.raw) == 0 {
+		return false, false
+	}
 	if flag, ok := value.Bool(); ok {
-		return flag
+		return flag, true
 	}
 	number, ok := value.Int64()
-	return ok && number == 1
+	if !ok || (number != 0 && number != 1) {
+		return false, false
+	}
+	return number == 1, true
 }
 
 func (c *Client) resolveMobileDownload(ctx context.Context, detail *trackDetail, candidate mobileQuality) (*platform.DownloadInfo, error) {
@@ -480,7 +687,7 @@ func (c *Client) resolveMobileDownload(ctx context.Context, detail *trackDetail,
 		return nil, fmt.Errorf("kuwo: create mobile play request: %w", err)
 	}
 	req.Header.Set("User-Agent", mediaUserAgent)
-	resp, err := c.mediaHTTPClient.Do(req)
+	resp, err := c.sessionlessAPIClient().Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
@@ -639,9 +846,9 @@ func (c *Client) resolveWebDownload(ctx context.Context, detail *trackDetail) (*
 		}
 		return nil, err
 	}
-	if probe.bitrate < 102 || probe.bitrate > 154 {
-		return nil, errors.New("kuwo: web fallback failed bitrate verification")
-	}
+	// probeMP3 already accepts only verified 128k or 320k average-bitrate
+	// buckets. The Web endpoint may return either representation for the same
+	// track, so preserve the quality established from the actual media.
 	return c.buildDownloadInfo(rawURL, "mp3", probe), nil
 }
 

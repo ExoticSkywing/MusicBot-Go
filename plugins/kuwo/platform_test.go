@@ -37,7 +37,7 @@ func TestPlatformMetadataAndCapabilities(t *testing.T) {
 		Search:      true,
 		Lyrics:      true,
 		Recognition: false,
-		HiRes:       false,
+		HiRes:       true,
 	}
 	if got := instance.Capabilities(); got != wantCapabilities {
 		t.Fatalf("Capabilities() = %#v, want %#v", got, wantCapabilities)
@@ -159,17 +159,21 @@ func TestPlatformDownloadQualityDelegatesToClient(t *testing.T) {
 	const totalSize = int64(7_200_000)
 	probeClient := mp3ProbeTransport(t, totalSize, nil)
 	probeTransport := probeClient.Transport
+	apiOriginTransport := apiServer.Client().Transport
+	client.apiHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "mobile.test" {
+			if request.URL.Query().Get("br") != "320kmp3" || request.URL.Query().Get("format") != "mp3" {
+				t.Fatalf("mobile query = %v, want 320kmp3/mp3", request.URL.Query())
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"code":200,"data":{"rid":"41378936","url":"https://er-sycdn.kuwo.cn/song.mp3","format":"mp3","bitrate":320,"duration":180,"type":0}}`,
+			)), nil
+		}
+		return apiOriginTransport.RoundTrip(request)
+	})
 	client.mediaHTTPClient = &http.Client{
 		Timeout: time.Second,
 		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			if request.URL.Host == "mobile.test" {
-				if request.URL.Query().Get("br") != "320kmp3" || request.URL.Query().Get("format") != "mp3" {
-					t.Fatalf("mobile query = %v, want 320kmp3/mp3", request.URL.Query())
-				}
-				return response(http.StatusOK, nil, []byte(
-					`{"code":200,"data":{"rid":"41378936","url":"https://er-sycdn.kuwo.cn/song.mp3","format":"mp3","bitrate":320,"duration":180,"type":0}}`,
-				)), nil
-			}
 			return probeTransport.RoundTrip(request)
 		}),
 	}

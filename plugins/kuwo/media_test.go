@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,8 +55,8 @@ func TestMobileQualityCandidates(t *testing.T) {
 	}{
 		{platform.QualityStandard, []string{"128kmp3"}},
 		{platform.QualityHigh, []string{"320kmp3", "128kmp3"}},
-		{platform.QualityLossless, []string{"2000kflac", "320kmp3", "128kmp3"}},
-		{platform.QualityHiRes, []string{"2000kflac", "320kmp3", "128kmp3"}},
+		{platform.QualityLossless, []string{"320kmp3", "128kmp3"}},
+		{platform.QualityHiRes, []string{"320kmp3", "128kmp3"}},
 	}
 	for _, tt := range tests {
 		got := mobileQualityCandidates(tt.quality)
@@ -64,12 +66,89 @@ func TestMobileQualityCandidates(t *testing.T) {
 	}
 }
 
+func TestLosslessResolverPlanUsesSeparateDirectFLACStreams(t *testing.T) {
+	cases := []struct {
+		name    string
+		quality platform.Quality
+		want    []losslessResolver
+	}{
+		{
+			name:    "lossless uses the direct 2000 FLAC stream",
+			quality: platform.QualityLossless,
+			want:    []losslessResolver{resolvePlayableFLAC},
+		},
+		{
+			name:    "hires uses direct 4000 then direct 2000 fallback",
+			quality: platform.QualityHiRes,
+			want:    []losslessResolver{resolvePlayableHiRes, resolvePlayableFLAC},
+		},
+		{
+			name:    "high has no lossless resolver",
+			quality: platform.QualityHigh,
+			want:    nil,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := losslessResolverPlan(testCase.quality)
+			if !slices.Equal(got, testCase.want) {
+				t.Fatalf("plan = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestMobileResolverUsesAPIClientAndDownloadProbeClient(t *testing.T) {
+	var apiCalls atomic.Int32
+	var probeCalls atomic.Int32
+	apiTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "mobi.kuwo.cn" {
+			t.Fatalf("API client requested unexpected host %q", req.URL.Host)
+		}
+		apiCalls.Add(1)
+		return response(http.StatusOK, nil, []byte(
+			`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/signed.mp3","format":"mp3","bitrate":320,"duration":213,"type":"0"}}`,
+		)), nil
+	})
+	probeTransport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "er-sycdn.kuwo.cn" {
+			t.Fatalf("download probe client requested unexpected host %q", req.URL.Host)
+		}
+		probeCalls.Add(1)
+		return mp3ProbeTransport(t, 8525534, nil).Transport.RoundTrip(req)
+	})
+	client := NewClient(time.Second, nil)
+	client.apiHTTPClient.Transport = apiTransport
+	client.mediaHTTPClient.Transport = probeTransport
+
+	info, err := client.resolveMobileDownload(
+		context.Background(),
+		&trackDetail{Track: platform.Track{ID: "41378936", Duration: 213 * time.Second}},
+		mobileQuality{br: "320kmp3", format: "mp3", bitrate: 320, quality: platform.QualityHigh},
+	)
+	if err != nil {
+		t.Fatalf("resolve mobile: %v", err)
+	}
+	if info == nil || info.Quality != platform.QualityHigh {
+		t.Fatalf("info = %#v", info)
+	}
+	if apiCalls.Load() != 1 || probeCalls.Load() != 2 {
+		t.Fatalf("api calls=%d probe calls=%d", apiCalls.Load(), probeCalls.Load())
+	}
+}
+
 func TestValidateMediaURL(t *testing.T) {
 	valid := []struct {
 		raw    string
 		format string
 	}{
 		{"https://kw-er.kuwo.cn/path/signed.flac", "flac"},
+		{
+			"https://kw-er.kuwo.cn/path/signed.flac?" +
+				"bitrate$2000&format$flac&source$kwplayer_ar_5.1.0&type$convert_url_with_sign&" +
+				"user$359307055300426&loginUid$",
+			"flac",
+		},
 		{"https://er-sycdn.kuwo.cn/path/signed.mp3", "mp3"},
 	}
 	for _, tt := range valid {
@@ -91,6 +170,29 @@ func TestValidateMediaURL(t *testing.T) {
 	for _, raw := range invalid {
 		if err := validateMediaURL(raw, "flac"); err == nil {
 			t.Errorf("validateMediaURL(%q) succeeded", raw)
+		}
+	}
+}
+
+func TestValidateMediaURLAcceptsOnlyExactMobilePseudoQuery(t *testing.T) {
+	const base = "https://kw-er.kuwo.cn/path/signed.flac?"
+	const valid = "bitrate$2000&format$flac&source$kwplayer_ar_5.1.0&type$convert_url_with_sign&" +
+		"user$359307055300426&loginUid$"
+
+	if err := validateMediaURL(base+valid, "flac"); err != nil {
+		t.Fatalf("validateMediaURL(valid mobile query) = %v", err)
+	}
+	for _, query := range []string{
+		"bitrate$2000&format$flac&source$kwplayer&type$convert_url_with_sign&user$1",
+		valid + "&token$secret",
+		"bitrate$2000&bitrate$2000&format$flac&source$kwplayer&type$convert_url_with_sign&user$1&loginUid$",
+		"bitrate$320&format$flac&source$kwplayer&type$convert_url_with_sign&user$1&loginUid$",
+		"bitrate$2000&format$mp3&source$kwplayer&type$convert_url_with_sign&user$1&loginUid$",
+		"bitrate$2000&format$flac&source$kwplayer%2Fbad&type$convert_url_with_sign&user$1&loginUid$",
+		"bitrate$2000&format$flac&source$kwplayer&type$convert_url_with_sign&user$not-a-number&loginUid$",
+	} {
+		if err := validateMediaURL(base+query, "flac"); !errors.Is(err, errUnsafeMediaURL) {
+			t.Errorf("validateMediaURL(query shape) = %v, want errUnsafeMediaURL", err)
 		}
 	}
 }
@@ -121,6 +223,25 @@ func TestMediaURLRejectsTrailingEmptyFragmentWithoutMisclassifyingEncodedPath(t 
 	}
 	if err := validateMediaURL("https://kw-er.kuwo.cn/path/signed.flac%23", "flac"); err == nil || errors.Is(err, errUnsafeMediaURL) {
 		t.Fatalf("encoded suffix mismatch error = %v, want ordinary suffix error", err)
+	}
+}
+
+func TestNormalizeSafeMediaURLCanonicalizesBareQueryDelimiter(t *testing.T) {
+	const raw = "http://kw-er.kuwo.cn/path/signed.flac?"
+	const want = "https://kw-er.kuwo.cn/path/signed.flac"
+
+	normalized, err := normalizeSafeMediaURL(raw)
+	if err != nil || normalized != want {
+		t.Fatalf("normalizeSafeMediaURL(%q) = (%q, %v), want %q", raw, normalized, err, want)
+	}
+	if err := validateMediaURL(normalized, "flac"); err != nil {
+		t.Fatalf("validateMediaURL(canonicalized URL) = %v", err)
+	}
+	if err := validateMediaURL(raw, "flac"); !errors.Is(err, errUnsafeMediaURL) {
+		t.Fatalf("validateMediaURL(raw bare query) = %v, want errUnsafeMediaURL", err)
+	}
+	if _, err := normalizeSafeMediaURL(raw + "token=secret"); !errors.Is(err, errUnsafeMediaURL) {
+		t.Fatalf("normalizeSafeMediaURL(non-empty query) = %v, want errUnsafeMediaURL", err)
 	}
 }
 
@@ -296,7 +417,9 @@ func TestProbeMediaRedirectRevalidatesAndReattachesHeaders(t *testing.T) {
 }
 
 func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
-	var mobileCalls []string
+	cleartext := makeTestFLAC(t, 64<<10, 44100, 16, 2, 213*time.Second)
+	raw := append(append([]byte(nil), cleartext...), knownDirectFLACTrailer...)
+	legacyCalls := 0
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {
 		case "www.kuwo.cn":
@@ -304,17 +427,51 @@ func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
 				return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
 			}
 			return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"name":"Song","duration":213,"isListenFee":false,"payInfo":{"cannotOnlinePlay":0,"listen_fragment":0}}}`)), nil
+		case "kw-api.cenguigui.cn":
+			t.Fatal("lossless route requested the Hi-Res/master resolver")
+			return nil, nil
 		case "mobi.kuwo.cn":
-			mobileCalls = append(mobileCalls, req.URL.Query().Get("br"))
-			if req.Header.Get("User-Agent") != mediaUserAgent {
-				t.Fatalf("mobile User-Agent = %q", req.Header.Get("User-Agent"))
+			if req.URL.Query().Get("q") == "" || req.URL.Query().Get("br") != "" {
+				t.Fatal("lossless route fell through to an MP3 mobile candidate")
 			}
-			return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"rid":41378936,"url":"http://kw-er.kuwo.cn/signed.flac","format":"flac","bitrate":2000,"duration":213,"type":0}}`)), nil
+			legacyCalls++
+			return response(http.StatusOK, nil, []byte(
+				"format=flac\n"+
+					"bitrate=2000\n"+
+					"rid=41378936\n"+
+					"duration=213\n"+
+					"type=0\n"+
+					"url=https://kw-er.kuwo.cn/audio/lossless.flac\n",
+			)), nil
 		case "kw-er.kuwo.cn":
-			if req.URL.Scheme != "https" {
-				t.Fatalf("media scheme = %q", req.URL.Scheme)
+			switch req.Header.Get("Range") {
+			case "bytes=0-41":
+				return response(
+					http.StatusPartialContent,
+					map[string]string{
+						"Content-Range": fmt.Sprintf("bytes 0-41/%d", len(raw)),
+					},
+					raw[:42],
+				), nil
+			case fmt.Sprintf("bytes=%d-%d", len(cleartext), len(raw)-1):
+				tailResponse := response(
+					http.StatusPartialContent,
+					map[string]string{
+						"Content-Range": fmt.Sprintf(
+							"bytes %d-%d/%d",
+							len(cleartext),
+							len(raw)-1,
+							len(raw),
+						),
+					},
+					knownDirectFLACTrailer,
+				)
+				tailResponse.ContentLength = int64(len(knownDirectFLACTrailer))
+				return tailResponse, nil
+			default:
+				t.Fatalf("unexpected direct lossless Range %q", req.Header.Get("Range"))
+				return nil, nil
 			}
-			return response(http.StatusPartialContent, map[string]string{"Content-Range": "bytes 0-41/27383481"}, validFLACStreamInfo(213*time.Second)), nil
 		default:
 			t.Fatalf("unexpected request %s", req.URL)
 			return nil, nil
@@ -323,19 +480,21 @@ func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
 	client := NewClient(time.Second, nil)
 	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
+	client.downloadHTTPClient = &http.Client{Transport: transport}
 	now := time.Unix(1700000000, 0)
 	client.now = func() time.Time { return now }
 
-	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHiRes)
+	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
 	if err != nil {
 		t.Fatalf("GetDownloadInfo() = %v", err)
 	}
-	if info.URL != "https://kw-er.kuwo.cn/signed.flac" || info.Format != "flac" ||
-		info.Size != 27383481 || info.Bitrate != 1028 || info.Quality != platform.QualityLossless {
+	if info.URL != "https://kw-er.kuwo.cn/audio/lossless.flac" || info.Format != "flac" ||
+		info.Size != int64(len(cleartext)) || info.Quality != platform.QualityLossless ||
+		info.Downloader == nil {
 		t.Fatalf("info = %#v", info)
 	}
-	if !slices.Equal(mobileCalls, []string{"2000kflac"}) {
-		t.Fatalf("mobile calls = %v", mobileCalls)
+	if legacyCalls != 1 {
+		t.Fatalf("legacy direct calls = %d, want 1", legacyCalls)
 	}
 	if info.ValidateURL == nil || info.ExpiresAt == nil || !info.ExpiresAt.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("policy/expiry = %#v", info)
@@ -484,7 +643,6 @@ func TestResolveDownloadTrailingEmptyFragmentIsTerminal(t *testing.T) {
 		mediaTotal int64
 	}{
 		{name: "mp3", quality: platform.QualityStandard, format: "mp3", bitrate: 128, mediaTotal: 3410341},
-		{name: "flac", quality: platform.QualityLossless, format: "flac", bitrate: 2000, mediaTotal: 27383481},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var mobileCalls atomic.Int32
@@ -504,6 +662,16 @@ func TestResolveDownloadTrailingEmptyFragmentIsTerminal(t *testing.T) {
 					}
 				case "mobi.kuwo.cn":
 					mobileCalls.Add(1)
+					if req.URL.Query().Get("f") == "kuwo" {
+						return response(http.StatusOK, nil, []byte(
+							"format=flac\r\n"+
+								"bitrate=2000\r\n"+
+								"rid=41378936\r\n"+
+								"duration=213\r\n"+
+								"type=0\r\n"+
+								"url=https://kw-er.kuwo.cn/signed.flac#\r\n",
+						)), nil
+					}
 					body := fmt.Sprintf(
 						`{"code":200,"data":{"rid":41378936,"url":"https://kw-er.kuwo.cn/signed.%s#","format":%q,"bitrate":%d,"duration":213,"type":0}}`,
 						tt.format,
@@ -731,12 +899,23 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 		want   error
 	}{
 		{"listen fee", `{"data":{"rid":41378936,"duration":213,"isListenFee":true}}`, errPaidTrack},
+		{"listen fee null", `{"data":{"rid":41378936,"duration":213,"isListenFee":null}}`, errPaidTrack},
+		{"listen fee malformed string", `{"data":{"rid":41378936,"duration":213,"isListenFee":"garbage"}}`, errPaidTrack},
+		{"listen fee fractional", `{"data":{"rid":41378936,"duration":213,"isListenFee":0.5}}`, errPaidTrack},
+		{"listen fee composite", `{"data":{"rid":41378936,"duration":213,"isListenFee":{}}}`, errPaidTrack},
 		{"cannot play", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"cannotOnlinePlay":1}}}`, errPaidTrack},
 		{"fragment", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"listen_fragment":"true"}}}`, errPaidTrack},
+		{"malformed cannot play", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"cannotOnlinePlay":{"unexpected":1}}}}`, errPaidTrack},
+		{"malformed fragment", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"listen_fragment":[]}}}`, errPaidTrack},
+		{"null known flag", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"cannotOnlinePlay":null}}}`, errPaidTrack},
+		{"malformed pay info", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":[]}}`, errPaidTrack},
+		{"duplicate listen fee", `{"data":{"rid":41378936,"duration":213,"isListenFee":true,"isListenFee":false}}`, platform.ErrUnavailable},
+		{"duplicate pay flag", `{"data":{"rid":41378936,"duration":213,"isListenFee":false,"payInfo":{"cannotOnlinePlay":1,"cannotOnlinePlay":0}}}`, platform.ErrUnavailable},
 	}
 	for _, tt := range fixtures {
 		t.Run(tt.name, func(t *testing.T) {
 			mobileCalls := 0
+			webCalls := 0
 			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				if req.URL.Path == "/" {
 					return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
@@ -744,19 +923,265 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 				if req.URL.Host == "mobi.kuwo.cn" {
 					mobileCalls++
 				}
+				if req.URL.Host == "www.kuwo.cn" && strings.Contains(req.URL.Path, "playUrl") {
+					webCalls++
+				}
 				return response(http.StatusOK, nil, []byte(tt.detail)), nil
 			})
 			client := NewClient(time.Second, nil)
 			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
-			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
+			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
 			if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want unavailable and %v", err, tt.want)
 			}
 			if mobileCalls != 0 {
 				t.Fatalf("mobile calls = %d", mobileCalls)
 			}
+			if webCalls != 0 {
+				t.Fatalf("web calls = %d", webCalls)
+			}
 		})
+	}
+}
+
+func TestPaidMetadataAllowsOnlyStrictlyVerifiedDirectHiRes(t *testing.T) {
+	const (
+		trackID = "7149583"
+		rawSize = 1 << 20
+	)
+	streamInfo := makeTestFLAC(t, 42, 96000, 24, 2, time.Second)
+	var resolverCalls atomic.Int32
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "www.kuwo.cn":
+			if req.URL.Path == "/" {
+				return response(
+					http.StatusOK,
+					map[string]string{
+						"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
+					},
+					nil,
+				), nil
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"data":{"rid":7149583,"duration":1,"isListenFee":true}}`,
+			)), nil
+		case "resolver.example":
+			resolverCalls.Add(1)
+			if req.URL.Query().Get("level") != "hires" {
+				t.Fatalf("resolver level = %q, want hires", req.URL.Query().Get("level"))
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"code":200,"data":{"rid":"7149583","bitrate":4000,"duration":1,`+
+					`"size":"1.00 MB","url":"https://kw-lw.kuwo.cn/audio/hires.flac",`+
+					`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[`+
+					`{"br":"4000","format":"flac","level":"hires"}]}}}`,
+			)), nil
+		case "kw-lw.kuwo.cn":
+			switch req.Header.Get("Range") {
+			case "bytes=0-41":
+				return response(
+					http.StatusPartialContent,
+					map[string]string{"Content-Range": "bytes 0-41/1048576"},
+					streamInfo,
+				), nil
+			case "bytes=1048561-1048575":
+				tailResponse := response(
+					http.StatusPartialContent,
+					map[string]string{
+						"Content-Range": "bytes 1048561-1048575/1048576",
+					},
+					make([]byte, len(knownDirectFLACTrailer)),
+				)
+				tailResponse.ContentLength = int64(len(knownDirectFLACTrailer))
+				return tailResponse, nil
+			default:
+				t.Fatalf("unexpected direct Hi-Res Range %q", req.Header.Get("Range"))
+				return nil, nil
+			}
+		case "mobi.kuwo.cn":
+			t.Fatal("paid Hi-Res request fell through to MP3")
+			return nil, nil
+		default:
+			t.Fatalf("unexpected request host %q", req.URL.Host)
+			return nil, nil
+		}
+	})
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home:            kuwoHomeURL,
+		detail:          kuwoDetailURL,
+		qualityResolver: "https://resolver.example/api",
+	})
+	client.apiHTTPClient.Transport = transport
+	client.mediaHTTPClient.Transport = transport
+	client.downloadHTTPClient = &http.Client{Transport: transport}
+
+	info, err := client.GetDownloadInfo(
+		context.Background(),
+		trackID,
+		platform.QualityHiRes,
+	)
+	if err != nil {
+		t.Fatalf("GetDownloadInfo() = %v", err)
+	}
+	if resolverCalls.Load() != 1 ||
+		info == nil ||
+		info.Quality != platform.QualityHiRes ||
+		info.Downloader == nil {
+		t.Fatalf("resolverCalls=%d info=%#v", resolverCalls.Load(), info)
+	}
+}
+
+func TestHiResFalseLabelFallsBackToDirect2000WithoutMaster(t *testing.T) {
+	const (
+		trackID = "41378936"
+		rawSize = 1 << 20
+	)
+	falseHiResHeader := makeTestFLAC(t, 42, 44100, 16, 2, 213*time.Second)
+	losslessCleartext := makeTestFLAC(
+		t,
+		rawSize-len(knownDirectFLACTrailer),
+		44100,
+		16,
+		2,
+		213*time.Second,
+	)
+	losslessRaw := append(
+		append([]byte(nil), losslessCleartext...),
+		knownDirectFLACTrailer...,
+	)
+	var resolverCalls atomic.Int32
+	var legacyCalls atomic.Int32
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.EqualFold(req.URL.Query().Get("level"), "jymaster") ||
+			strings.EqualFold(path.Ext(req.URL.Path), ".mflac") {
+			t.Fatal("runtime requested a master stream")
+		}
+		switch req.URL.Host {
+		case "www.kuwo.cn":
+			if req.URL.Path == "/" {
+				return response(
+					http.StatusOK,
+					map[string]string{
+						"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
+					},
+					nil,
+				), nil
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`,
+			)), nil
+		case "resolver.example":
+			resolverCalls.Add(1)
+			if req.URL.Query().Get("level") != "hires" {
+				t.Fatalf("resolver level = %q, want hires", req.URL.Query().Get("level"))
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"code":200,"data":{"rid":"41378936","bitrate":4000,"duration":213,`+
+					`"size":"1.00 MB","url":"https://kw-lw.kuwo.cn/audio/false-hires.flac",`+
+					`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[`+
+					`{"br":"4000","format":"flac","level":"hires"}]}}}`,
+			)), nil
+		case "kw-lw.kuwo.cn":
+			if req.Header.Get("Range") != "bytes=0-41" {
+				t.Fatalf("unexpected false Hi-Res Range %q", req.Header.Get("Range"))
+			}
+			return response(
+				http.StatusPartialContent,
+				map[string]string{"Content-Range": "bytes 0-41/1048576"},
+				falseHiResHeader,
+			), nil
+		case "mobi.kuwo.cn":
+			if req.URL.Query().Get("q") == "" || req.URL.Query().Get("br") != "" {
+				t.Fatal("Hi-Res fallback skipped the direct 2000 resolver")
+			}
+			legacyCalls.Add(1)
+			return response(http.StatusOK, nil, []byte(
+				"format=flac\n"+
+					"bitrate=2000\n"+
+					"rid=41378936\n"+
+					"duration=213\n"+
+					"type=0\n"+
+					"url=https://kw-er.kuwo.cn/audio/lossless.flac\n",
+			)), nil
+		case "kw-er.kuwo.cn":
+			switch req.Header.Get("Range") {
+			case "bytes=0-41":
+				return response(
+					http.StatusPartialContent,
+					map[string]string{"Content-Range": "bytes 0-41/1048576"},
+					losslessRaw[:42],
+				), nil
+			case "bytes=1048561-1048575":
+				tailResponse := response(
+					http.StatusPartialContent,
+					map[string]string{
+						"Content-Range": "bytes 1048561-1048575/1048576",
+					},
+					losslessRaw[rawSize-len(knownDirectFLACTrailer):],
+				)
+				tailResponse.ContentLength = int64(len(knownDirectFLACTrailer))
+				return tailResponse, nil
+			case "":
+				return directFLACResponse(losslessRaw), nil
+			default:
+				t.Fatalf("unexpected lossless Range %q", req.Header.Get("Range"))
+				return nil, nil
+			}
+		default:
+			t.Fatalf("unexpected request host %q", req.URL.Host)
+			return nil, nil
+		}
+	})
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home:            kuwoHomeURL,
+		detail:          kuwoDetailURL,
+		qualityResolver: "https://resolver.example/api",
+	})
+	client.apiHTTPClient.Transport = transport
+	client.mediaHTTPClient.Transport = transport
+	client.downloadHTTPClient = &http.Client{Transport: transport}
+
+	info, err := client.GetDownloadInfo(
+		context.Background(),
+		trackID,
+		platform.QualityHiRes,
+	)
+	if err != nil {
+		t.Fatalf("GetDownloadInfo() = %v", err)
+	}
+	if resolverCalls.Load() != 1 ||
+		legacyCalls.Load() != 1 ||
+		info == nil ||
+		info.Quality != platform.QualityLossless ||
+		info.Downloader == nil {
+		t.Fatalf(
+			"resolverCalls=%d legacyCalls=%d info=%#v",
+			resolverCalls.Load(),
+			legacyCalls.Load(),
+			info,
+		)
+	}
+	destination := filepath.Join(t.TempDir(), "fallback.flac")
+	written, err := info.Downloader(
+		context.Background(),
+		info,
+		destination,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("fallback downloader = %v", err)
+	}
+	if written != int64(len(losslessCleartext)) {
+		t.Fatalf("fallback written = %d, want %d", written, len(losslessCleartext))
+	}
+	downloaded, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read fallback download: %v", err)
+	}
+	if !bytes.Equal(downloaded, losslessCleartext) {
+		t.Fatal("fallback downloader did not publish the verified 2000k stream")
 	}
 }
 
@@ -1017,40 +1442,54 @@ func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
 	}
 }
 
-func TestResolveDownloadMobileTransportFailureUsesWeb128(t *testing.T) {
-	var webCalls atomic.Int32
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.Host {
-		case "www.kuwo.cn":
-			switch {
-			case req.URL.Path == "/":
-				return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
-			case strings.Contains(req.URL.Path, "musicInfo"):
-				return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
-			case strings.Contains(req.URL.Path, "playUrl"):
-				webCalls.Add(1)
-				if req.URL.Query().Get("mid") != "41378936" || req.URL.Query().Get("type") != "music" || req.URL.Query().Get("httpsStatus") != "1" {
-					t.Fatalf("web query = %v", req.URL.Query())
+func TestResolveDownloadMobileTransportFailureUsesVerifiedWebMP3(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		size    int64
+		quality platform.Quality
+		bitrate int
+	}{
+		{name: "128k", size: 3410341, quality: platform.QualityStandard, bitrate: 128},
+		{name: "320k", size: 8525534, quality: platform.QualityHigh, bitrate: 320},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var webCalls atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "www.kuwo.cn":
+					switch {
+					case req.URL.Path == "/":
+						return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+					case strings.Contains(req.URL.Path, "musicInfo"):
+						return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+					case strings.Contains(req.URL.Path, "playUrl"):
+						webCalls.Add(1)
+						if req.URL.Query().Get("mid") != "41378936" || req.URL.Query().Get("type") != "music" || req.URL.Query().Get("httpsStatus") != "1" {
+							t.Fatalf("web query = %v", req.URL.Query())
+						}
+						return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+					}
+				case "mobi.kuwo.cn":
+					return nil, errors.New("mobile transport down")
+				case "kw-api.cenguigui.cn":
+					return response(http.StatusOK, nil, []byte(`{"code":404,"data":[]}`)), nil
+				case "er-sycdn.kuwo.cn":
+					return mp3ProbeTransport(t, test.size, nil).Transport.RoundTrip(req)
 				}
-				return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+				t.Fatalf("unexpected request %s", req.URL)
+				return nil, nil
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
+			if err != nil {
+				t.Fatalf("GetDownloadInfo() = %v", err)
 			}
-		case "mobi.kuwo.cn":
-			return nil, errors.New("mobile transport down")
-		case "er-sycdn.kuwo.cn":
-			return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
-		}
-		t.Fatalf("unexpected request %s", req.URL)
-		return nil, nil
-	})
-	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
-	client.mediaHTTPClient.Transport = transport
-	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
-	if err != nil {
-		t.Fatalf("GetDownloadInfo() = %v", err)
-	}
-	if webCalls.Load() != 1 || info.Quality != platform.QualityStandard || info.Bitrate != 128 {
-		t.Fatalf("webCalls=%d info=%#v", webCalls.Load(), info)
+			if webCalls.Load() != 1 || info.Quality != test.quality || info.Bitrate != test.bitrate {
+				t.Fatalf("webCalls=%d info=%#v", webCalls.Load(), info)
+			}
+		})
 	}
 }
 
@@ -1068,6 +1507,8 @@ func TestResolveDownloadRateLimitIsTerminal(t *testing.T) {
 			return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
 		case "mobi.kuwo.cn":
 			return response(http.StatusTooManyRequests, nil, nil), nil
+		case "kw-api.cenguigui.cn":
+			return response(http.StatusOK, nil, []byte(`{"code":404,"data":[]}`)), nil
 		default:
 			t.Fatalf("unexpected request %s", req.URL)
 			return nil, nil

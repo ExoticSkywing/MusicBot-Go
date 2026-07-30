@@ -20,7 +20,7 @@ type trackWire struct {
 	Duration    jsonScalar      `json:"duration"`
 	Cover       jsonScalar      `json:"pic"`
 	CoverShort  jsonScalar      `json:"web_albumpic_short"`
-	IsListenFee jsonScalar      `json:"isListenFee"`
+	IsListenFee json.RawMessage `json:"isListenFee"`
 	IsTry       jsonScalar      `json:"isTry"`
 	PayInfo     json.RawMessage `json:"payInfo"`
 }
@@ -32,9 +32,9 @@ type trackDetail struct {
 // trackAccess preserves the upstream availability signals without deciding
 // whether a track is downloadable; that policy belongs to the download layer.
 type trackAccess struct {
-	isListenFee bool
-	isTrial     bool
-	payInfo     json.RawMessage
+	listenFee json.RawMessage
+	isTrial   bool
+	payInfo   json.RawMessage
 }
 
 func normalizeRID(value string) string {
@@ -156,8 +156,8 @@ func convertTrack(wire trackWire) (trackDetail, trackAccess, bool) {
 		URL:      "https://www.kuwo.cn/play_detail/" + id,
 	}
 	return trackDetail{Track: track}, trackAccess{
-		isListenFee: scalarFlag(wire.IsListenFee),
-		isTrial:     scalarFlag(wire.IsTry),
-		payInfo:     append(json.RawMessage(nil), wire.PayInfo...),
+		listenFee: append(json.RawMessage(nil), wire.IsListenFee...),
+		isTrial:   scalarFlag(wire.IsTry),
+		payInfo:   append(json.RawMessage(nil), wire.PayInfo...),
 	}, true
 }

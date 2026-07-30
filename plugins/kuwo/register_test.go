@@ -95,6 +95,8 @@ timeout = 7
 			kuwoPlatform.client.clientMu.RLock()
 			apiClient := kuwoPlatform.client.apiHTTPClient
 			mediaClient := kuwoPlatform.client.mediaHTTPClient
+			downloadClient := kuwoPlatform.client.downloadHTTPClient
+			downloadRetries := kuwoPlatform.client.downloadMaxRetries
 			kuwoPlatform.client.clientMu.RUnlock()
 			if apiClient == nil || apiClient.Timeout != test.wantTimeout {
 				t.Fatalf("API timeout = %v, want %v", clientTimeout(apiClient), test.wantTimeout)
@@ -102,7 +104,65 @@ timeout = 7
 			if mediaClient == nil || mediaClient.Timeout != test.wantTimeout {
 				t.Fatalf("media timeout = %v, want %v", clientTimeout(mediaClient), test.wantTimeout)
 			}
+			if downloadClient == nil || downloadClient.Timeout != 0 {
+				t.Fatalf("download client timeout = %v, want no whole-request timeout", clientTimeout(downloadClient))
+			}
+			if downloadRetries != 3 {
+				t.Fatalf("download retries = %d, want 3", downloadRetries)
+			}
 		})
+	}
+}
+
+func TestKuwoFactoryInjectsGlobalDownloadProxy(t *testing.T) {
+	factory := registeredKuwoFactory(t)
+	cfg := loadKuwoFactoryConfig(t, `
+DownloadProxy = http://127.0.0.1:17890
+DownloadMaxRetries = 5
+
+[plugins.kuwo]
+enabled = true
+`)
+	contribution, err := factory(cfg, nil)
+	if err != nil {
+		t.Fatalf("factory() = %v", err)
+	}
+	kuwoPlatform, ok := contribution.Platform.(*KuwoPlatform)
+	if !ok || kuwoPlatform.client == nil {
+		t.Fatalf("factory platform = %T", contribution.Platform)
+	}
+	downloadClient, retries := kuwoPlatform.client.downloadClientSnapshot()
+	if retries != 5 {
+		t.Fatalf("download retries = %d, want 5", retries)
+	}
+	transport, ok := downloadClient.Transport.(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("download transport = %T, want proxied *http.Transport", downloadClient.Transport)
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://kw-lv.kuwo.cn/a.flac", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := transport.Proxy(request)
+	if err != nil {
+		t.Fatalf("resolve proxy: %v", err)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://127.0.0.1:17890" {
+		t.Fatalf("proxy = %v, want configured global DownloadProxy", proxyURL)
+	}
+	kuwoPlatform.client.clientMu.RLock()
+	probeClient := kuwoPlatform.client.mediaHTTPClient
+	kuwoPlatform.client.clientMu.RUnlock()
+	probeTransport, ok := probeClient.Transport.(*http.Transport)
+	if !ok || probeTransport.Proxy == nil {
+		t.Fatalf("probe transport = %T, want DownloadProxy transport", probeClient.Transport)
+	}
+	probeProxyURL, err := probeTransport.Proxy(request)
+	if err != nil {
+		t.Fatalf("resolve probe proxy: %v", err)
+	}
+	if probeProxyURL == nil || probeProxyURL.String() != "http://127.0.0.1:17890" {
+		t.Fatalf("probe proxy = %v, want configured global DownloadProxy", probeProxyURL)
 	}
 }
 

@@ -30,5 +30,13 @@ func buildContribution(
 	if err := client.SetAPIProxy(cfg.ResolveAPIProxyConfig("kuwo")); err != nil {
 		return nil, err
 	}
+	downloadTimeout := time.Duration(cfg.GetInt("DownloadTimeout")) * time.Second
+	if err := client.SetDownloadConfig(
+		cfg.GetString("DownloadProxy"),
+		downloadTimeout,
+		cfg.GetInt("DownloadMaxRetries"),
+	); err != nil {
+		return nil, err
+	}
 	return &platformplugins.Contribution{Platform: NewPlatform(client)}, nil
 }
