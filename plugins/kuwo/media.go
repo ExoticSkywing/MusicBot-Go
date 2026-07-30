@@ -497,12 +497,24 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
 	durationSeconds, ok := data.Duration.scalar().Int64()
-	if !ok || durationSeconds <= 0 {
+	if !ok || durationSeconds <= 0 || durationSeconds > math.MaxInt64/int64(time.Second) {
 		return nil, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
 	}
 	duration := time.Duration(durationSeconds) * time.Second
 	if !durationsMatch(duration, detail.Duration) {
 		return nil, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
+	}
+	rawURLValue := scalarText(data.URL.scalar())
+	var rawURL string
+	if strings.TrimSpace(rawURLValue) != "" {
+		var err error
+		rawURL, err = normalizeMediaURL(rawURLValue, candidate.format)
+		if err != nil {
+			if errors.Is(err, errUnsafeMediaURL) {
+				return nil, terminalUnavailable(err)
+			}
+			return nil, err
+		}
 	}
 	declaredBitrate, bitrateOK := data.Bitrate.scalar().Int64()
 	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
@@ -515,12 +527,15 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	if declaredFormat == "" || declaredFormat != candidate.format {
 		return nil, errors.New("kuwo: candidate format mismatch")
 	}
-	rawURL, err := normalizeMediaURL(scalarText(data.URL.scalar()), candidate.format)
-	if err != nil {
-		if errors.Is(err, errUnsafeMediaURL) {
-			return nil, terminalUnavailable(err)
+	if rawURL == "" {
+		var err error
+		rawURL, err = normalizeMediaURL(rawURLValue, candidate.format)
+		if err != nil {
+			if errors.Is(err, errUnsafeMediaURL) {
+				return nil, terminalUnavailable(err)
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, candidate.format, detail.Duration)
 	if err != nil {
