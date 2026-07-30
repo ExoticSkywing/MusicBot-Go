@@ -404,6 +404,11 @@ func (c *Client) GetPlaylist(
 	offset, limit int,
 ) (*platform.Playlist, error) {
 	playlistID = strings.TrimSpace(playlistID)
+	// Album links arrive through the playlist entry point under an "album:"
+	// prefix, since both kinds of collection are bare integers upstream.
+	if kind, rawID := parseCollectionID(playlistID); kind == "album" {
+		return c.GetAlbumPlaylist(ctx, rawID, offset, limit)
+	}
 	if !isASCIIUnsignedDecimal(playlistID, 20) {
 		return nil, platform.NewNotFoundError("kuwo", "playlist", playlistID)
 	}

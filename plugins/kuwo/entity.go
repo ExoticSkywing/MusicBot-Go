@@ -24,15 +24,16 @@ type albumResponse struct {
 }
 
 type albumWire struct {
-	AlbumID     jsonScalar `json:"albumid"`
-	Album       jsonScalar `json:"album"`
-	Artist      jsonScalar `json:"artist"`
-	ArtistID    jsonScalar `json:"artistid"`
-	AllArtistID jsonScalar `json:"allartistid"`
-	Pic         jsonScalar `json:"pic"`
-	Total       jsonScalar `json:"total"`
-	ReleaseDate jsonScalar `json:"releaseDate"`
-	AlbumInfo   jsonScalar `json:"albuminfo"`
+	AlbumID     jsonScalar  `json:"albumid"`
+	Album       jsonScalar  `json:"album"`
+	Artist      jsonScalar  `json:"artist"`
+	ArtistID    jsonScalar  `json:"artistid"`
+	AllArtistID jsonScalar  `json:"allartistid"`
+	Pic         jsonScalar  `json:"pic"`
+	Total       jsonScalar  `json:"total"`
+	ReleaseDate jsonScalar  `json:"releaseDate"`
+	AlbumInfo   jsonScalar  `json:"albuminfo"`
+	MusicList   []trackWire `json:"musicList"`
 }
 
 type artistResponse struct {

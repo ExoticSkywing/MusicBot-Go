@@ -48,6 +48,11 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 			return id, true
 		}
 	}
+	// Albums reuse the playlist entry point so an album link expands into its
+	// tracks; the prefix keeps the two ID spaces apart.
+	if id, ok := pathID(parsed.Path, "/album_detail/"); ok {
+		return encodeAlbumCollectionID(id), true
+	}
 	if parsed.Path == "/web/inventory/share" && parsed.Query().Get("type") == "2016" {
 		if id := parsed.Query().Get("pid"); kuwoIDPattern.MatchString(id) {
 			return id, true
