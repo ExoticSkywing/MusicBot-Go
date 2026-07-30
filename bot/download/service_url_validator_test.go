@@ -696,15 +696,23 @@ func TestDownloadURLValidatorChecksInitialAndRedirectTargets(t *testing.T) {
 }
 
 func TestDownloadURLValidatorStopsBeforeEleventhRequest(t *testing.T) {
-	var hits atomic.Int32
+	var (
+		hits           atomic.Int32
+		validatorCalls atomic.Int32
+		lastValidated  atomic.Value
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		current := hits.Add(1)
 		http.Redirect(w, r, fmt.Sprintf("/%d", current), http.StatusFound)
 	}))
 	defer server.Close()
 	info := &platform.DownloadInfo{
-		URL:         server.URL + "/0",
-		ValidateURL: func(string) error { return nil },
+		URL: server.URL + "/0",
+		ValidateURL: func(rawURL string) error {
+			validatorCalls.Add(1)
+			lastValidated.Store(rawURL)
+			return nil
+		},
 	}
 	dest := filepath.Join(t.TempDir(), "audio.bin")
 	if _, err := newPolicyTestService(false).Download(context.Background(), info, dest, nil); err == nil {
@@ -712,6 +720,12 @@ func TestDownloadURLValidatorStopsBeforeEleventhRequest(t *testing.T) {
 	}
 	if hits.Load() != 10 {
 		t.Fatalf("requests = %d, want 10 before the eleventh request is blocked", hits.Load())
+	}
+	if validatorCalls.Load() != 11 {
+		t.Fatalf("validator calls = %d, want initial URL plus 10 redirect targets", validatorCalls.Load())
+	}
+	if got, _ := lastValidated.Load().(string); got != server.URL+"/10" {
+		t.Fatalf("last validated URL = %q, want blocked eleventh target", got)
 	}
 }
 

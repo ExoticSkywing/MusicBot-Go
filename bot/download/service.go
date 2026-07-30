@@ -100,9 +100,6 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 		Transport: transport,
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
 		if policy, ok := req.Context().Value(downloadPolicyContextKey{}).(downloadPolicy); ok {
 			if policy.validateURL != nil {
 				if err := policy.validateURL(req.URL.String()); err != nil {
@@ -114,6 +111,9 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 			} else {
 				deleteDownloadPolicyHeaders(req, policy.headers)
 			}
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
 		}
 		return nil
 	}
