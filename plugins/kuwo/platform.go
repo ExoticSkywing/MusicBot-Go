@@ -94,12 +94,25 @@ func (p *KuwoPlatform) GetTrack(ctx context.Context, trackID string) (*platform.
 	return p.client.GetTrack(ctx, trackID)
 }
 
-func (p *KuwoPlatform) GetArtist(context.Context, string) (*platform.Artist, error) {
-	return nil, platform.NewUnsupportedError("kuwo", "get artist")
+func (p *KuwoPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
+	artist, _, err := p.GetArtistDetails(ctx, artistID)
+	return artist, err
 }
 
-func (p *KuwoPlatform) GetAlbum(context.Context, string) (*platform.Album, error) {
-	return nil, platform.NewUnsupportedError("kuwo", "get album")
+// GetArtistDetails implements the handler's artistDetailProvider so the artist
+// card can show Kuwo's track count alongside the profile.
+func (p *KuwoPlatform) GetArtistDetails(ctx context.Context, artistID string) (*platform.Artist, int, error) {
+	if p == nil || p.client == nil {
+		return nil, 0, platform.NewUnavailableError("kuwo", "artist", artistID)
+	}
+	return p.client.GetArtist(ctx, artistID)
+}
+
+func (p *KuwoPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
+	if p == nil || p.client == nil {
+		return nil, platform.NewUnavailableError("kuwo", "album", albumID)
+	}
+	return p.client.GetAlbum(ctx, albumID)
 }
 
 func (p *KuwoPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
@@ -117,6 +130,12 @@ func (p *KuwoPlatform) MatchURL(rawURL string) (string, bool) {
 
 func (p *KuwoPlatform) MatchPlaylistURL(rawURL string) (string, bool) {
 	return NewURLMatcher().MatchPlaylistURL(rawURL)
+}
+
+// MatchArtistURL implements platform.ArtistURLMatcher so a Kuwo artist link
+// pasted into chat resolves to the artist card.
+func (p *KuwoPlatform) MatchArtistURL(rawURL string) (string, bool) {
+	return NewURLMatcher().MatchArtistURL(rawURL)
 }
 
 func (p *KuwoPlatform) MatchText(text string) (string, bool) {

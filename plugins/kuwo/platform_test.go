@@ -204,13 +204,16 @@ func TestPlatformNilClientAndReceiverAreUnavailable(t *testing.T) {
 		if got, err := instance.GetPlaylist(context.Background(), "1"); got != nil || !errors.Is(err, platform.ErrUnavailable) {
 			t.Errorf("GetPlaylist() = %#v, %v", got, err)
 		}
-
-		if got, err := instance.GetArtist(context.Background(), "1"); got != nil || !errors.Is(err, platform.ErrUnsupported) {
+		if got, err := instance.GetArtist(context.Background(), "1"); got != nil || !errors.Is(err, platform.ErrUnavailable) {
 			t.Errorf("GetArtist() = %#v, %v", got, err)
 		}
-		if got, err := instance.GetAlbum(context.Background(), "1"); got != nil || !errors.Is(err, platform.ErrUnsupported) {
+		if got, count, err := instance.GetArtistDetails(context.Background(), "1"); got != nil || count != 0 || !errors.Is(err, platform.ErrUnavailable) {
+			t.Errorf("GetArtistDetails() = %#v, %d, %v", got, count, err)
+		}
+		if got, err := instance.GetAlbum(context.Background(), "1"); got != nil || !errors.Is(err, platform.ErrUnavailable) {
 			t.Errorf("GetAlbum() = %#v, %v", got, err)
 		}
+
 		if got, err := instance.RecognizeAudio(context.Background(), strings.NewReader("audio")); got != nil || !errors.Is(err, platform.ErrUnsupported) {
 			t.Errorf("RecognizeAudio() = %#v, %v", got, err)
 		}

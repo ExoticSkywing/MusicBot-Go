@@ -56,6 +56,21 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 	return "", false
 }
 
+// MatchArtistURL extracts an artist ID from a supported Kuwo artist URL.
+func (m *URLMatcher) MatchArtistURL(rawURL string) (artistID string, matched bool) {
+	parsed, ok := parseKuwoURL(rawURL)
+	if !ok {
+		return "", false
+	}
+
+	for _, prefix := range []string{"/singer_detail/", "/newh5app/singer_detail/"} {
+		if id, ok := pathID(parsed.Path, prefix); ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // TextMatcher extracts Kuwo track IDs from explicit prefixes or embedded URLs.
 type TextMatcher struct{}
 

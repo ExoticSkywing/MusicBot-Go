@@ -43,6 +43,8 @@ type kuwoEndpoints struct {
 	search          string
 	detail          string
 	playlist        string
+	album           string
+	artist          string
 	mobile          string
 	legacy          string
 	qualityResolver string
@@ -73,6 +75,8 @@ func NewClient(timeout time.Duration, logger bot.Logger) *Client {
 		search:          kuwoSearchURL,
 		detail:          kuwoDetailURL,
 		playlist:        kuwoPlaylistURL,
+		album:           kuwoAlbumURL,
+		artist:          kuwoArtistURL,
 		qualityResolver: kuwoDirectHiResResolveURL,
 		wordLyric:       kuwoWordLyricURL,
 		mobileLyric:     kuwoMobileLyricURL,
