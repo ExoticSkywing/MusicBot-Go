@@ -51,16 +51,21 @@ func (p *AppleMusicPlatform) GetDownloadInfo(ctx context.Context, trackID string
 	return p.client.GetDownloadInfo(ctx, trackID, quality)
 }
 
-// NeedsSerialDownload implements platform.SerialDownloadGate. It returns true
-// when the request will be served through the FairPlay wrapper, which decrypts
-// only one track at a time over a single TCP session; concurrent wrapper
-// downloads would corrupt each other. AAC-tier requests that stay on the native
-// path are not gated.
+// NeedsSerialDownload implements platform.SerialDownloadGate. Every Apple Music
+// download is serialized, not only the wrapper-backed tiers.
+//
+// Gating just the wrapper was not enough: the native AAC path acquires a
+// Widevine license from Apple's license server using the same media-user-token,
+// so it counts against the account's concurrent-stream cap exactly like a
+// wrapper session does. Two downloads in flight — in any combination of tiers —
+// trip that cap, which Apple reports as "More than one device is trying to play
+// music" and which surfaces as an Invalid CKC error in the wrapper and as a
+// license failure on the native path. The wrapper additionally decrypts over a
+// single TCP session that concurrent use would corrupt.
 func (p *AppleMusicPlatform) NeedsSerialDownload(trackID string, quality platform.Quality) bool {
-	if p == nil || p.client == nil {
-		return false
-	}
-	return p.client.willUseWrapper(quality)
+	_ = trackID
+	_ = quality
+	return p != nil && p.client != nil
 }
 
 func (p *AppleMusicPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
