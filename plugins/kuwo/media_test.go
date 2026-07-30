@@ -506,6 +506,61 @@ func TestResolveDownloadUnsafeURLPrecedesQualityMetadataFallback(t *testing.T) {
 	}
 }
 
+func TestResolveDownloadPreviewBitratePrecedesSafeSuffixMismatchFallback(t *testing.T) {
+	var mobileCalls atomic.Int32
+	var mediaCalls atomic.Int32
+	var webCalls atomic.Int32
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Hostname() {
+		case "www.kuwo.cn":
+			switch {
+			case req.URL.Path == "/":
+				return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+			case strings.Contains(req.URL.Path, "musicInfo"):
+				return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+			case strings.Contains(req.URL.Path, "playUrl"):
+				webCalls.Add(1)
+				return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+			}
+		case "mobi.kuwo.cn":
+			call := mobileCalls.Add(1)
+			if call == 1 {
+				return response(http.StatusOK, nil, []byte(
+					`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/first.flac","format":"mp3","bitrate":1,"duration":213,"type":0}}`,
+				)), nil
+			}
+			return response(http.StatusOK, nil, []byte(
+				`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/fallback.mp3","format":"mp3","bitrate":128,"duration":213,"type":0}}`,
+			)), nil
+		case "er-sycdn.kuwo.cn":
+			mediaCalls.Add(1)
+			return mp3ProbeTransport(t, 3410341, nil).Transport.RoundTrip(req)
+		}
+		t.Fatalf("unexpected request %s", req.URL)
+		return nil, nil
+	})
+	client := NewClient(time.Second, nil)
+	client.apiHTTPClient.Transport = transport
+	client.mediaHTTPClient.Transport = transport
+
+	_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
+	if !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	if !errors.Is(err, errPreviewMedia) {
+		t.Fatalf("error = %v, want preview media classification", err)
+	}
+	if got := mobileCalls.Load(); got != 1 {
+		t.Fatalf("mobile calls = %d, want 1", got)
+	}
+	if got := mediaCalls.Load(); got != 0 {
+		t.Fatalf("media probe calls = %d, want 0", got)
+	}
+	if got := webCalls.Load(); got != 0 {
+		t.Fatalf("web calls = %d, want 0", got)
+	}
+}
+
 func TestResolveDownloadOverflowingMobileDurationIsTerminal(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

@@ -76,24 +76,32 @@ func mediaHeaders() map[string]string {
 	}
 }
 
-func validateMediaURL(rawURL, format string) error {
+func parseSafeMediaURL(rawURL string) (*url.URL, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return errUnsafeMediaURL
+		return nil, errUnsafeMediaURL
 	}
 	if parsed.User != nil || parsed.Port() != "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errUnsafeMediaURL
+		return nil, errUnsafeMediaURL
 	}
 	if parsed.Host != parsed.Hostname() {
-		return errUnsafeMediaURL
+		return nil, errUnsafeMediaURL
 	}
 	host := strings.ToLower(parsed.Hostname())
 	labels := strings.Split(host, ".")
 	if len(labels) != 3 || labels[1] != "kuwo" || labels[2] != "cn" {
-		return errUnsafeMediaURL
+		return nil, errUnsafeMediaURL
 	}
 	if !strings.HasPrefix(labels[0], "kw-") && !strings.HasSuffix(labels[0], "-sycdn") {
-		return errUnsafeMediaURL
+		return nil, errUnsafeMediaURL
+	}
+	return parsed, nil
+}
+
+func validateMediaURL(rawURL, format string) error {
+	parsed, err := parseSafeMediaURL(rawURL)
+	if err != nil {
+		return err
 	}
 	extension := strings.ToLower(path.Ext(parsed.EscapedPath()))
 	if extension != "."+strings.ToLower(format) || (extension != ".flac" && extension != ".mp3") {
@@ -102,7 +110,7 @@ func validateMediaURL(rawURL, format string) error {
 	return nil
 }
 
-func normalizeMediaURL(rawURL, format string) (string, error) {
+func normalizeSafeMediaURL(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return "", errors.New("kuwo: empty media URL")
@@ -113,6 +121,17 @@ func normalizeMediaURL(rawURL, format string) (string, error) {
 	}
 	parsed.Scheme = "https"
 	normalized := parsed.String()
+	if _, err := parseSafeMediaURL(normalized); err != nil {
+		return "", err
+	}
+	return normalized, nil
+}
+
+func normalizeMediaURL(rawURL, format string) (string, error) {
+	normalized, err := normalizeSafeMediaURL(rawURL)
+	if err != nil {
+		return "", err
+	}
 	if err := validateMediaURL(normalized, format); err != nil {
 		return "", err
 	}
@@ -508,7 +527,7 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	var rawURL string
 	if strings.TrimSpace(rawURLValue) != "" {
 		var err error
-		rawURL, err = normalizeMediaURL(rawURLValue, candidate.format)
+		rawURL, err = normalizeSafeMediaURL(rawURLValue)
 		if err != nil {
 			if errors.Is(err, errUnsafeMediaURL) {
 				return nil, terminalUnavailable(err)
@@ -536,6 +555,11 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 			}
 			return nil, err
 		}
+	} else if err := validateMediaURL(rawURL, candidate.format); err != nil {
+		if errors.Is(err, errUnsafeMediaURL) {
+			return nil, terminalUnavailable(err)
+		}
+		return nil, err
 	}
 	probe, err := probeMedia(ctx, c.mediaHTTPClient, rawURL, candidate.format, detail.Duration)
 	if err != nil {
