@@ -21,19 +21,23 @@ import (
 )
 
 const (
-	kuwoHomeURL      = "https://www.kuwo.cn/"
-	kuwoSearchURL    = "https://www.kuwo.cn/search/searchMusicBykeyWord"
-	kuwoDetailURL    = "https://www.kuwo.cn/api/www/music/musicInfo"
-	kuwoUserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	maxJSONBodyBytes = 4 << 20
+	kuwoHomeURL        = "https://www.kuwo.cn/"
+	kuwoSearchURL      = "https://www.kuwo.cn/search/searchMusicBykeyWord"
+	kuwoDetailURL      = "https://www.kuwo.cn/api/www/music/musicInfo"
+	kuwoWordLyricURL   = "https://newlyric.kuwo.cn/newlyric.lrc"
+	kuwoMobileLyricURL = "https://m.kuwo.cn/newh5/singles/songinfoandlrc"
+	kuwoUserAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	maxJSONBodyBytes   = 4 << 20
 )
 
 type kuwoEndpoints struct {
-	home   string
-	search string
-	detail string
-	mobile string
-	play   string
+	home        string
+	search      string
+	detail      string
+	mobile      string
+	play        string
+	wordLyric   string
+	mobileLyric string
 }
 
 type Client struct {
@@ -51,7 +55,13 @@ type Client struct {
 }
 
 func NewClient(timeout time.Duration, logger bot.Logger) *Client {
-	return newClientWithEndpoints(timeout, logger, kuwoEndpoints{home: kuwoHomeURL, search: kuwoSearchURL, detail: kuwoDetailURL})
+	return newClientWithEndpoints(timeout, logger, kuwoEndpoints{
+		home:        kuwoHomeURL,
+		search:      kuwoSearchURL,
+		detail:      kuwoDetailURL,
+		wordLyric:   kuwoWordLyricURL,
+		mobileLyric: kuwoMobileLyricURL,
+	})
 }
 
 // newClientWithEndpoints keeps endpoint and transport injection private to the
@@ -77,6 +87,20 @@ func (c *Client) httpClient() *http.Client {
 	c.clientMu.RLock()
 	defer c.clientMu.RUnlock()
 	return c.apiHTTPClient
+}
+
+func (c *Client) sessionlessAPIClient() *http.Client {
+	if c == nil {
+		return &http.Client{Timeout: 20 * time.Second}
+	}
+	c.clientMu.RLock()
+	defer c.clientMu.RUnlock()
+	if c.apiHTTPClient == nil {
+		return &http.Client{Timeout: 20 * time.Second}
+	}
+	snapshot := *c.apiHTTPClient
+	snapshot.Jar = nil
+	return &snapshot
 }
 
 func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
