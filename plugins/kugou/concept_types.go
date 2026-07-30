@@ -2,8 +2,51 @@ package kugou
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
+
+var errConceptDeviceVerification = errors.New("kugou concept device verification required")
+
+type conceptDeviceVerificationError struct {
+	ErrCode      int
+	RejectedDFID string
+}
+
+func (e *conceptDeviceVerificationError) Error() string {
+	if e != nil && e.ErrCode != 0 {
+		return fmt.Sprintf("kugou concept device verification required (errcode=%d)", e.ErrCode)
+	}
+	return errConceptDeviceVerification.Error()
+}
+
+func (e *conceptDeviceVerificationError) Unwrap() error {
+	return errConceptDeviceVerification
+}
+
+func conceptVerificationError(errCode int, messages ...string) error {
+	return conceptVerificationErrorForDFID(errCode, "", messages...)
+}
+
+func conceptVerificationErrorForDFID(errCode int, rejectedDFID string, messages ...string) error {
+	if errCode == 20028 || strings.Contains(strings.Join(messages, " "), "需要验证") {
+		return &conceptDeviceVerificationError{
+			ErrCode:      errCode,
+			RejectedDFID: strings.TrimSpace(rejectedDFID),
+		}
+	}
+	return nil
+}
+
+func conceptVerificationRejectedDFID(err error) string {
+	var verificationErr *conceptDeviceVerificationError
+	if errors.As(err, &verificationErr) {
+		return strings.TrimSpace(verificationErr.RejectedDFID)
+	}
+	return ""
+}
 
 type conceptJSONText string
 

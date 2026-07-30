@@ -267,26 +267,80 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 	if c.concept == nil || !c.concept.HasUsableSession() {
 		return nil, platform.NewAuthRequiredError("kugou")
 	}
+	deviceRefreshUsed := false
 	for _, plan := range plans {
-		resolved, err := c.fetchConceptSongURL(ctx, song, plan)
-		if err == nil && resolved != nil && strings.TrimSpace(resolved.URL) != "" {
-			if c != nil && c.logger != nil {
-				c.logger.Debug("kugou: download resolved via concept old", "track_id", strings.TrimSpace(song.ID), "requested", requested.String(), "resolved_quality", plan.Quality.String(), "hash", plan.Hash, "url", resolved.URL)
+		planRetried := false
+		for {
+			refreshForVerification := func(verificationErr error) (bool, error) {
+				if planRetried || deviceRefreshUsed {
+					return false, verificationErr
+				}
+				api := c.concept.API()
+				if api == nil {
+					return false, fmt.Errorf("kugou concept client unavailable")
+				}
+				if _, err := api.ForceRegisterDevice(ctx, conceptVerificationRejectedDFID(verificationErr)); err != nil {
+					return false, err
+				}
+				deviceRefreshUsed = true
+				planRetried = true
+				return true, nil
 			}
-			return resolved, nil
-		}
-		if err != nil {
-			lastErr = preferKugouDownloadError(lastErr, wrapError("kugou", "track", strings.TrimSpace(song.ID), err))
-		}
-		if newResp, newErr := c.concept.FetchSongURLNew(ctx, song, plan); newErr != nil {
-			lastErr = preferKugouDownloadError(lastErr, wrapError("kugou", "track", strings.TrimSpace(song.ID), newErr))
-		} else if resolvedNew, ok := c.resolveConceptSongURLNew(song, plan, newResp); ok {
-			if c != nil && c.logger != nil {
-				c.logger.Debug("kugou: download resolved via concept new", "track_id", strings.TrimSpace(song.ID), "requested", requested.String(), "resolved_quality", plan.Quality.String(), "hash", plan.Hash, "url", resolvedNew.URL)
+
+			resolved, err := c.fetchConceptSongURL(ctx, song, plan)
+			if errors.Is(err, errConceptDeviceVerification) {
+				retry, refreshErr := refreshForVerification(err)
+				if refreshErr != nil {
+					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+				}
+				if retry {
+					continue
+				}
 			}
-			return resolvedNew, nil
-		} else if authErr := conceptSongURLNewAuthError(newResp); authErr != nil {
-			lastErr = preferKugouDownloadError(lastErr, authErr)
+			if err == nil && resolved != nil && strings.TrimSpace(resolved.URL) != "" {
+				if c != nil && c.logger != nil {
+					c.logger.Debug("kugou: download resolved via concept old", "track_id", strings.TrimSpace(song.ID), "requested", requested.String(), "resolved_quality", plan.Quality.String(), "hash", plan.Hash, "url", resolved.URL)
+				}
+				return resolved, nil
+			}
+			if err != nil {
+				lastErr = preferKugouDownloadError(lastErr, wrapError("kugou", "track", strings.TrimSpace(song.ID), err))
+			}
+
+			newResp, newErr := c.concept.FetchSongURLNew(ctx, song, plan)
+			if newErr != nil {
+				if errors.Is(newErr, errConceptDeviceVerification) {
+					retry, refreshErr := refreshForVerification(newErr)
+					if refreshErr != nil {
+						return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+					}
+					if retry {
+						continue
+					}
+				}
+				lastErr = preferKugouDownloadError(lastErr, wrapError("kugou", "track", strings.TrimSpace(song.ID), newErr))
+				break
+			}
+			responseErr := conceptSongURLNewError(newResp)
+			if errors.Is(responseErr, errConceptDeviceVerification) {
+				retry, refreshErr := refreshForVerification(responseErr)
+				if refreshErr != nil {
+					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+				}
+				if retry {
+					continue
+				}
+			}
+			if resolvedNew, ok := c.resolveConceptSongURLNew(song, plan, newResp); ok {
+				if c != nil && c.logger != nil {
+					c.logger.Debug("kugou: download resolved via concept new", "track_id", strings.TrimSpace(song.ID), "requested", requested.String(), "resolved_quality", plan.Quality.String(), "hash", plan.Hash, "url", resolvedNew.URL)
+				}
+				return resolvedNew, nil
+			}
+			if responseErr != nil {
+				lastErr = preferKugouDownloadError(lastErr, responseErr)
+			}
+			break
 		}
 	}
 	if lastErr != nil {
@@ -654,22 +708,23 @@ type kugouGatewaySongInfoResponse struct {
 		AuthorName   string `json:"author_name"`
 		OriAudioName string `json:"ori_audio_name"`
 		AudioInfo    struct {
-			AudioID      interface{} `json:"audio_id"`
-			Hash         string      `json:"hash"`
-			Hash128      string      `json:"hash_128"`
-			Hash320      string      `json:"hash_320"`
-			HashFlac     string      `json:"hash_flac"`
-			HashHigh     string      `json:"hash_high"`
-			HashSuper    string      `json:"hash_super"`
-			Filesize     interface{} `json:"filesize"`
-			Filesize128  interface{} `json:"filesize_128"`
-			Filesize320  interface{} `json:"filesize_320"`
-			FilesizeFlac interface{} `json:"filesize_flac"`
-			FilesizeHigh interface{} `json:"filesize_high"`
-			Timelength   interface{} `json:"timelength"`
-			Bitrate      interface{} `json:"bitrate"`
-			Extname      string      `json:"extname"`
-			Privilege    interface{} `json:"privilege"`
+			AudioID       interface{} `json:"audio_id"`
+			Hash          string      `json:"hash"`
+			Hash128       string      `json:"hash_128"`
+			Hash320       string      `json:"hash_320"`
+			HashFlac      string      `json:"hash_flac"`
+			HashHigh      string      `json:"hash_high"`
+			HashSuper     string      `json:"hash_super"`
+			Filesize      interface{} `json:"filesize"`
+			Filesize128   interface{} `json:"filesize_128"`
+			Filesize320   interface{} `json:"filesize_320"`
+			FilesizeFlac  interface{} `json:"filesize_flac"`
+			FilesizeHigh  interface{} `json:"filesize_high"`
+			FilesizeSuper interface{} `json:"filesize_super"`
+			Timelength    interface{} `json:"timelength"`
+			Bitrate       interface{} `json:"bitrate"`
+			Extname       string      `json:"extname"`
+			Privilege     interface{} `json:"privilege"`
 		} `json:"audio_info"`
 		AlbumInfo struct {
 			AlbumID      string `json:"album_id"`
@@ -734,6 +789,7 @@ type kugouDownloadPlan struct {
 	Quality platform.Quality
 	Format  string
 	Size    int64
+	Bitrate int
 }
 
 type kugouAlbumInfoResponse struct {
@@ -883,6 +939,22 @@ func (c *Client) fetchGatewayTrackInfo(ctx context.Context, hash string) (*model
 	trackLink := buildShareTrackLink(shareChain, primaryHash, item.AlbumInfo.AlbumID, strings.TrimSpace(item.AlbumAudioID))
 	filesize128 := parseKugouInt64(item.AudioInfo.Filesize128)
 	filesize := parseKugouInt64(item.AudioInfo.Filesize)
+	filesize320 := parseKugouInt64(item.AudioInfo.Filesize320)
+	filesizeFlac := parseKugouInt64(item.AudioInfo.FilesizeFlac)
+	filesizeHigh := parseKugouInt64(item.AudioInfo.FilesizeHigh)
+	filesizeSuper := parseKugouInt64(item.AudioInfo.FilesizeSuper)
+	resHash := firstNonEmpty(item.AudioInfo.HashHigh, item.AudioInfo.HashSuper)
+	resSize := int64(0)
+	switch normalizeHash(resHash) {
+	case normalizeHash(item.AudioInfo.HashHigh):
+		if normalizeHash(item.AudioInfo.HashHigh) != "" {
+			resSize = filesizeHigh
+		}
+	case normalizeHash(item.AudioInfo.HashSuper):
+		if normalizeHash(item.AudioInfo.HashSuper) != "" {
+			resSize = filesizeSuper
+		}
+	}
 	song := &model.Song{
 		Source:   "kugou",
 		ID:       strings.ToLower(strings.TrimSpace(primaryHash)),
@@ -901,12 +973,16 @@ func (c *Client) fetchGatewayTrackInfo(ctx context.Context, hash string) (*model
 			"file_hash":      strings.ToLower(strings.TrimSpace(item.AudioInfo.Hash128)),
 			"hq_hash":        strings.ToLower(strings.TrimSpace(item.AudioInfo.Hash320)),
 			"sq_hash":        strings.ToLower(strings.TrimSpace(item.AudioInfo.HashFlac)),
-			"res_hash":       strings.ToLower(strings.TrimSpace(firstNonEmpty(item.AudioInfo.HashHigh, item.AudioInfo.HashSuper))),
+			"res_hash":       strings.ToLower(strings.TrimSpace(resHash)),
 			"album_id":       strings.TrimSpace(item.AlbumInfo.AlbumID),
 			"album_audio_id": strings.TrimSpace(item.AlbumAudioID),
 			"audio_id":       formatAnyNumericString(item.AudioInfo.AudioID),
 			"share_chain":    shareChain,
 			"privilege":      formatAnyNumericString(item.AudioInfo.Privilege),
+			"128_filesize":   strconv.FormatInt(choosePositive(filesize128, filesize), 10),
+			"320_filesize":   strconv.FormatInt(filesize320, 10),
+			"flac_filesize":  strconv.FormatInt(filesizeFlac, 10),
+			"high_filesize":  strconv.FormatInt(resSize, 10),
 		},
 	}
 	if enriched := c.enrichGatewaySongMeta(ctx, song); enriched != nil {
@@ -1914,19 +1990,25 @@ func (c *Client) searchSongs(ctx context.Context, keyword string, limit int) ([]
 			Cover:    normalizeSizedCover(item.Image),
 			Link:     buildShareTrackLink(shareChain, primaryHash, item.AlbumID, formatAnyNumericString(item.MixSongID)),
 			Extra: map[string]string{
-				"hash":         normalizeHash(primaryHash),
-				"file_hash":    normalizeHash(item.FileHash),
-				"hq_hash":      normalizeHash(item.HQFileHash),
-				"sq_hash":      normalizeHash(item.SQFileHash),
-				"res_hash":     normalizeHash(item.ResFileHash),
-				"ogg_320_hash": normalizeHash(item.TransParam.Ogg320Hash),
-				"ogg_128_hash": normalizeHash(item.TransParam.Ogg128Hash),
-				"audio_id":     formatAnyNumericString(item.AudioID),
-				"mix_song_id":  formatAnyNumericString(item.MixSongID),
-				"share_chain":  shareChain,
-				"album_id":     strings.TrimSpace(item.AlbumID),
-				"privilege":    strconv.Itoa(item.Privilege),
-				"singer_ids":   singerIDs,
+				"hash":             normalizeHash(primaryHash),
+				"file_hash":        normalizeHash(item.FileHash),
+				"hq_hash":          normalizeHash(item.HQFileHash),
+				"sq_hash":          normalizeHash(item.SQFileHash),
+				"res_hash":         normalizeHash(item.ResFileHash),
+				"ogg_320_hash":     normalizeHash(item.TransParam.Ogg320Hash),
+				"ogg_128_hash":     normalizeHash(item.TransParam.Ogg128Hash),
+				"audio_id":         formatAnyNumericString(item.AudioID),
+				"mix_song_id":      formatAnyNumericString(item.MixSongID),
+				"share_chain":      shareChain,
+				"album_id":         strings.TrimSpace(item.AlbumID),
+				"privilege":        strconv.Itoa(item.Privilege),
+				"singer_ids":       singerIDs,
+				"128_filesize":     strconv.FormatInt(parseKugouInt64(item.FileSize), 10),
+				"320_filesize":     strconv.FormatInt(item.HQFileSize, 10),
+				"flac_filesize":    strconv.FormatInt(item.SQFileSize, 10),
+				"high_filesize":    strconv.FormatInt(item.ResFileSize, 10),
+				"ogg_320_filesize": strconv.FormatInt(item.TransParam.Ogg320FileSize, 10),
+				"ogg_128_filesize": strconv.FormatInt(item.TransParam.Ogg128FileSize, 10),
 			},
 		}
 		results = append(results, song)
@@ -2169,7 +2251,7 @@ func isKugouSearchRequest(rawURL string) bool {
 func buildDownloadPlans(song *model.Song, requested platform.Quality) []kugouDownloadPlan {
 	extra := ensureSongExtra(song)
 	plans := []kugouDownloadPlan{}
-	appendPlan := func(hash string, quality platform.Quality, format string, size int64) {
+	appendPlan := func(hash string, quality platform.Quality, format string, size int64, bitrate int) {
 		hash = normalizeHash(hash)
 		if hash == "" {
 			return
@@ -2179,14 +2261,20 @@ func buildDownloadPlans(song *model.Song, requested platform.Quality) []kugouDow
 				return
 			}
 		}
-		plans = append(plans, kugouDownloadPlan{Hash: hash, Quality: quality, Format: format, Size: size})
+		plans = append(plans, kugouDownloadPlan{Hash: hash, Quality: quality, Format: format, Size: choosePositive(size), Bitrate: choosePositiveInt(bitrate)})
 	}
-	appendPlan(extra["res_hash"], platform.QualityHiRes, "flac", 0)
-	appendPlan(extra["sq_hash"], platform.QualityLossless, "flac", 0)
-	appendPlan(extra["hq_hash"], platform.QualityHigh, "mp3", 0)
-	appendPlan(extra["ogg_320_hash"], platform.QualityHigh, "ogg", 0)
-	appendPlan(firstNonEmpty(extra["file_hash"], extra["hash"], song.ID), platform.QualityStandard, firstNonEmpty(song.Ext, "mp3"), song.Size)
-	appendPlan(extra["ogg_128_hash"], platform.QualityStandard, "ogg", 0)
+	appendPlan(extra["res_hash"], platform.QualityHiRes, "flac", parseKugouInt64(extra["high_filesize"]), 2400)
+	appendPlan(extra["sq_hash"], platform.QualityLossless, "flac", parseKugouInt64(extra["flac_filesize"]), 1411)
+	appendPlan(extra["hq_hash"], platform.QualityHigh, "mp3", parseKugouInt64(extra["320_filesize"]), 320)
+	appendPlan(extra["ogg_320_hash"], platform.QualityHigh, "ogg", parseKugouInt64(extra["ogg_320_filesize"]), 320)
+	appendPlan(
+		firstNonEmpty(extra["file_hash"], extra["hash"], song.ID),
+		platform.QualityStandard,
+		firstNonEmpty(song.Ext, "mp3"),
+		choosePositive(parseKugouInt64(extra["128_filesize"]), song.Size),
+		choosePositiveInt(song.Bitrate, 128),
+	)
+	appendPlan(extra["ogg_128_hash"], platform.QualityStandard, "ogg", parseKugouInt64(extra["ogg_128_filesize"]), 128)
 	if len(plans) == 0 {
 		return nil
 	}
@@ -2230,24 +2318,9 @@ func applyPlanMetadata(song *model.Song, plan kugouDownloadPlan) {
 	if song == nil {
 		return
 	}
-	if strings.TrimSpace(song.Ext) == "" {
-		song.Ext = strings.TrimSpace(plan.Format)
-	}
-	if song.Size <= 0 && plan.Size > 0 {
-		song.Size = plan.Size
-	}
-	if song.Bitrate <= 0 {
-		switch plan.Quality {
-		case platform.QualityHiRes:
-			song.Bitrate = 2400
-		case platform.QualityLossless:
-			song.Bitrate = 1411
-		case platform.QualityHigh:
-			song.Bitrate = 320
-		default:
-			song.Bitrate = 128
-		}
-	}
+	song.Ext = strings.TrimSpace(plan.Format)
+	song.Size = choosePositive(plan.Size)
+	song.Bitrate = choosePositiveInt(plan.Bitrate)
 }
 
 func applyMobilePlayInfoMetadata(song *model.Song, info *kugouMobilePlayInfoResponse, plan kugouDownloadPlan) {
@@ -2392,6 +2465,16 @@ func conceptSongURLNewAuthError(resp *conceptSongURLNewResponse) error {
 		return platform.NewAuthRequiredError("kugou")
 	}
 	return nil
+}
+
+func conceptSongURLNewError(resp *conceptSongURLNewResponse) error {
+	if resp == nil {
+		return nil
+	}
+	if err := conceptVerificationError(resp.ErrCode, resp.Error, string(resp.Data)); err != nil {
+		return err
+	}
+	return conceptSongURLNewAuthError(resp)
 }
 
 func normalizeGatewayDuration(value int) int {

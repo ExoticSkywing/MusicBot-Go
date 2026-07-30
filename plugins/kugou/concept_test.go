@@ -3,9 +3,12 @@ package kugou
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/guohuiyuan/music-lib/model"
@@ -140,6 +143,24 @@ func TestConceptFetchSongURLAndClientResolve(t *testing.T) {
 	}
 }
 
+func TestConceptFetchSongURLRejectsVerificationWithNonEmptyURL(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"status":1,"errcode":20028,"error":"本次请求需要验证","url":["https://concept.cdn/must-not-use.flac"],"extName":"flac"}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := newTestConceptSessionManager("stale-dfid")
+	mgr.SetHTTPClient(httpClient)
+
+	_, err := mgr.FetchSongURL(
+		context.Background(),
+		&model.Song{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Extra: map[string]string{}},
+		kugouDownloadPlan{Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Quality: platform.QualityHiRes},
+	)
+	if !errors.Is(err, errConceptDeviceVerification) {
+		t.Fatalf("FetchSongURL() error=%v want device verification", err)
+	}
+}
+
 func TestApplySessionMap(t *testing.T) {
 	state := &conceptSession{}
 	var payload map[string]any
@@ -268,6 +289,42 @@ func TestResolveConceptSongURLNewUsesNonEncryptedTrackerURL(t *testing.T) {
 	}
 }
 
+func TestResolveConceptSongURLNewReplacesInheritedTierMetadata(t *testing.T) {
+	client := NewClient("", nil)
+	resp := &conceptSongURLNewResponse{
+		Status: 1,
+		Data: json.RawMessage(`[
+			{"quality":"high","tracker_url":"https://concept.cdn/plain.flac","extname":"flac"}
+		]`),
+	}
+	standard := &model.Song{
+		ID:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Ext:     "mp3",
+		Size:    3449303,
+		Bitrate: 128,
+		Extra:   map[string]string{},
+	}
+	resolved, ok := client.resolveConceptSongURLNew(standard, kugouDownloadPlan{
+		Hash:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Quality: platform.QualityHiRes,
+		Format:  "flac",
+		Size:    0,
+		Bitrate: 2400,
+	}, resp)
+	if !ok || resolved == nil {
+		t.Fatal("expected a resolved Hi-Res resource")
+	}
+	if resolved.Size != 0 {
+		t.Fatalf("resolved.Size=%d inherited standard-tier size", resolved.Size)
+	}
+	if resolved.Bitrate != 2400 {
+		t.Fatalf("resolved.Bitrate=%d want 2400", resolved.Bitrate)
+	}
+	if resolved.Ext != "flac" {
+		t.Fatalf("resolved.Ext=%q want response ext flac", resolved.Ext)
+	}
+}
+
 func TestConceptSongURLNewAuthError(t *testing.T) {
 	err := conceptSongURLNewAuthError(&conceptSongURLNewResponse{ErrCode: 20018})
 	if err == nil || !strings.Contains(err.Error(), "auth") {
@@ -277,6 +334,382 @@ func TestConceptSongURLNewAuthError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "auth") {
 		t.Fatalf("expected auth error for vip message, got %v", err)
 	}
+}
+
+func TestResolveDownloadByQualityReregistersDeviceOnceAndRetriesSamePlan(t *testing.T) {
+	const (
+		staleDFID = "stale-dfid"
+		freshDFID = "fresh-dfid"
+		hiResHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	var oldURLHits, newURLHits, registerHits int
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v5/url":
+			oldURLHits++
+			switch req.URL.Query().Get("dfid") {
+			case staleDFID:
+				body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+			case freshDFID:
+				body = `{"status":1,"url":["https://concept.cdn/recovered.flac"],"extName":"flac"}`
+			default:
+				body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+			}
+		case "/v6/priv_url":
+			newURLHits++
+			body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+		case "/risk/v2/r_register_dev":
+			registerHits++
+			if req.URL.Query().Get("dfid") != "-" {
+				t.Errorf("register query dfid=%q want -", req.URL.Query().Get("dfid"))
+			}
+			if got := req.Header.Get("dfid"); got != "" && got != "-" {
+				t.Errorf("register header dfid=%q must not reuse stale identity", got)
+			}
+			body = `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		default:
+			t.Errorf("unexpected path: %s", req.URL.Path)
+			body = `{"status":0}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := newTestConceptSessionManager(staleDFID)
+	mgr.SetHTTPClient(httpClient)
+	client := NewClient("", nil)
+	client.AttachConcept(mgr)
+	song := &model.Song{
+		ID:      "dddddddddddddddddddddddddddddddd",
+		Ext:     "mp3",
+		Size:    3449303,
+		Bitrate: 128,
+		Extra: map[string]string{
+			"res_hash":      hiResHash,
+			"high_filesize": "46414399",
+		},
+	}
+
+	resolved, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityHiRes)
+	if err != nil {
+		t.Fatalf("ResolveDownloadByQuality() error = %v", err)
+	}
+	if resolved == nil || resolved.ID != hiResHash || resolved.Size != 46414399 {
+		t.Fatalf("resolved song=%+v", resolved)
+	}
+	if oldURLHits != 2 || newURLHits != 0 || registerHits != 1 {
+		t.Fatalf("hits old/new/register=%d/%d/%d want 2/0/1", oldURLHits, newURLHits, registerHits)
+	}
+	if got := mgr.Snapshot().Device.Dfid; got != freshDFID {
+		t.Fatalf("persisted dfid=%q want %q", got, freshDFID)
+	}
+}
+
+func TestResolveDownloadByQualityRefreshesNewEndpointVerificationBeforeUsingPayload(t *testing.T) {
+	var oldURLHits, newURLHits, registerHits int
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v5/url":
+			oldURLHits++
+			if req.URL.Query().Get("dfid") == "fresh-dfid" {
+				body = `{"status":1,"url":["https://concept.cdn/recovered.flac"],"extName":"flac"}`
+			} else {
+				body = `{"status":0,"error":"unavailable"}`
+			}
+		case "/v6/priv_url":
+			newURLHits++
+			body = `{"status":0,"errcode":20028,"error":"本次请求需要验证","data":[{"tracker_url":"https://concept.cdn/stale.flac","extname":"flac"}]}`
+		case "/risk/v2/r_register_dev":
+			registerHits++
+			body = `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		default:
+			t.Errorf("unexpected path: %s", req.URL.Path)
+			body = `{"status":0}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := newTestConceptSessionManager("stale-dfid")
+	mgr.SetHTTPClient(httpClient)
+	client := NewClient("", nil)
+	client.AttachConcept(mgr)
+	song := &model.Song{
+		ID: "dddddddddddddddddddddddddddddddd",
+		Extra: map[string]string{
+			"res_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+
+	resolved, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityHiRes)
+	if err != nil {
+		t.Fatalf("ResolveDownloadByQuality() error = %v", err)
+	}
+	if resolved == nil || resolved.URL != "https://concept.cdn/recovered.flac" {
+		t.Fatalf("resolved song=%+v", resolved)
+	}
+	if oldURLHits != 2 || newURLHits != 1 || registerHits != 1 {
+		t.Fatalf("hits old/new/register=%d/%d/%d want 2/1/1", oldURLHits, newURLHits, registerHits)
+	}
+}
+
+func TestResolveDownloadByQualityStopsAfterPersistentDeviceVerification(t *testing.T) {
+	const hiResHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var urlHashes []string
+	var newURLHits, registerHits int
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v5/url":
+			urlHashes = append(urlHashes, req.URL.Query().Get("hash"))
+			body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+		case "/v6/priv_url":
+			newURLHits++
+			body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+		case "/risk/v2/r_register_dev":
+			registerHits++
+			body = `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		default:
+			t.Errorf("unexpected path: %s", req.URL.Path)
+			body = `{"status":0}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := newTestConceptSessionManager("stale-dfid")
+	mgr.SetHTTPClient(httpClient)
+	client := NewClient("", nil)
+	client.AttachConcept(mgr)
+	song := &model.Song{
+		ID: "dddddddddddddddddddddddddddddddd",
+		Extra: map[string]string{
+			"res_hash": hiResHash,
+			"sq_hash":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	}
+
+	_, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityHiRes)
+	if !errors.Is(err, errConceptDeviceVerification) {
+		t.Fatalf("ResolveDownloadByQuality() error=%v want device verification", err)
+	}
+	if len(urlHashes) != 2 || urlHashes[0] != hiResHash || urlHashes[1] != hiResHash {
+		t.Fatalf("url hashes=%v want the same Hi-Res plan twice", urlHashes)
+	}
+	if newURLHits != 0 || registerHits != 1 {
+		t.Fatalf("hits new/register=%d/%d want 0/1", newURLHits, registerHits)
+	}
+}
+
+func TestResolveDownloadByQualityConcurrentVerificationRegistersDeviceOnce(t *testing.T) {
+	const workers = 8
+	var staleURLHits, freshURLHits, registerHits int32
+	allStaleRequests := make(chan struct{})
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v5/url":
+			if req.URL.Query().Get("dfid") == "fresh-dfid" {
+				atomic.AddInt32(&freshURLHits, 1)
+				body = `{"status":1,"url":["https://concept.cdn/recovered.flac"],"extName":"flac"}`
+			} else {
+				if atomic.AddInt32(&staleURLHits, 1) == workers {
+					close(allStaleRequests)
+				}
+				<-allStaleRequests
+				body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+			}
+		case "/risk/v2/r_register_dev":
+			atomic.AddInt32(&registerHits, 1)
+			body = `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		default:
+			t.Errorf("unexpected path: %s", req.URL.Path)
+			body = `{"status":0}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := newTestConceptSessionManager("stale-dfid")
+	mgr.SetHTTPClient(httpClient)
+	client := NewClient("", nil)
+	client.AttachConcept(mgr)
+	song := &model.Song{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Extra: map[string]string{}}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			resolved, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityStandard)
+			if err == nil && (resolved == nil || resolved.URL == "") {
+				err = errors.New("resolved song missing URL")
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ResolveDownloadByQuality() error = %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&registerHits); got != 1 {
+		t.Fatalf("register hits=%d want 1", got)
+	}
+	if got := atomic.LoadInt32(&staleURLHits); got != workers {
+		t.Fatalf("stale URL hits=%d want %d", got, workers)
+	}
+	if got := atomic.LoadInt32(&freshURLHits); got != workers {
+		t.Fatalf("fresh URL hits=%d want %d", got, workers)
+	}
+}
+
+func TestResolveDownloadByQualityRejectsFailedForcedRegistration(t *testing.T) {
+	tests := []struct {
+		name         string
+		registerBody string
+		registerCode int
+	}{
+		{name: "empty dfid", registerBody: `{"status":1,"data":{"dfid":""}}`, registerCode: http.StatusOK},
+		{name: "http failure", registerBody: `temporary failure`, registerCode: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var urlHits, registerHits int
+			httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body := `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+				status := http.StatusOK
+				if req.URL.Path == "/v5/url" {
+					urlHits++
+				} else if req.URL.Path == "/risk/v2/r_register_dev" {
+					registerHits++
+					body = tt.registerBody
+					status = tt.registerCode
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			mgr := newTestConceptSessionManager("stale-dfid")
+			mgr.SetHTTPClient(httpClient)
+			client := NewClient("", nil)
+			client.AttachConcept(mgr)
+			song := &model.Song{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Extra: map[string]string{}}
+
+			if _, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityStandard); err == nil {
+				t.Fatal("ResolveDownloadByQuality() expected forced-registration error")
+			}
+			if urlHits != 1 || registerHits != 1 {
+				t.Fatalf("hits url/register=%d/%d want 1/1", urlHits, registerHits)
+			}
+			if got := mgr.Snapshot().Device.Dfid; got != "stale-dfid" {
+				t.Fatalf("failed registration replaced dfid with %q", got)
+			}
+		})
+	}
+}
+
+func TestResolveDownloadByQualityPropagatesForcedRegistrationPersistFailure(t *testing.T) {
+	persistErr := errors.New("persist failed")
+	var urlHits, registerHits int
+	var attemptedPersistDFID string
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/v5/url":
+			urlHits++
+			body = `{"status":0,"errcode":20028,"error":"本次请求需要验证"}`
+		case "/risk/v2/r_register_dev":
+			registerHits++
+			body = `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		default:
+			t.Errorf("unexpected path: %s", req.URL.Path)
+			body = `{"status":0}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	mgr := NewConceptSessionManager(nil, func(pairs map[string]string) error {
+		attemptedPersistDFID = pairs["concept_dfid"]
+		return persistErr
+	}, newTestConceptSessionManager("stale-dfid").Snapshot())
+	mgr.SetHTTPClient(httpClient)
+	client := NewClient("", nil)
+	client.AttachConcept(mgr)
+	song := &model.Song{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Extra: map[string]string{}}
+
+	_, err := client.ResolveDownloadByQuality(context.Background(), song, platform.QualityStandard)
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("ResolveDownloadByQuality() error=%v want persist failure", err)
+	}
+	if urlHits != 1 || registerHits != 1 {
+		t.Fatalf("hits url/register=%d/%d want 1/1", urlHits, registerHits)
+	}
+	if got := mgr.Snapshot().Device.Dfid; got != "stale-dfid" {
+		t.Fatalf("persist failure left in-memory dfid=%q want rollback to stale-dfid", got)
+	}
+	if attemptedPersistDFID != "fresh-dfid" {
+		t.Fatalf("attempted persist dfid=%q want fresh-dfid", attemptedPersistDFID)
+	}
+}
+
+func TestForceRegisterDevicePersistFailurePreservesRenewedSessionCookie(t *testing.T) {
+	const (
+		staleDFID    = "stale-dfid"
+		freshDFID    = "fresh-dfid"
+		renewedToken = "renewed-token"
+		renewedT1    = "renewed-t1"
+	)
+	persistErr := errors.New("persist failed")
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/risk/v2/r_register_dev" {
+			t.Fatalf("unexpected path: %s", req.URL.Path)
+		}
+		body := `{"status":1,"data":{"dfid":"fresh-dfid"}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	initial := newTestConceptSessionManager(staleDFID).Snapshot()
+	var mgr *ConceptSessionManager
+	mgr = NewConceptSessionManager(nil, func(pairs map[string]string) error {
+		if got := pairs["concept_dfid"]; got != freshDFID {
+			t.Fatalf("persisted dfid=%q want %q", got, freshDFID)
+		}
+		mgr.Update(func(s *conceptSession) {
+			s.Token = renewedToken
+			s.T1 = renewedT1
+			s.Cookie = mgr.API().buildConceptCookie(s)
+		})
+		return persistErr
+	}, initial)
+	mgr.Update(func(s *conceptSession) {
+		s.Cookie = mgr.API().buildConceptCookie(s)
+	})
+	mgr.SetHTTPClient(httpClient)
+
+	_, err := mgr.API().ForceRegisterDevice(context.Background(), staleDFID)
+	if !errors.Is(err, persistErr) {
+		t.Fatalf("ForceRegisterDevice() error=%v want persist failure", err)
+	}
+	state := mgr.Snapshot()
+	if state.Device.Dfid != staleDFID {
+		t.Fatalf("rollback dfid=%q want %q", state.Device.Dfid, staleDFID)
+	}
+	if state.Token != renewedToken || state.T1 != renewedT1 {
+		t.Fatalf("renewed session fields token/t1=%q/%q", state.Token, state.T1)
+	}
+	wantCookie := mgr.API().buildConceptCookie(&state)
+	if state.Cookie != wantCookie {
+		t.Fatalf("rollback cookie=%q want current session cookie %q", state.Cookie, wantCookie)
+	}
+}
+
+func newTestConceptSessionManager(dfid string) *ConceptSessionManager {
+	return NewConceptSessionManager(nil, nil, conceptSession{
+		Enabled: true,
+		Token:   "test-token",
+		UserID:  "123",
+		Device: conceptDeviceInfo{
+			Dfid: dfid,
+			Guid: "0123456789abcdef0123456789abcdef",
+			Mid:  "fedcba9876543210fedcba9876543210",
+			Dev:  "TESTDEVICE",
+			Mac:  "02:00:00:00:00:00",
+		},
+	})
 }
 
 func TestConceptStatusSummaryIncludesMoreFields(t *testing.T) {

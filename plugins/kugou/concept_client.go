@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/guohuiyuan/music-lib/model"
@@ -50,8 +51,9 @@ const (
 )
 
 type ConceptAPIClient struct {
-	http  *http.Client
-	state *ConceptSessionManager
+	http     *http.Client
+	state    *ConceptSessionManager
+	deviceMu sync.Mutex
 }
 
 func NewConceptAPIClient(_ string, state *ConceptSessionManager) *ConceptAPIClient {
@@ -436,6 +438,9 @@ func (c *ConceptAPIClient) FetchSongURL(ctx context.Context, song *model.Song, p
 	if err := c.doJSON(ctx, http.MethodGet, kugouConceptGatewayBaseURL+"/v5/url?"+query.Encode(), nil, state, map[string]string{"x-router": kugouConceptRouteTrack}, &resp); err != nil {
 		return nil, err
 	}
+	if err := conceptVerificationErrorForDFID(resp.ErrCode, query.Get("dfid"), resp.Error); err != nil {
+		return nil, err
+	}
 	if resp.Status != 1 || len(resp.URL) == 0 || strings.TrimSpace(resp.URL[0]) == "" {
 		return nil, fmt.Errorf("概念版 song/url 无可用链接, status=%d err=%s", resp.Status, firstNonEmpty(resp.Error, strconv.Itoa(resp.ErrCode)))
 	}
@@ -505,6 +510,9 @@ func (c *ConceptAPIClient) FetchSongURLNew(ctx context.Context, song *model.Song
 		resp.Error = env.Error
 		resp.Data = env.Data
 	}
+	if err := conceptVerificationErrorForDFID(resp.ErrCode, query.Get("dfid"), resp.Error, string(resp.Data)); err != nil {
+		return resp, err
+	}
 	return resp, nil
 }
 
@@ -516,7 +524,30 @@ func (c *ConceptAPIClient) ensureDevice(ctx context.Context) (conceptDeviceInfo,
 	if strings.TrimSpace(state.Device.Dfid) != "" && strings.TrimSpace(state.Device.Guid) != "" && strings.TrimSpace(state.Device.Mid) != "" && strings.TrimSpace(state.Device.Dev) != "" && strings.TrimSpace(state.Device.Mac) != "" {
 		return state.Device, nil
 	}
+	return c.registerDevice(ctx, false)
+}
+
+func (c *ConceptAPIClient) ForceRegisterDevice(ctx context.Context, rejectedDFID string) (conceptDeviceInfo, error) {
+	if c == nil || c.state == nil {
+		return conceptDeviceInfo{}, fmt.Errorf("concept client unavailable")
+	}
+	c.deviceMu.Lock()
+	defer c.deviceMu.Unlock()
+	current := c.state.Snapshot()
+	currentDFID := strings.TrimSpace(current.Device.Dfid)
+	rejectedDFID = strings.TrimSpace(rejectedDFID)
+	if rejectedDFID != "" && currentDFID != "" && currentDFID != "-" && currentDFID != rejectedDFID {
+		return current.Device, nil
+	}
+	return c.registerDevice(ctx, true)
+}
+
+func (c *ConceptAPIClient) registerDevice(ctx context.Context, force bool) (conceptDeviceInfo, error) {
+	state := c.state.Snapshot()
 	device := normalizeConceptDevice(state.Device)
+	if force {
+		device.Dfid = "-"
+	}
 	query, _ := c.defaultQueryForDevice(device, time.Now())
 	bodyCipher, bodyKey, err := conceptPlaylistAesEncrypt(map[string]any{
 		"availableRamSize":   int64(4983533568),
@@ -566,8 +597,13 @@ func (c *ConceptAPIClient) ensureDevice(ctx context.Context) (conceptDeviceInfo,
 	query.Set("platid", "1")
 	query.Set("p", p)
 	query.Set("signature", conceptSignatureAndroid(query, bodyCipher))
-	bodyBytes, err := c.doBytes(ctx, http.MethodPost, kugouConceptUserServiceBaseURL+"/risk/v2/r_register_dev?"+query.Encode(), strings.NewReader(bodyCipher), state, map[string]string{"Content-Type": "text/plain;charset=UTF-8"})
+	registerState := state
+	registerState.Device = device
+	bodyBytes, err := c.doBytes(ctx, http.MethodPost, kugouConceptUserServiceBaseURL+"/risk/v2/r_register_dev?"+query.Encode(), strings.NewReader(bodyCipher), registerState, map[string]string{"Content-Type": "text/plain;charset=UTF-8"})
 	if err != nil {
+		if force {
+			return device, fmt.Errorf("kugou concept register device: %w", err)
+		}
 		device.Dfid = firstNonEmpty(device.Dfid, conceptRandomAlphaNum(24))
 		device.Source = "fallback"
 		device.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -591,14 +627,26 @@ func (c *ConceptAPIClient) ensureDevice(ctx context.Context) (conceptDeviceInfo,
 	if err := json.Unmarshal([]byte(decodedText), &resp); err != nil {
 		return device, err
 	}
-	device.Dfid = firstNonEmpty(strings.TrimSpace(resp.Data.Dfid), device.Dfid, conceptRandomAlphaNum(24))
+	dfid := strings.TrimSpace(resp.Data.Dfid)
+	if force && (resp.Status != 1 || dfid == "" || dfid == "-") {
+		return device, fmt.Errorf("kugou concept register device returned no dfid")
+	}
+	device.Dfid = firstNonEmpty(dfid, device.Dfid, conceptRandomAlphaNum(24))
 	device.Source = "register/dev"
 	device.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	c.state.Update(func(s *conceptSession) {
 		s.Device = device
 		s.Cookie = c.buildConceptCookie(s)
 	})
-	_ = c.state.Persist()
+	if err := c.state.Persist(); err != nil {
+		if force {
+			c.state.Update(func(s *conceptSession) {
+				s.Device = state.Device
+				s.Cookie = c.buildConceptCookie(s)
+			})
+			return state.Device, fmt.Errorf("kugou concept persist registered device: %w", err)
+		}
+	}
 	return device, nil
 }
 

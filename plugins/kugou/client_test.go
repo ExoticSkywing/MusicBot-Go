@@ -46,20 +46,61 @@ func TestWrapErrorMappings(t *testing.T) {
 
 func TestBuildDownloadPlansPrefersHigherQualities(t *testing.T) {
 	song := &model.Song{ID: "11111111111111111111111111111111", Ext: "mp3", Size: 1234, Extra: map[string]string{
-		"res_hash":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"sq_hash":   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"hq_hash":   "cccccccccccccccccccccccccccccccc",
-		"file_hash": "dddddddddddddddddddddddddddddddd",
+		"res_hash":      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"sq_hash":       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"hq_hash":       "cccccccccccccccccccccccccccccccc",
+		"file_hash":     "dddddddddddddddddddddddddddddddd",
+		"high_filesize": "50172685",
+		"flac_filesize": "28651483",
+		"320_filesize":  "9077256",
+		"128_filesize":  "3631039",
 	}}
+	song.Bitrate = 128
 	plans := buildDownloadPlans(song, platform.QualityHiRes)
 	if len(plans) < 4 {
 		t.Fatalf("plans len=%d", len(plans))
 	}
-	if plans[0].Quality != platform.QualityHiRes || plans[0].Hash != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+	if plans[0].Quality != platform.QualityHiRes ||
+		plans[0].Hash != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+		plans[0].Size != 50172685 ||
+		plans[0].Format != "flac" ||
+		plans[0].Bitrate != 2400 {
 		t.Fatalf("first plan = %+v", plans[0])
 	}
-	if plans[1].Quality != platform.QualityLossless || plans[1].Hash != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+	if plans[1].Quality != platform.QualityLossless ||
+		plans[1].Hash != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ||
+		plans[1].Size != 28651483 ||
+		plans[1].Format != "flac" ||
+		plans[1].Bitrate != 1411 {
 		t.Fatalf("second plan = %+v", plans[1])
+	}
+	if plans[2].Quality != platform.QualityHigh ||
+		plans[2].Hash != "cccccccccccccccccccccccccccccccc" ||
+		plans[2].Size != 9077256 ||
+		plans[2].Format != "mp3" ||
+		plans[2].Bitrate != 320 {
+		t.Fatalf("third plan = %+v", plans[2])
+	}
+	if plans[3].Quality != platform.QualityStandard ||
+		plans[3].Hash != "dddddddddddddddddddddddddddddddd" ||
+		plans[3].Size != 3631039 ||
+		plans[3].Format != "mp3" ||
+		plans[3].Bitrate != 128 {
+		t.Fatalf("fourth plan = %+v", plans[3])
+	}
+}
+
+func TestApplyPlanMetadataClearsUnknownTierMetadata(t *testing.T) {
+	song := &model.Song{Ext: "mp3", Size: 3631039, Bitrate: 128}
+	applyPlanMetadata(song, kugouDownloadPlan{
+		Hash:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Quality: platform.QualityHiRes,
+		Format:  "flac",
+		Size:    0,
+		Bitrate: 2400,
+	})
+	if song.Size != 0 || song.Bitrate != 2400 || song.Ext != "flac" {
+		t.Fatalf("metadata inherited from standard tier: %+v", song)
 	}
 }
 
@@ -133,8 +174,65 @@ func TestFetchGatewayTrackInfoPreservesAlbumAndLink(t *testing.T) {
 	if song.Extra["res_hash"] != "6c6406145993ffa5bc5c1fb1729be3ff" {
 		t.Fatalf("song.Extra[res_hash]=%q", song.Extra["res_hash"])
 	}
+	for key, want := range map[string]string{
+		"128_filesize":  "3631039",
+		"320_filesize":  "9077256",
+		"flac_filesize": "28651483",
+		"high_filesize": "50172685",
+	} {
+		if song.Extra[key] != want {
+			t.Fatalf("song.Extra[%s]=%q want %q", key, song.Extra[key], want)
+		}
+	}
 	if song.Cover == "" || !strings.Contains(song.Cover, "/480/") {
 		t.Fatalf("song.Cover=%q want size-normalized cover", song.Cover)
+	}
+
+	searchSongs, err := client.searchSongs(context.Background(), "让风告诉你", 1)
+	if err != nil {
+		t.Fatalf("searchSongs() error = %v", err)
+	}
+	if len(searchSongs) != 1 {
+		t.Fatalf("searchSongs() len=%d", len(searchSongs))
+	}
+	for key, want := range map[string]string{
+		"128_filesize":  "3631039",
+		"320_filesize":  "9077256",
+		"flac_filesize": "28651483",
+		"high_filesize": "50172685",
+	} {
+		if searchSongs[0].Extra[key] != want {
+			t.Fatalf("search song Extra[%s]=%q want %q", key, searchSongs[0].Extra[key], want)
+		}
+	}
+}
+
+func TestFetchGatewayTrackInfoPairsSuperHashWithSuperSize(t *testing.T) {
+	oldClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case req.URL.String() == kugouGatewaySongInfoURL:
+			body = `{"status":1,"data":[[{"album_audio_id":"1","author_name":"artist","ori_audio_name":"song","audio_info":{"hash":"11111111111111111111111111111111","hash_128":"11111111111111111111111111111111","hash_high":"","hash_super":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","filesize_128":"1000","filesize_high":"2222","filesize_super":"5555","timelength":"100000","bitrate":"128","extname":"mp3"},"album_info":{}}]]}`
+		case strings.HasPrefix(req.URL.String(), "http://songsearch.kugou.com/song_search_v2?"):
+			body = `{"data":{"lists":[]}}`
+		default:
+			return nil, fmt.Errorf("unexpected url: %s", req.URL.String())
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	defer func() { http.DefaultClient = oldClient }()
+
+	client := NewClient("", nil)
+	song, err := client.fetchGatewayTrackInfo(context.Background(), "11111111111111111111111111111111")
+	if err != nil {
+		t.Fatalf("fetchGatewayTrackInfo() error = %v", err)
+	}
+	if song.Extra["res_hash"] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("res_hash=%q", song.Extra["res_hash"])
+	}
+	if song.Extra["high_filesize"] != "5555" {
+		t.Fatalf("high_filesize=%q want super-tier size 5555", song.Extra["high_filesize"])
 	}
 }
 
