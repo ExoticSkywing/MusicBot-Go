@@ -145,7 +145,12 @@ func loadConfigAndLogger(configPath string) (*config.Config, *logpkg.Logger, err
 	if err != nil {
 		return nil, nil, err
 	}
-	log, err := logpkg.New(conf.GetString("LogLevel"), conf.GetString("LogFormat"), conf.GetBool("LogSource"))
+	log, err := logpkg.NewWithSecrets(
+		conf.GetString("LogLevel"),
+		conf.GetString("LogFormat"),
+		conf.GetBool("LogSource"),
+		conf.GetString("BOT_TOKEN"),
+	)
 	if err != nil {
 		return nil, nil, err
 	}

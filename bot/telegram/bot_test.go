@@ -1,8 +1,26 @@
 package telegram
 
 import (
+	"errors"
+	"strings"
 	"testing"
+
+	botpkg "github.com/liuran001/MusicBot-Go/bot"
 )
+
+type telegramLogCapture struct {
+	entries []string
+}
+
+func (l *telegramLogCapture) append(msg string, args ...any) {
+	l.entries = append(l.entries, msg)
+}
+
+func (l *telegramLogCapture) Debug(msg string, args ...any)  { l.append(msg, args...) }
+func (l *telegramLogCapture) Info(msg string, args ...any)   { l.append(msg, args...) }
+func (l *telegramLogCapture) Warn(msg string, args ...any)   { l.append(msg, args...) }
+func (l *telegramLogCapture) Error(msg string, args ...any)  { l.append(msg, args...) }
+func (l *telegramLogCapture) With(args ...any) botpkg.Logger { return l }
 
 func TestAllowedUpdates(t *testing.T) {
 	want := []string{
@@ -80,5 +98,36 @@ func TestWebhookParams(t *testing.T) {
 	params.AllowedUpdates[0] = "edited_message"
 	if AllowedUpdates()[0] != want[0] {
 		t.Fatalf("WebhookParams() should not share backing array with AllowedUpdates")
+	}
+}
+
+func TestTelegoLoggerRedactsExactBotToken(t *testing.T) {
+	const token = "000000:synthetic-token-for-tests"
+	capture := &telegramLogCapture{}
+	log := telegoLogger{logger: capture, botToken: token}
+
+	log.Debugf("polling %s", "https://telegram.invalid/bot"+token+"/getUpdates")
+	log.Errorf("upload failed: %v", errors.New("request bot"+token+"/sendAudio"))
+
+	output := strings.Join(capture.entries, "\n")
+	if strings.Contains(output, token) {
+		t.Fatalf("telego logger leaked synthetic bot token: %q", output)
+	}
+	if !strings.Contains(output, "bot[REDACTED]/getUpdates") {
+		t.Fatalf("telego logger did not redact polling URL exactly: %q", output)
+	}
+	if !strings.Contains(output, "bot[REDACTED]/sendAudio") {
+		t.Fatalf("telego logger did not redact error text exactly: %q", output)
+	}
+}
+
+func TestTelegoLoggerEmptyBotTokenDoesNotAlterMessage(t *testing.T) {
+	capture := &telegramLogCapture{}
+	log := telegoLogger{logger: capture}
+
+	log.Errorf("request %s", "bot/path")
+
+	if got, want := strings.Join(capture.entries, "\n"), "request bot/path"; got != want {
+		t.Fatalf("telego logger with empty token = %q, want %q", got, want)
 	}
 }

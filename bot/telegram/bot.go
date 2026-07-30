@@ -83,10 +83,14 @@ func New(cfg *config.Config, logger botpkg.Logger) (*Bot, error) {
 		Timeout:   15 * time.Minute,
 		Transport: uploadTransport,
 	}
+	telegramLog := telegoLogger{
+		logger:   logger,
+		botToken: cfg.GetString("BOT_TOKEN"),
+	}
 
 	options := []telego.BotOption{
 		telego.WithHTTPClient(pollClient),
-		telego.WithLogger(telegoLogger{logger: logger}),
+		telego.WithLogger(telegramLog),
 	}
 
 	if cfg.GetString("BotAPI") != "" {
@@ -102,7 +106,7 @@ func New(cfg *config.Config, logger botpkg.Logger) (*Bot, error) {
 	}
 	uploadOptions := []telego.BotOption{
 		telego.WithHTTPClient(uploadClient),
-		telego.WithLogger(telegoLogger{logger: logger}),
+		telego.WithLogger(telegramLog),
 	}
 	if cfg.GetString("BotAPI") != "" {
 		uploadOptions = append(uploadOptions, telego.WithAPIServer(cfg.GetString("BotAPI")))
@@ -119,7 +123,7 @@ func New(cfg *config.Config, logger botpkg.Logger) (*Bot, error) {
 	if apiServer != "" && apiServer != "https://api.telegram.org" {
 		downloadOptions := []telego.BotOption{
 			telego.WithHTTPClient(pollClient),
-			telego.WithLogger(telegoLogger{logger: logger}),
+			telego.WithLogger(telegramLog),
 		}
 		if cfg.GetBool("BotDebug") {
 			downloadOptions = append(downloadOptions, telego.WithDebugMode())
@@ -184,21 +188,29 @@ func (b *Bot) SetWebhook(ctx context.Context, url string, secret string) error {
 }
 
 type telegoLogger struct {
-	logger botpkg.Logger
+	logger   botpkg.Logger
+	botToken string
 }
 
 func (l telegoLogger) Debugf(format string, args ...any) {
 	if l.logger == nil {
 		return
 	}
-	l.logger.Debug(fmt.Sprintf(format, args...))
+	l.logger.Debug(l.redactBotToken(fmt.Sprintf(format, args...)))
 }
 
 func (l telegoLogger) Errorf(format string, args ...any) {
 	if l.logger == nil {
 		return
 	}
-	l.logger.Error(fmt.Sprintf(format, args...))
+	l.logger.Error(l.redactBotToken(fmt.Sprintf(format, args...)))
+}
+
+func (l telegoLogger) redactBotToken(value string) string {
+	if l.botToken == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, l.botToken, "[REDACTED]")
 }
 
 // WithTimeout returns a context with timeout for Telegram requests.
