@@ -16,7 +16,10 @@ type trackWire struct {
 	Name        jsonScalar      `json:"name"`
 	SongName    jsonScalar      `json:"SONGNAME"`
 	Artist      jsonScalar      `json:"artist"`
+	ArtistID    jsonScalar      `json:"artistid"`
+	AllArtistID jsonScalar      `json:"allartistid"`
 	Album       jsonScalar      `json:"album"`
+	AlbumID     jsonScalar      `json:"albumid"`
 	Duration    jsonScalar      `json:"duration"`
 	Cover       jsonScalar      `json:"pic"`
 	CoverShort  jsonScalar      `json:"web_albumpic_short"`
@@ -90,8 +93,35 @@ func parseDuration(value jsonScalar) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func splitArtists(value string) []platform.Artist {
-	parts := strings.FieldsFunc(value, func(char rune) bool {
+// normalizeEntityID validates an artist or album identifier. Kuwo reports a
+// missing album as 0, which is not a linkable entity.
+func normalizeEntityID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !kuwoIDPattern.MatchString(value) {
+		return ""
+	}
+	if strings.Trim(value, "0") == "" {
+		return ""
+	}
+	return value
+}
+
+func buildArtistURL(id string) string {
+	if id == "" {
+		return ""
+	}
+	return "https://www.kuwo.cn/singer_detail/" + id
+}
+
+func buildAlbumURL(id string) string {
+	if id == "" {
+		return ""
+	}
+	return "https://www.kuwo.cn/album_detail/" + id
+}
+
+func splitFields(value string) []string {
+	return strings.FieldsFunc(value, func(char rune) bool {
 		switch char {
 		case '&', '/', '、', ',', ';', '，', '；':
 			return true
@@ -99,11 +129,40 @@ func splitArtists(value string) []platform.Artist {
 			return false
 		}
 	})
-	artists := make([]platform.Artist, 0, len(parts))
-	for _, part := range parts {
-		if name := strings.TrimSpace(part); name != "" {
-			artists = append(artists, platform.Artist{Platform: "kuwo", Name: name})
+}
+
+// splitArtists pairs each artist name with its upstream identifier so the
+// caption can link every artist. Search results carry allartistid, which is
+// ordered and delimited exactly like the artist string; detail and playlist
+// responses only carry the lead artist's artistid. When the two lists disagree
+// in length the pairing is ambiguous, so only the lead artist — the one
+// artistid always refers to — gets a link rather than risking a name pointing
+// at the wrong artist's page.
+func splitArtists(value, allArtistIDs, leadArtistID string) []platform.Artist {
+	names := splitFields(value)
+	ids := splitFields(allArtistIDs)
+	paired := len(ids) == len(names)
+	lead := normalizeEntityID(leadArtistID)
+
+	artists := make([]platform.Artist, 0, len(names))
+	for index, part := range names {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
 		}
+		artist := platform.Artist{Platform: "kuwo", Name: name}
+		id := ""
+		switch {
+		case paired:
+			id = normalizeEntityID(ids[index])
+		case index == 0:
+			id = lead
+		}
+		if id != "" {
+			artist.ID = id
+			artist.URL = buildArtistURL(id)
+		}
+		artists = append(artists, artist)
 	}
 	return artists
 }
@@ -131,12 +190,7 @@ func convertTrack(wire trackWire) (trackDetail, trackAccess, bool) {
 	if id == "" {
 		return trackDetail{}, trackAccess{}, false
 	}
-	artists := splitArtists(scalarText(wire.Artist))
-	albumName := scalarText(wire.Album)
-	var album *platform.Album
-	if albumName != "" {
-		album = &platform.Album{Platform: "kuwo", Title: albumName, Artists: artists}
-	}
+	artists := splitArtists(scalarText(wire.Artist), scalarText(wire.AllArtistID), scalarText(wire.ArtistID))
 	title := scalarText(wire.Name)
 	if title == "" {
 		title = scalarText(wire.SongName)
@@ -144,6 +198,19 @@ func convertTrack(wire trackWire) (trackDetail, trackAccess, bool) {
 	cover := scalarText(wire.Cover)
 	if cover == "" {
 		cover = normalizeCoverURL(scalarText(wire.CoverShort))
+	}
+	albumName := scalarText(wire.Album)
+	var album *platform.Album
+	if albumName != "" {
+		albumID := normalizeEntityID(scalarText(wire.AlbumID))
+		album = &platform.Album{
+			ID:       albumID,
+			Platform: "kuwo",
+			Title:    albumName,
+			Artists:  artists,
+			CoverURL: cover,
+			URL:      buildAlbumURL(albumID),
+		}
 	}
 	track := platform.Track{
 		ID:       id,
