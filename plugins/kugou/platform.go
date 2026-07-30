@@ -304,7 +304,23 @@ func (k *KugouPlatform) GetTrack(ctx context.Context, trackID string) (*platform
 }
 
 func (k *KugouPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
-	return nil, platform.NewUnsupportedError("kugou", "get artist")
+	artist, _, err := k.GetArtistDetails(ctx, artistID)
+	return artist, err
+}
+
+// GetArtistDetails implements the handler's artistDetailProvider so the artist
+// card can report Kugou's song count.
+func (k *KugouPlatform) GetArtistDetails(ctx context.Context, artistID string) (*platform.Artist, int, error) {
+	if k == nil || k.client == nil {
+		return nil, 0, platform.NewUnavailableError("kugou", "artist", artistID)
+	}
+	return k.client.GetSingerInfo(ctx, artistID)
+}
+
+// MatchArtistURL implements platform.ArtistURLMatcher so a Kugou singer link
+// pasted into chat resolves to the artist card.
+func (k *KugouPlatform) MatchArtistURL(rawURL string) (string, bool) {
+	return NewURLMatcher().MatchArtistURL(rawURL)
 }
 
 func (k *KugouPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {

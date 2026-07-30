@@ -209,6 +209,30 @@ func (c *Client) GetAlbumDetail(ctx context.Context, albumID int) (*AlbumDetailD
 	return &result, nil
 }
 
+// GetArtistDetail retrieves artist profile data.
+func (c *Client) GetArtistDetail(ctx context.Context, artistID int) (*ArtistDetailData, error) {
+	if c.logger != nil {
+		c.logger.Debug("fetching artist detail", "artist_id", artistID)
+	}
+
+	var result ArtistDetailData
+	err := c.execute(ctx, func() error {
+		data, err := GetArtistDetail(ctx, c.requestData(), artistID)
+		if err != nil {
+			if c.logger != nil {
+				c.logger.Error("api.GetArtistDetail failed", "artist_id", artistID, "error", err)
+			}
+			return err
+		}
+		result = data
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // GetSongURL retrieves song URL data.
 func (c *Client) GetSongURL(ctx context.Context, musicID int, quality string) (*SongsURLData, error) {
 	var result SongsURLData

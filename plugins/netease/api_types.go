@@ -277,3 +277,21 @@ type SongURLConfig struct {
 	Level      string
 	IDs        []int
 }
+
+// ArtistDetailData is the /api/artist/head/info/get response.
+type ArtistDetailData struct {
+	RawJson string `json:"-"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Artist struct {
+			Id        int    `json:"id"`
+			Name      string `json:"name"`
+			Cover     string `json:"cover"`
+			Avatar    string `json:"avatar"`
+			BriefDesc string `json:"briefDesc"`
+			MusicSize int    `json:"musicSize"`
+			AlbumSize int    `json:"albumSize"`
+		} `json:"artist"`
+	} `json:"data"`
+}

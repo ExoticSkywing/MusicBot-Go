@@ -31,6 +31,14 @@ var (
 		regexp.MustCompile(`^n2/m/share/details/taoge\.html$`),
 		regexp.MustCompile(`^n3/other/pages/details/playlist\.html$`),
 	}
+	qqSingerPathPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`^n/ryqq_v2/singer/([^/?#]+)$`),
+		regexp.MustCompile(`^n/ryqq/singer/([^/?#]+)$`),
+		regexp.MustCompile(`^n/yqq/singer/([^/?#]+)\.html$`),
+		regexp.MustCompile(`^singer/([^/?#]+)$`),
+	}
+	// Singer mids are alphanumeric tokens; anything else is not addressable.
+	qqSingerMidPattern = regexp.MustCompile(`^[A-Za-z0-9]{1,64}$`)
 )
 
 func NewURLMatcher() *URLMatcher {
@@ -84,6 +92,48 @@ func matchQQMusicURL(parsed *url.URL) (string, bool) {
 	}
 	if songID := strings.TrimSpace(query.Get("id")); songID != "" {
 		return songID, true
+	}
+	return "", false
+}
+
+// MatchArtistURL implements platform.ArtistURLMatcher for QQ Music singer URLs.
+func (m *URLMatcher) MatchArtistURL(rawURL string) (artistID string, matched bool) {
+	if strings.TrimSpace(rawURL) == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", false
+	}
+	return matchQQMusicArtistURL(parsed)
+}
+
+func matchQQMusicArtistURL(parsed *url.URL) (string, bool) {
+	if parsed == nil {
+		return "", false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" || !strings.Contains(host, "qq.com") {
+		return "", false
+	}
+	pathValue := strings.Trim(parsed.Path, "/")
+	for _, re := range qqSingerPathPatterns {
+		if match := re.FindStringSubmatch(pathValue); len(match) == 2 {
+			if mid := strings.TrimSpace(match[1]); qqSingerMidPattern.MatchString(mid) {
+				return mid, true
+			}
+			return "", false
+		}
+	}
+	// Share links carry the mid in the query instead of the path.
+	query := parsed.Query()
+	for _, key := range []string{"singermid", "singerMid"} {
+		if mid := strings.TrimSpace(query.Get(key)); mid != "" {
+			if qqSingerMidPattern.MatchString(mid) {
+				return mid, true
+			}
+			return "", false
+		}
 	}
 	return "", false
 }

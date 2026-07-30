@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 const (
@@ -14,6 +15,7 @@ const (
 	songLyricAPI      = "/api/song/lyric"
 	playlistDetailAPI = "/api/v6/playlist/detail"
 	albumDetailAPI    = "/api/album/v3/detail"
+	artistDetailAPI   = "/api/artist/head/info/get"
 	programDetailAPI  = "/api/dj/program/detail"
 )
 
@@ -102,6 +104,16 @@ func GetAlbumDetail(ctx context.Context, data RequestData, albumID int) (AlbumDe
 	cacheKey := base64.StdEncoding.EncodeToString(CacheKeyEncrypt(fmt.Sprintf("id=%d", albumID)))
 	bodyJSON, _ := json.Marshal(reqBody{ID: albumID, CacheKey: cacheKey})
 	return doJSONRequest[AlbumDetailData](ctx, data, EAPIOption{Path: albumDetailAPI, Url: "https://music.163.com/eapi/album/v3/detail", Json: string(bodyJSON)})
+}
+
+// GetArtistDetail fetches an artist profile. The eapi endpoint takes the ID as
+// a string even though it is numeric upstream.
+func GetArtistDetail(ctx context.Context, data RequestData, artistID int) (ArtistDetailData, error) {
+	type reqBody struct {
+		ID string `json:"id"`
+	}
+	bodyJSON, _ := json.Marshal(reqBody{ID: strconv.Itoa(artistID)})
+	return doJSONRequest[ArtistDetailData](ctx, data, EAPIOption{Path: artistDetailAPI, Url: "https://music.163.com/eapi/artist/head/info/get", Json: string(bodyJSON)})
 }
 
 func GetProgramDetail(ctx context.Context, data RequestData, id int) (ProgramDetailData, error) {

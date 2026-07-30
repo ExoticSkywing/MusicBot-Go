@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -203,8 +204,79 @@ func (n *NeteasePlatform) GetTrack(ctx context.Context, trackID string) (*platfo
 
 // GetArtist retrieves detailed information about an artist by their ID.
 func (n *NeteasePlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
-	// NetEase has artist APIs, but not exposed in current client
-	return nil, platform.NewUnsupportedError("netease", "get artist")
+	artist, _, err := n.GetArtistDetails(ctx, artistID)
+	return artist, err
+}
+
+// GetArtistDetails implements the handler's artistDetailProvider so the artist
+// card can report NetEase's song count.
+func (n *NeteasePlatform) GetArtistDetails(ctx context.Context, artistID string) (*platform.Artist, int, error) {
+	trimmed := strings.TrimSpace(artistID)
+	numericID, err := strconv.Atoi(trimmed)
+	if err != nil || numericID <= 0 {
+		return nil, 0, platform.NewNotFoundError("netease", "artist", artistID)
+	}
+	if n == nil || n.client == nil {
+		return nil, 0, platform.NewUnavailableError("netease", "artist", artistID)
+	}
+
+	detail, err := n.client.GetArtistDetail(ctx, numericID)
+	if err != nil {
+		return nil, 0, platform.NewUnavailableError("netease", "artist", artistID)
+	}
+	if detail == nil || detail.Code != 200 {
+		return nil, 0, platform.NewNotFoundError("netease", "artist", artistID)
+	}
+	upstream := detail.Data.Artist
+	name := strings.TrimSpace(upstream.Name)
+	if name == "" {
+		return nil, 0, platform.NewNotFoundError("netease", "artist", artistID)
+	}
+	// Identity guard: never present a different artist under the requested ID.
+	if upstream.Id != 0 && upstream.Id != numericID {
+		return nil, 0, platform.NewUnavailableError("netease", "artist", artistID)
+	}
+
+	avatar := strings.TrimSpace(upstream.Avatar)
+	if avatar == "" {
+		avatar = strings.TrimSpace(upstream.Cover)
+	}
+	artist := &platform.Artist{
+		ID:        trimmed,
+		Platform:  "netease",
+		Name:      name,
+		AvatarURL: httpsPortraitURL(avatar),
+		URL:       fmt.Sprintf("https://music.163.com/artist?id=%d", numericID),
+	}
+	trackCount := upstream.MusicSize
+	if trackCount < 0 {
+		trackCount = 0
+	}
+	return artist, trackCount, nil
+}
+
+// httpsPortraitURL upgrades NetEase's plain-HTTP image hosts, which serve the
+// same asset over TLS. Anything that is not an absolute http(s) URL is dropped
+// rather than surfaced as a broken image.
+func httpsPortraitURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	if strings.HasPrefix(rawURL, "http://") {
+		rawURL = "https://" + strings.TrimPrefix(rawURL, "http://")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return ""
+	}
+	return rawURL
+}
+
+// MatchArtistURL implements platform.ArtistURLMatcher so a NetEase artist link
+// pasted into chat resolves to the artist card.
+func (n *NeteasePlatform) MatchArtistURL(rawURL string) (artistID string, matched bool) {
+	return NewURLMatcher().MatchArtistURL(rawURL)
 }
 
 // GetAlbum retrieves detailed information about an album by its ID.

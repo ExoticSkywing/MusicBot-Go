@@ -217,27 +217,67 @@ func hasSongMarker(path, fragment string) bool {
 	return false
 }
 
-func hasPlaylistMarker(path, fragment string) bool {
-	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
-		if seg == "playlist" {
-			return true
+// MatchArtistURL implements platform.ArtistURLMatcher for NetEase artist URLs.
+// Supported shapes:
+//   - https://music.163.com/artist?id=6452
+//   - https://music.163.com/#/artist?id=6452
+//   - https://y.music.163.com/m/artist?id=6452
+//
+// Unlike playlist and album IDs, artist IDs are short (four digits is common),
+// so no minimum length is imposed.
+func (m *URLMatcher) MatchArtistURL(rawURL string) (artistID string, matched bool) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", false
+	}
+	if hostname := parsed.Hostname(); hostname == "" || !strings.Contains(hostname, "music.163.com") {
+		return "", false
+	}
+	if !hasArtistMarker(parsed.Path, parsed.Fragment) {
+		return "", false
+	}
+
+	queryString := parsed.RawQuery
+	if queryString == "" && parsed.Fragment != "" {
+		if parts := strings.SplitN(parsed.Fragment, "?", 2); len(parts) > 1 {
+			queryString = parts[1]
 		}
 	}
-	if fragment == "" {
-		return false
+	if queryString == "" {
+		return "", false
 	}
-	frag := strings.TrimPrefix(fragment, "/")
-	frag = strings.SplitN(frag, "?", 2)[0]
-	parts := strings.Split(strings.Trim(frag, "/"), "/")
-	if len(parts) > 0 && parts[0] == "playlist" {
-		return true
+	params, err := url.ParseQuery(queryString)
+	if err != nil {
+		return "", false
 	}
-	return false
+	id := strings.TrimSpace(params.Get("id"))
+	if id == "" || len(id) > 20 || !allDigits(id) || strings.Trim(id, "0") == "" {
+		return "", false
+	}
+	return id, true
+}
+
+func hasPlaylistMarker(path, fragment string) bool {
+	return hasSegmentMarker(path, fragment, "playlist")
 }
 
 func hasAlbumMarker(path, fragment string) bool {
+	return hasSegmentMarker(path, fragment, "album")
+}
+
+func hasArtistMarker(path, fragment string) bool {
+	return hasSegmentMarker(path, fragment, "artist")
+}
+
+// hasSegmentMarker reports whether the URL addresses the given resource kind,
+// checking both the path and the SPA fragment NetEase uses (#/artist?id=...).
+func hasSegmentMarker(path, fragment, marker string) bool {
 	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
-		if seg == "album" {
+		if seg == marker {
 			return true
 		}
 	}
@@ -247,10 +287,7 @@ func hasAlbumMarker(path, fragment string) bool {
 	frag := strings.TrimPrefix(fragment, "/")
 	frag = strings.SplitN(frag, "?", 2)[0]
 	parts := strings.Split(strings.Trim(frag, "/"), "/")
-	if len(parts) > 0 && parts[0] == "album" {
-		return true
-	}
-	return false
+	return len(parts) > 0 && parts[0] == marker
 }
 
 func extractPathID(path, marker string) string {

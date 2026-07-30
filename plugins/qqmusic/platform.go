@@ -245,7 +245,23 @@ func (q *QQMusicPlatform) GetTrack(ctx context.Context, trackID string) (*platfo
 }
 
 func (q *QQMusicPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
-	return nil, platform.NewUnsupportedError("qqmusic", "get artist")
+	artist, _, err := q.GetArtistDetails(ctx, artistID)
+	return artist, err
+}
+
+// GetArtistDetails implements the handler's artistDetailProvider. QQ Music does
+// not expose a song count on this endpoint, so the count is always 0.
+func (q *QQMusicPlatform) GetArtistDetails(ctx context.Context, artistID string) (*platform.Artist, int, error) {
+	if q == nil || q.client == nil {
+		return nil, 0, platform.NewUnavailableError("qqmusic", "artist", artistID)
+	}
+	return q.client.GetSingerDetail(ctx, artistID)
+}
+
+// MatchArtistURL implements platform.ArtistURLMatcher so a QQ Music singer link
+// pasted into chat resolves to the artist card.
+func (q *QQMusicPlatform) MatchArtistURL(rawURL string) (string, bool) {
+	return NewURLMatcher().MatchArtistURL(rawURL)
 }
 
 func (q *QQMusicPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
