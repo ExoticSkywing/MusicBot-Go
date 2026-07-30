@@ -44,7 +44,7 @@ func TestPlatformMetadataAndCapabilities(t *testing.T) {
 	}
 	wantMeta := platform.Meta{
 		Name:          "kuwo",
-		DisplayName:   "酷我音乐",
+		DisplayName:   "酷我",
 		Emoji:         "🎧",
 		Aliases:       []string{"kuwo", "kw", "酷我", "酷我音乐"},
 		AllowGroupURL: true,

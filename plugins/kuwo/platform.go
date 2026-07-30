@@ -50,7 +50,7 @@ func (p *KuwoPlatform) Capabilities() platform.Capabilities {
 func (p *KuwoPlatform) Metadata() platform.Meta {
 	return platform.Meta{
 		Name:          "kuwo",
-		DisplayName:   "酷我音乐",
+		DisplayName:   "酷我",
 		Emoji:         "🎧",
 		Aliases:       []string{"kuwo", "kw", "酷我", "酷我音乐"},
 		AllowGroupURL: true,
