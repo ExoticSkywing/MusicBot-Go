@@ -1,5 +1,10 @@
 # 酷我音乐支持设计
 
+> 状态：历史基线。生产验证后修订的音质选择、候选降级、FLAC
+> 边界与完整性合同，以
+> [Production Media Reliability Design](2026-07-30-production-media-reliability-design.md)
+> 为准；本文与其冲突的旧描述均已被取代。
+
 ## 背景
 
 MusicBot-Go 已通过静态插件注册机制接入网易云音乐、QQ 音乐、酷狗音乐等平台，但尚不能识别或处理酷我音乐链接。此次新增一个原生 `kuwo` 插件，在不要求用户登录、不依赖第三方聚合服务、也不绕过付费限制的前提下，为机器人提供可直接使用的酷我音乐能力。
@@ -48,15 +53,22 @@ MusicBot-Go 已通过静态插件注册机制接入网易云音乐、QQ 音乐�
 - 搜索：支持
 - 歌词：支持
 - 听歌识曲：不支持
-- Hi-Res：不支持；无损 FLAC：支持
+- Hi-Res：支持；无损 FLAC：支持
 
 音质按请求选择并按实际结果报告：
 
 - 标准：移动端 `128kmp3`，失败后回退 Web 128 kbps MP3。
 - 高品质：移动端 `320kmp3`，失败后依次回退 128 kbps。
-- 无损或 Hi-Res：移动端 `2000kflac`，成功时返回实际的 `QualityLossless`；失败后依次回退 320 和 128 kbps。因为现场 `4000kflac` 仍返回普通 FLAC，绝不报告 `QualityHiRes`。
+- 无损：优先官方 `2000kflac`；实际为双声道 16-bit/44.1–48 kHz
+  时报告 `QualityLossless`，若同一官方档实际为 24-bit/44.1–48 kHz，
+  则按内容报告 `QualityHiRes`。
+- Hi-Res：先走独立 `4000kflac` / `level=hires` 解析，再尝试官方
+  `2000kflac`。独立链路只有在实际媒体满足 Hi-Res 校验时才报告
+  `QualityHiRes`；全链路均不请求 `jymaster`、`20900kmflac` 或其他
+  母带/超分档。
+- FLAC 候选不可用后才依次回退 320 和 128 kbps。
 
-免费样本 `41378936` 现场返回的 FLAC 为 27,383,481 字节、213 秒，平均约 1,028 kbps；实现用媒体总大小与曲目时长计算平均码率，不把接口声明的 `2000` 当作真实码率。付费样本 `228908` 会返回另一个 RID 的 11 秒、1 kbps MP3 试听，因此任何 RID 错配、试听类型或时长明显缩短都返回 `platform.ErrUnavailable`，不能继续降级成试听。只有在 RID、完整时长和访问状态均正常时，当前候选的格式或码率不符合目标才属于可降级的候选失败。
+免费样本 `41378936` 现场返回的 FLAC 为 27,383,481 字节、213 秒，平均约 1,028 kbps；实现用媒体总大小与曲目时长计算平均码率，不把接口声明的 `2000` 当作真实码率。付费样本 `228908` 会返回另一个 RID 的 11 秒、1 kbps MP3 试听，因此错配媒体本身绝不会交付。可选 Hi-Res 解析器或移动端候选发生 RID 错配时，只丢弃该候选并从详情阶段已验证的原始 RID 继续下一条独立解析链路；身份缺失/非法、明确付费或试听、以及时长明显缩短仍立即返回 `platform.ErrUnavailable`。只有在身份、完整时长和访问状态均正常时，当前候选的格式或码率不符合目标才属于可降级的候选失败。
 
 ## 组件设计
 
@@ -110,12 +122,15 @@ MusicBot-Go 已通过静态插件注册机制接入网易云音乐、QQ 音乐�
 1. 仅接受 1 到 20 位数字曲目 ID。
 2. 详情接口返回统一曲目元数据；明确不存在映射为 `ErrNotFound`。
 3. 先获取详情，拒绝明确的付费、试听或不可在线播放状态，并记录规范 RID 与完整时长。终止字段只包括 `isListenFee=true`、`payInfo.cannotOnlinePlay=true/1` 和 `payInfo.listen_fragment=true/1`；`payInfo` 对象存在、`feeType`、`pay`、`hasLossless` 或未知字段本身不构成拒绝，以兼容免费曲目的 benign `payInfo`。
-4. 按请求音质调用移动端 `convert_url_with_sign`：`QualityLossless`/`QualityHiRes` 请求 `2000kflac`，`QualityHigh` 请求 `320kmp3`，`QualityStandard` 请求 `128kmp3`。
-5. 移动端响应必须满足：`code=200`、返回 RID 等于请求 RID、规范化后的 `type` 字段存在且严格等于 `0`、时长与详情的差值不超过 `max(5 秒, 详情时长 × 5%)`、URL 属于严格允许的酷我媒体主机。RID 错配，`type` 缺失、不可转换或非零，短时长、明确付费/不可播放和下架是终止失败；同 RID、完整时长、正常访问状态下的候选格式不符只是当前候选无效，可以尝试下一档。
+4. 按请求音质选择独立解析链路：`QualityHiRes` 先尝试
+   `4000kflac` / `level=hires`，`QualityLossless` 和未命中的
+   `QualityHiRes` 再请求官方 `2000kflac`；`QualityHigh` 请求
+   `320kmp3`，`QualityStandard` 请求 `128kmp3`。
+5. 移动端响应必须满足：`code=200`、返回 RID 等于请求 RID、规范化后的 `type` 字段存在且严格等于 `0`、时长与详情的差值不超过 `max(5 秒, 详情时长 × 5%)`、URL 属于严格允许的酷我媒体主机。可选 Hi-Res 或移动候选的 RID 错配只使当前候选失效，下一条解析必须重新使用详情阶段已验证的原始 RID；错配媒体不可交付。`type` 缺失、不可转换或非零，短时长、明确付费/不可播放和下架是终止失败；同 RID、完整时长、正常访问状态下的候选格式不符只是当前候选无效，可以尝试下一档。
 6. 将移动端 HTTP 媒体 URL 在同一主机与路径下升级为 HTTPS 后执行有界 Range 探测。探测客户端在每次重定向前复用同一格式对应的 URL 校验器、重新附加媒体 User-Agent/Referer，并显式保留 10 跳上限。FLAC 请求 `bytes=0-41`，响应必须为 206，`Content-Range` 精确覆盖 `0-41`，总大小在 42 字节到 2 GiB 之间，并通过 43 字节读取上限取得恰好 42 字节。除 `fLaC` 外还必须解析首个 34 字节 STREAMINFO：元数据块类型与长度合法，块大小、采样率、声道、位深和总样本均在 FLAC 合法范围内，`总样本/采样率` 与详情时长满足相同容差。
 7. MP3 首探测请求 `bytes=0-15`，要求精确 `Content-Range`、16 字节到 2 GiB 的一致总大小，并通过 17 字节读取上限取得恰好 16 字节。若直接以 MPEG 帧头开始，则必须解析并拒绝 reserved version/layer/sample-rate、free/bad bitrate index 和 reserved emphasis；若以 ID3v2 开始，则以同步安全整数解析标签长度（标签最大 16 MiB）及可选 footer。令 `offset = 10 + tagSize + footerSize`，必须满足 `offset+15 < total`；第二次精确请求 `bytes=offset-(offset+15)`，要求 206、`Content-Range` 起止正确且 `total` 与首响应相同，再以 17 字节上限取得恰好 16 字节并解析合法 MPEG 帧头。不能只凭 `ID3` 标签或同步字判断媒体格式。验证失败才尝试下一档。
-8. 所有格式都按 `总字节数 × 8 ÷ 时长 ÷ 1000` 计算平均码率。FLAC 返回 `QualityLossless`；320/128 MP3 的实测平均码率必须在目标值上下 20% 内，否则当前候选无效并继续降级。最终 `DownloadInfo.Bitrate` 使用实测值。
-9. 若所有移动候选均因普通网络、协议、格式或码率不可用而失败，最终调用 Web `128kmp3`；若任何候选明确识别到付费、试听、RID 错配或下架，则立即返回 `ErrUnavailable`，不继续降级。HTTP 429、`context.Canceled` 和 `context.DeadlineExceeded` 同样立即终止并保留对应错误，不能被后续候选或 Web 兜底掩盖。
+8. 所有格式都按 `总字节数 × 8 ÷ 时长 ÷ 1000` 计算平均码率。官方 `2000kflac` 的双声道 16-bit/44.1–48 kHz 返回 `QualityLossless`，24-bit/44.1–48 kHz 返回 `QualityHiRes`，并拒绝该选择器上的更高采样率、位深或多声道媒体；独立 Hi-Res 流必须通过其实际内容门槛。320/128 MP3 的实测平均码率必须在目标值上下 20% 内，否则当前候选无效并继续降级。最终 `DownloadInfo.Bitrate` 使用实测值。
+9. 若所有移动候选均因普通网络、协议、格式、码率或候选 RID 错配而失败，最终调用 Web `128kmp3`；后续请求始终重建自详情阶段确认的原始 RID，不能沿用错配响应。若身份缺失/非法，或明确识别到付费、试听、短时长、不可播放或下架，则立即返回 `ErrUnavailable`，不继续降级。HTTP 429、`context.Canceled` 和 `context.DeadlineExceeded` 同样立即终止并保留对应错误，不能被后续候选或 Web 兜底掩盖。
 10. Web 的 `code=-1`、`code=-1001`、付费标记、试听标记和空 URL 均映射为 `ErrUnavailable`。Web 媒体 URL 必须为 HTTPS、无用户信息/端口/查询/片段、单级 `*-sycdn.kuwo.cn` 主机和 `.mp3` 路径。
 11. `DownloadInfo.Headers` 携带已验证请求所用的 User-Agent 与 Referer。`DownloadInfo` 还提供可并发调用的无状态逐跳 URL 校验器；通用下载器在实际改写后的初始候选和每次重定向前执行它，并在允许的重定向上重新附加媒体 headers。只要带非空 headers 或校验器，下载就绕过仅按 URL 聚合的 inflight 去重，避免复用另一请求的凭据、headers 或更宽松策略。
 12. 通用下载日志只记录媒体主机与已脱敏路径；解析、探测或下载错误写入日志前移除其中的 URL，不记录移动端签名路径或查询。
@@ -157,7 +172,7 @@ MusicBot-Go 已通过静态插件注册机制接入网易云音乐、QQ 音乐�
 - `context.Canceled` 与 `context.DeadlineExceeded` 原样保留并立即终止。
 - 资源不存在映射为 `ErrNotFound`。
 - 付费、试听、下架、地域限制、空播放地址和无歌词映射为 `ErrUnavailable`。
-- 移动播放返回 RID 错配、`type` 缺失/无效/非零、短时长、明确付费/试听或非官方媒体主机时终止；同 RID、完整时长且访问状态正常的非期望格式或码率只拒绝当前候选并允许降级。
+- 可选 Hi-Res 或移动播放候选返回 RID 错配时丢弃当前候选，随后从详情阶段已验证的原始 RID 重建请求；错配媒体永不交付。身份缺失/非法、`type` 缺失/无效/非零、短时长、明确付费/试听或非官方媒体主机时终止；同 RID、完整时长且访问状态正常的非期望格式或码率只拒绝当前候选并允许降级。
 - 不支持的歌手、专辑和识曲接口映射为 `ErrUnsupported`。
 - 网络、JSON、解压和编码错误保留原始原因并添加酷我操作上下文。
 - Web JSON、移动 JSON、歌词密文和歌词解压结果分别设置 4 MiB、1 MiB、4 MiB 和 8 MiB 的读取上限；媒体探测每次最多读取 17 字节，媒体总大小上限为 2 GiB，防止无界读取、压缩炸弹和码率计算溢出。
@@ -184,7 +199,7 @@ timeout = 20
 - `Secret` 固定向量、会话缓存、并发访问和非法签名仅重试一次。
 - 搜索、详情、移动/Web 播放、付费、试听、限流、非法 JSON 和超大响应的错误映射。
 - 128/320 MP3 与真实 FLAC 质量选择、降级顺序、精确 `Content-Range`/响应长度边界、FLAC STREAMINFO 与时长一致性、ID3 标签后完整合法 MPEG 帧头、平均码率计算，以及“320 请求实际返回 128”时的降级。
-- 免费曲目携带 benign `payInfo` 时不得误判；`isListenFee`、`cannotOnlinePlay`、`listen_fragment`、RID 错配和短试听必须立即终止。
+- 免费曲目携带 benign `payInfo` 时不得误判；`isListenFee`、`cannotOnlinePlay`、`listen_fragment`、身份缺失/非法和短试听必须立即终止；可选解析器或移动候选的 RID 错配必须拒绝该候选、重用原始 RID 继续，但绝不能交付错配媒体。
 - 移动 `type` 的缺失、`null`、字符串/数字 `0`、非数值与非零变体；只有规范化后严格等于 `0` 的响应可继续。
 - 429、调用方取消和截止时间到期不得继续请求下一档或 Web 兜底。
 - 媒体 URL 白名单、HTTP 到 HTTPS 的同源升级、逐跳重定向校验与 SSRF 拒绝；第二个 ID3 Range 必须复用首段总长。

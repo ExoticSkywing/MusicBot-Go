@@ -18,7 +18,7 @@
 
 ¹ Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
 
-酷我音乐无需配置账号即可使用公开曲目。无损与 Hi-Res 使用两条独立的原生 FLAC 流：无损请求 `2000kflac`，Hi-Res 请求 `4000kflac`；不会请求 `jymaster` / `20900kmflac` 超分母带。实现会校验 RID、解析档位、CDN URL、Range 长度、实际 FLAC STREAMINFO、时长和最终大小：无损必须是 44.1/48 kHz、16-bit 档，Hi-Res 必须至少达到 96 kHz、24-bit，不能只相信接口返回的质量标签。若 CDN 在有效 FLAC 后附加已知的 15 字节尾标记，下载器只在逐字节精确匹配时将其清除，再原子落盘；解析不可用时按请求档位逐级降级到经实际码率验证的较低音质。明确的付费或试听限制信号（`isListenFee`、`cannotOnlinePlay`、`listen_fragment`）不会降级到 MP3；只有请求无损 / Hi-Res 且公开 FLAC 直连通过全部校验时才会放行。RID 错配、虚标 Hi-Res 或明显短时长媒体始终会被拒绝。上述校验证明取得媒体的容器、码流和传输完整性符合预期，不证明录音母带来源。
+酷我音乐无需配置账号即可使用公开曲目。无损优先请求官方 `2000kflac`；Hi-Res 先走独立的 `4000kflac` / `level=hires` 解析，再尝试经验证的官方 `2000kflac`，不会请求 `jymaster` / `20900kmflac` 超分母带。实现不相信接口质量标签，而会校验 RID、解析档位、CDN URL、Range 长度、实际 FLAC STREAMINFO、时长和最终大小：官方 `2000kflac` 只接受双声道 44.1/48 kHz，16-bit 报告为无损、24-bit 报告为 Hi-Res，并拒绝更高采样率或位深；独立 Hi-Res 流必须实际达到对应档位。若 CDN 在完整 FLAC 后附加变长厂商尾数据，下载器只把其信封当作候选边界，并通过末帧 CRC、样本终点、全流逐帧解码、连续性、总样本数和 PCM MD5 证明音频完整后才截除并原子落盘。解析不可用时按请求档位逐级降级到经实际码率验证的较低音质；可选解析器或移动候选返回其他 RID 时会丢弃该候选，再从原始已验证 RID 继续独立链路，错配媒体绝不会交付。明确的付费或试听限制信号（`isListenFee`、`cannotOnlinePlay`、`listen_fragment`）、身份缺失或明显短时长媒体会立即拒绝，不能降级成 MP3。上述校验证明取得媒体的容器、PCM 内容和传输完整性符合预期，不证明录音母带来源。
 
 ## 快速开始
 
