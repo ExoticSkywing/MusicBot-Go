@@ -21,7 +21,7 @@ require (
 	github.com/traefik/yaegi v0.16.1
 	go.senan.xyz/taglib v0.11.1
 	golang.org/x/oauth2 v0.34.0
-	golang.org/x/sync v0.19.0
+	golang.org/x/sync v0.22.0
 	golang.org/x/time v0.14.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/ini.v1 v1.67.1
@@ -32,8 +32,8 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/devgianlu/shannon v0.0.0-20230613115856-82ec90b7fa7e // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 )
 
 require (
@@ -54,7 +54,7 @@ require (
 	github.com/jerbob92/wazero-emscripten-embind v0.0.0
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -75,8 +75,8 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.40.0
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.67.7 // indirect
