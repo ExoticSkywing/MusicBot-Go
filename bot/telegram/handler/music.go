@@ -163,6 +163,9 @@ type MusicHandler struct {
 	// inlineMu protects inlineInFlight map only.
 	inlineMu       sync.Mutex
 	inlineInFlight map[string]*inlineProcessCall
+	// userJobs tracks each requester's cancellable download/upload work so
+	// /cancel can stop only that user's tasks.
+	userJobs userJobRegistry
 	// downloadQueueMu protects downloadWaiting/downloadRunning accounting.
 	downloadQueueMu sync.Mutex
 	// downloadWaiting counts admitted tasks not yet holding a download slot
@@ -233,10 +236,13 @@ type uploadTask struct {
 	picPath     string
 	cleanup     []string
 	cleanupDone func()
-	finishOnce  *sync.Once
-	resultCh    chan uploadResult
-	onDone      func(uploadResult)
-	loc         *i18n.Localizer
+	// releaseJob drops this task's /cancel registry entry. Uploads register
+	// separately from downloads because uploadCtx is detached from the request.
+	releaseJob func()
+	finishOnce *sync.Once
+	resultCh   chan uploadResult
+	onDone     func(uploadResult)
+	loc        *i18n.Localizer
 	// cacheHit marks a task whose status message already shows the localized
 	// "cache hit" text, so the worker must not overwrite it with "uploading".
 	// Replaces the previous fragile strings.Contains(hitCache) check, which
@@ -597,7 +603,14 @@ func (h *MusicHandler) dispatch(ctx context.Context, b *telego.Bot, message *tel
 		return false
 	}
 
-	processCtx, cancel := h.processContext(detachContext(ctx))
+	processCtx, processCancel := h.processContext(detachContext(ctx))
+	// Register for /cancel, and make the normal completion path drop the entry
+	// too, so a later /cancel never reports work that already finished.
+	releaseJob := h.trackUserJob(userID, userJobDownload, processCancel)
+	cancel := func() {
+		releaseJob()
+		processCancel()
+	}
 	pool := h.DownloadPool
 	if pool == nil {
 		pool = h.Pool
@@ -647,7 +660,12 @@ func (h *MusicHandler) submitInlineDownloadWork(ctx context.Context, userID, cha
 		return false
 	}
 
-	processCtx, cancel := h.processContext(detachContext(ctx))
+	processCtx, processCancel := h.processContext(detachContext(ctx))
+	releaseJob := h.trackUserJob(userID, userJobDownload, processCancel)
+	cancel := func() {
+		releaseJob()
+		processCancel()
+	}
 	run := func() {
 		defer cancel()
 		defer releaseAdmission()
@@ -1305,6 +1323,7 @@ func (h *MusicHandler) releasePreparedWaiter(key string, expected *preparedArtif
 		return
 	}
 	var cleanup []string
+	var abortShared context.CancelFunc
 	h.prepareMu.Lock()
 	state, ok := h.preparedInFlight[key]
 	if !ok || state != expected {
@@ -1314,13 +1333,30 @@ func (h *MusicHandler) releasePreparedWaiter(key string, expected *preparedArtif
 	if state.waiters > 0 {
 		state.waiters--
 	}
-	if state.waiters == 0 && state.ready {
-		if state.artifact != nil {
-			cleanup = append(cleanup, state.artifact.cleanup...)
+	if state.waiters == 0 {
+		if state.ready {
+			if state.artifact != nil {
+				cleanup = append(cleanup, state.artifact.cleanup...)
+			}
+			delete(h.preparedInFlight, key)
+		} else if state.cancel != nil {
+			// Nobody is left to receive this download. Stop it now instead of
+			// letting it keep writing scratch files that will only be deleted
+			// once it finishes — this is what makes /cancel actually free disk.
+			//
+			// Drop the entry as well: a request arriving for the same track
+			// before the aborted goroutine unwinds must start a fresh download
+			// rather than attach to this state and inherit its cancellation.
+			// The goroutine then takes the "superseded" branch and cleans up
+			// whatever it had written.
+			abortShared = state.cancel
+			delete(h.preparedInFlight, key)
 		}
-		delete(h.preparedInFlight, key)
 	}
 	h.prepareMu.Unlock()
+	if abortShared != nil {
+		abortShared()
+	}
 	if len(cleanup) > 0 {
 		if err := cleanupFiles(cleanup...); err != nil && h.Logger != nil {
 			h.Logger.Warn("failed to clean prepared artifacts", "key", key, "error", err)
@@ -1962,6 +1998,14 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 	}
 	resultCh := make(chan uploadResult, 1)
 	uploadCtx, cancel := context.WithCancel(baseCtx)
+	// The upload is detached from the request context on purpose, so /cancel
+	// needs its own handle on it. requesterID is 0 for messages with no
+	// attributable sender, in which case tracking is skipped.
+	requesterID := int64(0)
+	if message != nil && message.From != nil {
+		requesterID = message.From.ID
+	}
+	releaseJob := h.trackUserJob(requesterID, userJobUpload, cancel)
 	uploadBot := b
 	if h.UploadBot != nil {
 		uploadBot = h.UploadBot
@@ -1984,6 +2028,7 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 		picPath:     picPath,
 		cleanup:     cleanupCopy,
 		cleanupDone: cleanupDone,
+		releaseJob:  releaseJob,
 		finishOnce:  &sync.Once{},
 		resultCh:    resultCh,
 		loc:         reqLoc,
@@ -2084,6 +2129,9 @@ func (h *MusicHandler) finishUploadTask(task uploadTask, result uploadResult, ru
 		finishOnce = &sync.Once{}
 	}
 	finishOnce.Do(func() {
+		if task.releaseJob != nil {
+			task.releaseJob()
+		}
 		if task.cancel != nil {
 			task.cancel()
 		}

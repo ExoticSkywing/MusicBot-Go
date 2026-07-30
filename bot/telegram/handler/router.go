@@ -22,6 +22,7 @@ type Router struct {
 	About                    MessageHandler
 	Status                   MessageHandler
 	Queue                    MessageHandler
+	Cancel                   MessageHandler
 	RmCache                  MessageHandler
 	Settings                 MessageHandler
 	Reload                   MessageHandler
@@ -86,6 +87,7 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 	bh.Handle(r.wrapMessage(r.About), matchCommandFunc(botName, "about"))
 	bh.Handle(r.wrapMessage(r.Status), matchCommandFunc(botName, "status"))
 	bh.Handle(r.wrapMessage(r.Queue), matchCommandFunc(botName, "queue"))
+	bh.Handle(r.wrapMessage(r.Cancel), matchCommandFunc(botName, "cancel"))
 	bh.Handle(r.wrapMessage(r.Settings), matchCommandFunc(botName, "settings"))
 	if r.Favorites != nil {
 		bh.Handle(r.wrapMessage(r.Favorites), matchCommandFunc(botName, "fav"))

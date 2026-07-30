@@ -187,3 +187,9 @@ help_admincmd_login = "Единый вход в аккаунт (qr/cookie/sign/c
 help_admincmd_checkck = "Проверить валидность cookie плагина"
 help_admincmd_renewck = "Вручную обновить cookie (/renewck <platform>, пусто = все)"
 help_admincmd_wl = "Управление белым списком (add/del/list)"
+
+# --- /cancel ---
+cmd_cancel = "Отменить мои текущие загрузки и отправки"
+cancel_unavailable = "Отмена сейчас недоступна"
+cancel_nothing = "У вас нет активных загрузок или отправок"
+cancel_done = "Задачи отменены: загрузок — {{.Downloads}}, отправок — {{.Uploads}}\nСоответствующий локальный кэш освобождён"

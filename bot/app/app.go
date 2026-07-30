@@ -577,6 +577,7 @@ func (a *App) Start(ctx context.Context) error {
 		FavoriteCallback:         favoriteCallback,
 		DownloadQueueCallback:    &handler.DownloadQueueCallbackHandler{Music: musicHandler, RateLimiter: rateLimiter},
 		Queue:                    &handler.DownloadQueueCommandHandler{Music: musicHandler, RateLimiter: rateLimiter},
+		Cancel:                   &handler.CancelHandler{Music: musicHandler, RateLimiter: rateLimiter},
 		Reload:                   reloadHandler,
 		Admin:                    adminHandler,
 		Inline:                   &handler.InlineSearchHandler{Repo: a.DB, PlatformManager: a.PlatformManager, CollectionChosen: chosenInlineHandler, Favorites: favoritesHandler, BotName: botName, DefaultPlatform: defaultPlatform, DefaultQuality: defaultQuality, FallbackPlatform: searchFallback, PageSize: inlinePageSize, ResourceLimiter: resourceLimiter},
@@ -632,6 +633,7 @@ var botCommandSpecs = []localizedCommandSpec{
 	{command: "recognize", descKey: "cmd_recognize", recognize: true},
 	{command: "status", descKey: "cmd_status"},
 	{command: "queue", descKey: "cmd_queue"},
+	{command: "cancel", descKey: "cmd_cancel"},
 	{command: "about", descKey: "cmd_about"},
 }
 

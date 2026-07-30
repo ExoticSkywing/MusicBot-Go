@@ -187,3 +187,9 @@ help_admincmd_login = "Unified account login (qr/cookie/sign/check/renew/auto/he
 help_admincmd_checkck = "Check plugin cookie validity"
 help_admincmd_renewck = "Manually renew cookies (/renewck <platform>, empty = all)"
 help_admincmd_wl = "Whitelist management (add/del/list)"
+
+# --- /cancel ---
+cmd_cancel = "Cancel my running downloads and uploads"
+cancel_unavailable = "Cancelling is currently unavailable"
+cancel_nothing = "You have no download or upload running"
+cancel_done = "Cancelled your tasks: {{.Downloads}} download(s), {{.Uploads}} upload(s)\nTheir local cache files have been freed"

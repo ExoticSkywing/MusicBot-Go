@@ -184,3 +184,9 @@ help_admincmd_login = "統合アカウントログイン（qr/cookie/sign/check/
 help_admincmd_checkck = "プラグインの Cookie 有効性を確認"
 help_admincmd_renewck = "Cookie を手動更新（/renewck <platform>、空欄で全て）"
 help_admincmd_wl = "ホワイトリスト管理 (add/del/list)"
+
+# --- /cancel ---
+cmd_cancel = "進行中のダウンロードと送信をキャンセル"
+cancel_unavailable = "キャンセル機能は現在利用できません"
+cancel_nothing = "進行中のダウンロードや送信はありません"
+cancel_done = "タスクをキャンセルしました: ダウンロード {{.Downloads}} 件、送信 {{.Uploads}} 件\n対応するローカルキャッシュを解放しました"

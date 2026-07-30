@@ -186,3 +186,9 @@ help_admincmd_login = "统一账号登录（qr/cookie/sign/check/renew/auto/help
 help_admincmd_checkck = "检查插件 Cookie 有效性"
 help_admincmd_renewck = "手动续期 Cookie（/renewck <platform>，留空续全部）"
 help_admincmd_wl = "白名单管理 (add/del/list)"
+
+# --- /cancel ---
+cmd_cancel = "取消我正在进行的下载与发送"
+cancel_unavailable = "取消功能当前不可用"
+cancel_nothing = "你当前没有正在进行的下载或发送任务"
+cancel_done = "已取消你的任务：下载 {{.Downloads}} 个、发送 {{.Uploads}} 个\n对应的本地缓存文件已释放"
