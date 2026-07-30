@@ -254,7 +254,7 @@ func TestKuwoE2E(t *testing.T) {
 		assertKuwoE2EFFmpegDecode(t, ctx, mediaPath)
 	})
 
-	runKuwoE2EStage(t, "E2_Mobile_128", func(t *testing.T) {
+	runKuwoE2EStage(t, "E2_Standard_128", func(t *testing.T) {
 		candidates := mobileQualityCandidates(platform.QualityStandard)
 		if len(candidates) != 1 ||
 			candidates[0].br != "128kmp3" ||
@@ -263,16 +263,20 @@ func TestKuwoE2E(t *testing.T) {
 			candidates[0].quality != platform.QualityStandard {
 			t.Fatal("standard quality no longer maps to the exact mobile 128 candidate")
 		}
-		info, err := client.resolveMobileDownload(ctx, detail, candidates[0])
+		info, err := client.GetDownloadInfo(
+			ctx,
+			kuwoE2ETrackID,
+			platform.QualityStandard,
+		)
 		if err != nil {
-			t.Fatalf("mobile 128 download info failed: %s", redactKuwoE2EError(err))
+			t.Fatalf("standard download info failed: %s", redactKuwoE2EError(err))
 		}
 		assertKuwoE2EDownloadInfo(t, kuwoE2ETrackID, info, "mp3", platform.QualityStandard)
 		if info.Bitrate < 102 || info.Bitrate > 154 {
-			t.Fatalf("mobile 128 verified average bitrate = %d kbps, want 102..154", info.Bitrate)
+			t.Fatalf("standard verified average bitrate = %d kbps, want 102..154", info.Bitrate)
 		}
 		logKuwoE2EMedia(t, kuwoE2ETrackID, info)
-		mediaPath := filepath.Join(tempDir, "kuwo-e2e-mobile-128.mp3")
+		mediaPath := filepath.Join(tempDir, "kuwo-e2e-standard-128.mp3")
 		assertKuwoE2EFullDownload(t, ctx, service, info, mediaPath)
 		assertKuwoE2ELocalMPEG(t, mediaPath)
 		assertKuwoE2EFFmpegDecode(t, ctx, mediaPath)

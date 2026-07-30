@@ -63,6 +63,33 @@ opt-in live E2E tests, Docker/GitHub Actions.
    publication; bound probe and full-download request lifetimes.
 6. Run the exact production RID through `flac -t` and a full ffmpeg decode.
 
+## Task 1c: Kuwo regional lossless and High fallbacks
+
+**Files:**
+
+- Modify: `plugins/kuwo/media.go`
+- Modify: `plugins/kuwo/direct_hires.go`
+- Test: `plugins/kuwo/media_test.go`
+- Add: `plugins/kuwo/direct_lossless_test.go`
+- Add: `plugins/kuwo/direct_high_test.go`
+
+1. Reproduce the Hong Kong production condition where the official selector
+   returns business code 407 while its CDN remains reachable.
+2. Add failing tests for Lossless and Hi-Res resolver order and for successful
+   external `level=lossless` fallback without MP3.
+3. Require exact RID, duration, lossless level, 2000 bitrate, empty encryption
+   key, quality entry, declared size, safe CDN URL, and verified FLAC content.
+4. Accept only stereo 16/24-bit 44.1/48 kHz, reject higher rates, 32-bit,
+   multichannel, and every master/super-resolution request.
+5. Reproduce the remaining Hong Kong High-to-Standard downgrade, add
+   independent `level=exhigh` before the existing mobile chain, and verify its
+   exact contract plus a real 256–384 kbps MP3 probe. Do not use the
+   independent `level=standard` AAC response as MP3.
+6. Treat a successful resolver envelope with missing identity data as terminal
+   while keeping an explicit non-200 business response optional.
+7. Run the complete Kuwo E2E suite inside the Hong Kong container before and
+   after deployment.
+
 ## Task 2: Kugou quality metadata and verification recovery
 
 **Files:**

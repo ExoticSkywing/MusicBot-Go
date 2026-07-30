@@ -28,6 +28,16 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func withExternalHighUnavailable(next http.RoundTripper) http.RoundTripper {
+	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "kw-api.cenguigui.cn" &&
+			req.URL.Query().Get("level") == directHighSelectorLevel {
+			return response(http.StatusServiceUnavailable, nil, nil), nil
+		}
+		return next.RoundTrip(req)
+	})
+}
+
 func response(status int, headers map[string]string, body []byte) *http.Response {
 	h := make(http.Header, len(headers))
 	for key, value := range headers {
@@ -73,14 +83,18 @@ func TestLosslessResolverPlanUsesSeparateDirectFLACStreams(t *testing.T) {
 		want    []losslessResolver
 	}{
 		{
-			name:    "lossless uses the direct 2000 FLAC stream",
+			name:    "lossless uses official 2000 then external lossless",
 			quality: platform.QualityLossless,
-			want:    []losslessResolver{resolvePlayableFLAC},
+			want:    []losslessResolver{resolvePlayableFLAC, resolvePlayableExternalLossless},
 		},
 		{
-			name:    "hires uses direct 4000 then direct 2000 fallback",
+			name:    "hires uses external 4000 then official 2000 then external lossless",
 			quality: platform.QualityHiRes,
-			want:    []losslessResolver{resolvePlayableHiRes, resolvePlayableFLAC},
+			want: []losslessResolver{
+				resolvePlayableHiRes,
+				resolvePlayableFLAC,
+				resolvePlayableExternalLossless,
+			},
 		},
 		{
 			name:    "high has no lossless resolver",
@@ -462,7 +476,7 @@ func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 	now := time.Unix(1700000000, 0)
@@ -513,7 +527,7 @@ func TestResolveDownloadRejectsFalse320AndFallsBack(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
 	if err != nil {
@@ -597,7 +611,7 @@ func TestResolveDownloadUntrustedMobileHostIsTerminal(t *testing.T) {
 					}
 				})
 				client := NewClient(time.Second, nil)
-				client.apiHTTPClient.Transport = transport
+				client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 				client.mediaHTTPClient.Transport = transport
 
 				_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -678,7 +692,7 @@ func TestResolveDownloadTrailingEmptyFragmentIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", tt.quality)
@@ -743,7 +757,7 @@ func TestResolveDownloadQualityMetadataFallbackPrecedesURLNormalization(t *testi
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -800,7 +814,7 @@ func TestResolveDownloadPreviewBitratePrecedesSafeSuffixMismatchFallback(t *test
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 
 	_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -860,7 +874,7 @@ func TestResolveDownloadOverflowingMobileDurationIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -920,7 +934,7 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 				return response(http.StatusOK, nil, []byte(tt.detail)), nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
 			if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, tt.want) {
@@ -994,7 +1008,7 @@ func TestPaidMetadataAllowsOnlyStrictlyVerifiedDirectHiRes(t *testing.T) {
 		detail:          kuwoDetailURL,
 		qualityResolver: "https://resolver.example/api",
 	})
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 
@@ -1088,7 +1102,7 @@ func TestHiResResolverRIDMismatchFallsBackToDirect2000(t *testing.T) {
 		detail:          kuwoDetailURL,
 		qualityResolver: "https://resolver.example/api",
 	})
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 
@@ -1169,7 +1183,7 @@ func TestHiResResolverMalformedRIDIsTerminalWithoutFallback(t *testing.T) {
 				detail:          kuwoDetailURL,
 				qualityResolver: "https://resolver.example/api",
 			})
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(
@@ -1283,7 +1297,7 @@ func TestHiResFalseLabelFallsBackToDirect2000WithoutMaster(t *testing.T) {
 		detail:          kuwoDetailURL,
 		qualityResolver: "https://resolver.example/api",
 	})
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 
@@ -1360,7 +1374,7 @@ func TestResolveWebDownloadEmptyURLIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
@@ -1413,7 +1427,7 @@ func TestResolveDownloadMobileRIDMismatchFallsBackFromOriginalTrack(t *testing.T
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 
 	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -1485,7 +1499,7 @@ func TestResolveDownloadProductionMobileFailuresReachVerifiedWebMP3(t *testing.T
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 
 	info, err := client.GetDownloadInfo(
@@ -1540,7 +1554,7 @@ func TestResolveDownloadTerminalTypeAndDurationErrorsDoNotFallback(t *testing.T)
 				}
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
 			if !errors.Is(err, platform.ErrUnavailable) {
@@ -1641,7 +1655,7 @@ func TestResolveDownloadMalformedCriticalMobileFieldsAreTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
@@ -1707,7 +1721,7 @@ func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -1765,7 +1779,7 @@ func TestResolveDownloadMobileTransportFailureUsesVerifiedWebMP3(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = transport
+			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 			client.mediaHTTPClient.Transport = transport
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
 			if err != nil {
@@ -1800,7 +1814,7 @@ func TestResolveDownloadRateLimitIsTerminal(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
+	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
 	client.mediaHTTPClient.Transport = transport
 	_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
 	if !errors.Is(err, platform.ErrRateLimited) {

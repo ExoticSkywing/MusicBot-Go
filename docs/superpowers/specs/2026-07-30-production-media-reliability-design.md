@@ -19,6 +19,10 @@ For track `165721002`, the verified detail is free and 226 seconds long.
 - The official 2000 selector returns a complete stereo FLAC for the requested
   RID. Its STREAMINFO is 24-bit/48 kHz, so the current exact 16-bit allow-list
   rejects a usable non-master stream.
+- From the Hong Kong production egress, all tested official mobile-selector
+  variants return HTTP 200 with business code 407 before a CDN URL is issued.
+  The same container can fetch the Kuwo CDN object normally, so this is a
+  selector-region failure rather than a media-delivery failure.
 - The same production object contains every STREAMINFO-declared sample and a
   valid final frame, followed by a 30-byte vendor trailer. The existing
   downloader recognizes only an older 15-byte trailer, so strict decoders
@@ -27,6 +31,12 @@ For track `165721002`, the verified detail is free and 226 seconds long.
   response is AAC despite the MP3 request. The independently verified Web
   fallback returns a valid standard MP3, but the earlier candidate rejection
   prevents reaching it.
+- After the lossless repair was tested in the Hong Kong container, a High
+  request still reached only a verified standard MP3 because the official
+  mobile selector remained unavailable from that egress. The independent
+  resolver's `level=exhigh` response provides the requested 320 MP3 there.
+  Its `level=standard` response is currently an approximately 100 kbps AAC, so
+  it must not be wired as, or relabeled to, standard 128 MP3.
 
 The repair keeps wrong-track, preview, and unsafe URLs unservable. Only a RID
 mismatch from the optional Hi-Res resolver or a mobile candidate may be
@@ -42,6 +52,28 @@ The official 2000 selector may return either:
 It must continue to reject sample rates above 48 kHz on this selector. The
 runtime still never requests `jymaster`, encrypted master formats, or any
 master/super-resolution tier.
+
+When the official 2000 selector is unavailable, the existing independent
+quality resolver may be queried with `level=lossless`. This fallback must
+return the requested RID, matching duration, requested and actual
+`lossless`, bitrate 2000, an empty encryption key, a matching lossless quality
+entry, a bounded declared size, and an allow-listed Kuwo CDN URL. Its media is
+then subjected to the same Range, STREAMINFO, trailer-boundary, full-frame,
+sample-count, and PCM-MD5 checks as every other direct FLAC. Only stereo
+16/24-bit 44.1/48 kHz is accepted; 16-bit is reported as Lossless and 24-bit
+as Hi-Res. Hi-Res resolution therefore tries independent Hi-Res, official
+2000, then this independently resolved lossless stream. Lossless resolution
+tries official 2000, then independently resolved lossless.
+
+High resolution first tries the independent `level=exhigh` candidate, then
+retains the existing mobile 320, mobile 128, and Web fallback order. The
+independent response must provide the requested RID and duration, requested
+and actual `exhigh`, bitrate 320, an empty encryption key, a matching
+320/MP3/exhigh quality entry, a bounded declared size, and an allow-listed
+Kuwo CDN `.mp3` URL. A Range probe must then find a real MPEG frame and verify
+an average bitrate between 256 and 384 kbps plus a matching media size.
+Standard quality does not call the independent resolver and keeps its existing
+verified MP3 paths.
 
 Vendor trailers are not part of the native FLAC stream. Their shared envelope
 is only a candidate-boundary hint, never sufficient authority to truncate

@@ -50,6 +50,7 @@ type losslessResolver uint8
 const (
 	resolvePlayableFLAC losslessResolver = iota + 1
 	resolvePlayableHiRes
+	resolvePlayableExternalLossless
 )
 
 type mediaProbe struct {
@@ -95,9 +96,13 @@ func mobileQualityCandidates(quality platform.Quality) []mobileQuality {
 func losslessResolverPlan(quality platform.Quality) []losslessResolver {
 	switch quality {
 	case platform.QualityLossless:
-		return []losslessResolver{resolvePlayableFLAC}
+		return []losslessResolver{resolvePlayableFLAC, resolvePlayableExternalLossless}
 	case platform.QualityHiRes:
-		return []losslessResolver{resolvePlayableHiRes, resolvePlayableFLAC}
+		return []losslessResolver{
+			resolvePlayableHiRes,
+			resolvePlayableFLAC,
+			resolvePlayableExternalLossless,
+		}
 	default:
 		return nil
 	}
@@ -574,6 +579,16 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 		return nil, accessErr
 	}
 	var lastErr error
+	if quality == platform.QualityHigh {
+		info, candidateErr := c.resolvePlayableExternalHigh(ctx, detail)
+		if candidateErr == nil {
+			return info, nil
+		}
+		if isTerminalMediaError(candidateErr) {
+			return nil, candidateErr
+		}
+		lastErr = candidateErr
+	}
 	for _, resolver := range resolverPlan {
 		var (
 			info         *platform.DownloadInfo
@@ -584,6 +599,8 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 			info, candidateErr = c.resolvePlayableLossless(ctx, detail)
 		case resolvePlayableHiRes:
 			info, candidateErr = c.resolvePlayableHiRes(ctx, detail)
+		case resolvePlayableExternalLossless:
+			info, candidateErr = c.resolvePlayableExternalLossless(ctx, detail)
 		default:
 			continue
 		}
