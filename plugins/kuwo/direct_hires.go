@@ -28,7 +28,7 @@ type directHiResResponse struct {
 }
 
 type directHiResData struct {
-	RID      jsonScalar       `json:"rid"`
+	RID      rawJSONValue     `json:"rid"`
 	Bitrate  jsonScalar       `json:"bitrate"`
 	Duration jsonScalar       `json:"duration"`
 	Size     jsonScalar       `json:"size"`
@@ -143,8 +143,12 @@ func (c *Client) resolvePlayableHiRes(
 		return nil, errors.New("kuwo: direct Hi-Res resolver unavailable")
 	}
 	data := result.Data
-	if normalizeRID(scalarText(data.RID)) != detail.ID {
+	rid := normalizeRID(scalarText(data.RID.scalar()))
+	if rid == "" {
 		return nil, terminalUnavailable(errTrackIdentityMismatch)
+	}
+	if rid != detail.ID {
+		return nil, errTrackIdentityMismatch
 	}
 	bitrate, ok := data.Bitrate.Int64()
 	if !ok || bitrate != directHiResBitrate {
@@ -206,6 +210,7 @@ func (c *Client) resolvePlayableHiRes(
 		ctx,
 		rawURL,
 		rawSize,
+		probe.flacHeader,
 	)
 	if err != nil {
 		if errors.Is(err, errUnsafeMediaURL) {
@@ -219,7 +224,7 @@ func (c *Client) resolvePlayableHiRes(
 		rawURL,
 		rawSize,
 		probe.flacHeader,
-		trailerProbe.tail,
+		trailerProbe,
 	)
 	return info, nil
 }

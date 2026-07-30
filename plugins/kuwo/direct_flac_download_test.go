@@ -3,7 +3,9 @@ package kuwo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -19,6 +21,289 @@ import (
 )
 
 const directFLACTestURL = "https://kw-lw.kuwo.cn/audio/test.flac"
+
+var productionDirectFLACTrailer = []byte{
+	0xf0, 0x00, 0xff, 0x0f,
+	0x47, 0x40, 0x38, 0x40, 0x48, 0x46, 0x3c, 0x36,
+	0x23, 0x23, 0x26, 0x39, 0x62, 0x3c, 0x35, 0x66,
+	0x26, 0x47, 0x46, 0x36, 0x6b, 0x39,
+	0x0e, 0x55, 0xff, 0xf0,
+}
+
+const (
+	productionDirectFLACHeaderHex = "664c614300000022100010000000120055040bb8037000a62800ca72af53be5f4e594e78763090c04af4"
+	productionDirectFLACFrameHex  = "fff8ba1ce0a9a2ab0000000000000000af93"
+)
+
+func TestDirectFLACContextReaderStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reader := directFLACContextReader{
+		ctx:    ctx,
+		reader: strings.NewReader("fLaC"),
+	}
+	buffer := make([]byte, 4)
+	readSize, err := reader.Read(buffer)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if readSize != 0 {
+		t.Fatalf("read size = %d, want 0", readSize)
+	}
+}
+
+func TestValidateDirectFLACFilePreservesCancellation(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	path := filepath.Join(t.TempDir(), "canceled.flac")
+	if err := os.WriteFile(path, append(header[:], 0x00), 0o600); err != nil {
+		t.Fatalf("write FLAC fixture: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open FLAC fixture: %v", err)
+	}
+	defer file.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = validateDirectFLACFile(ctx, file, 43, header)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
+
+func TestAnalyzeDirectFLACTailProvesFinalFrameBoundary(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	frame := mustDecodeHex(t, productionDirectFLACFrameHex)
+	dynamicTrailer := append(
+		append([]byte{0xf0, 0x00, 0xff, 0x0f}, bytes.Repeat([]byte{0x73}, 37)...),
+		0x0e, 0x55, 0xff, 0xf0,
+	)
+	internalPrefixTrailer := append([]byte(nil), dynamicTrailer[:12]...)
+	internalPrefixTrailer = append(internalPrefixTrailer, 0xf0, 0x00, 0xff, 0x0f)
+	internalPrefixTrailer = append(internalPrefixTrailer, dynamicTrailer[12:]...)
+
+	for _, test := range []struct {
+		name           string
+		trailer        []byte
+		wantTrailerLen int
+	}{
+		{name: "clean", wantTrailerLen: 0},
+		{name: "legacy", trailer: knownDirectFLACTrailer, wantTrailerLen: len(knownDirectFLACTrailer)},
+		{name: "production", trailer: productionDirectFLACTrailer, wantTrailerLen: len(productionDirectFLACTrailer)},
+		{name: "dynamic body", trailer: dynamicTrailer, wantTrailerLen: len(dynamicTrailer)},
+		{name: "internal prefix", trailer: internalPrefixTrailer, wantTrailerLen: len(internalPrefixTrailer)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tail := append(append([]byte(nil), frame...), test.trailer...)
+			rangeStart := int64(42)
+			rawSize := rangeStart + int64(len(tail))
+
+			got, err := analyzeDirectFLACTail(header, rawSize, rangeStart, tail)
+			if err != nil {
+				t.Fatalf("analyze direct FLAC tail: %v", err)
+			}
+			if got.trailerLen != int64(test.wantTrailerLen) {
+				t.Fatalf("trailer length = %d, want %d", got.trailerLen, test.wantTrailerLen)
+			}
+			if got.outputSize != rawSize-int64(test.wantTrailerLen) {
+				t.Fatalf("output size = %d, want %d", got.outputSize, rawSize-int64(test.wantTrailerLen))
+			}
+		})
+	}
+}
+
+func TestAnalyzeDirectFLACTailRejectsUnprovenBoundaries(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	frame := mustDecodeHex(t, productionDirectFLACFrameHex)
+	envelope := append(
+		append([]byte{0xf0, 0x00, 0xff, 0x0f}, bytes.Repeat([]byte{0x42}, 9)...),
+		0x0e, 0x55, 0xff, 0xf0,
+	)
+	badCRC8 := append([]byte(nil), frame...)
+	badCRC8[7] ^= 0x01
+	badCRC16 := append([]byte(nil), frame...)
+	badCRC16[len(badCRC16)-1] ^= 0x01
+	truncated := append([]byte(nil), frame[:len(frame)-1]...)
+	extraBeforeEnvelope := append(append([]byte(nil), frame...), 0x00)
+	wrongTotalHeader := header
+	packed := binary.BigEndian.Uint64(wrongTotalHeader[18:26])
+	binary.BigEndian.PutUint64(wrongTotalHeader[18:26], packed+1)
+
+	for _, test := range []struct {
+		name   string
+		header [42]byte
+		audio  []byte
+		tail   []byte
+	}{
+		{name: "header CRC8", header: header, audio: badCRC8, tail: envelope},
+		{name: "frame CRC16", header: header, audio: badCRC16, tail: envelope},
+		{name: "frame one byte short", header: header, audio: truncated, tail: envelope},
+		{name: "frame one byte long", header: header, audio: extraBeforeEnvelope, tail: envelope},
+		{name: "total samples", header: wrongTotalHeader, audio: frame, tail: envelope},
+		{name: "unknown trailing garbage", header: header, audio: frame, tail: []byte{0x01}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tail := append(append([]byte(nil), test.audio...), test.tail...)
+			rangeStart := int64(42)
+			rawSize := rangeStart + int64(len(tail))
+			if _, err := analyzeDirectFLACTail(test.header, rawSize, rangeStart, tail); !errors.Is(err, errDirectFLACIntegrity) {
+				t.Fatalf("error = %v, want direct FLAC integrity error", err)
+			}
+		})
+	}
+}
+
+func TestAnalyzeDirectFLACTailBoundsCandidateWork(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	frame := mustDecodeHex(t, productionDirectFLACFrameHex)
+	prefix := []byte{0xf0, 0x00, 0xff, 0x0f}
+	suffix := []byte{0x0e, 0x55, 0xff, 0xf0}
+
+	t.Run("eight envelope candidates", func(t *testing.T) {
+		trailer := append([]byte(nil), prefix...)
+		trailer = append(
+			trailer,
+			bytes.Repeat(prefix, directFLACMaxCandidates-1)...,
+		)
+		trailer = append(trailer, suffix...)
+		tail := append(append([]byte(nil), frame...), trailer...)
+		got, err := analyzeDirectFLACTail(
+			header,
+			int64(42+len(tail)),
+			42,
+			tail,
+		)
+		if err != nil {
+			t.Fatalf("analyze eight candidates: %v", err)
+		}
+		if got.trailerLen != int64(len(trailer)) {
+			t.Fatalf("trailer length = %d, want %d", got.trailerLen, len(trailer))
+		}
+	})
+
+	t.Run("nine envelope candidates", func(t *testing.T) {
+		trailer := append(
+			bytes.Repeat(prefix, directFLACMaxCandidates+1),
+			suffix...,
+		)
+		tail := append(append([]byte(nil), frame...), trailer...)
+		if _, err := analyzeDirectFLACTail(
+			header,
+			int64(42+len(tail)),
+			42,
+			tail,
+		); !errors.Is(err, errDirectFLACIntegrity) {
+			t.Fatalf("error = %v, want direct FLAC integrity error", err)
+		}
+	})
+
+	t.Run("raw sync noise is not a candidate", func(t *testing.T) {
+		unknownMaxFrameHeader := header
+		clear(unknownMaxFrameHeader[15:18])
+		noise := bytes.Repeat(
+			[]byte{0xff, 0xf8, 0x00, 0x00, 0x00, 0x00},
+			directFLACMaxCandidates+12,
+		)
+		tail := append(append(append([]byte(nil), noise...), frame...), prefix...)
+		tail = append(tail, suffix...)
+		got, err := analyzeDirectFLACTail(
+			unknownMaxFrameHeader,
+			int64(42+len(tail)),
+			42,
+			tail,
+		)
+		if err != nil {
+			t.Fatalf("analyze tail with raw sync noise: %v", err)
+		}
+		if got.trailerLen != int64(len(prefix)+len(suffix)) {
+			t.Fatalf("trailer length = %d, want %d", got.trailerLen, len(prefix)+len(suffix))
+		}
+	})
+}
+
+func TestAnalyzeDirectFLACTailBoundsTrailerLength(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	frame := mustDecodeHex(t, productionDirectFLACFrameHex)
+	prefix := []byte{0xf0, 0x00, 0xff, 0x0f}
+	suffix := []byte{0x0e, 0x55, 0xff, 0xf0}
+
+	for _, test := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{name: "exactly four KiB", length: directFLACTrailerSearchSize},
+		{name: "four KiB plus one", length: directFLACTrailerSearchSize + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bodyLength := test.length - len(prefix) - len(suffix)
+			trailer := append(append([]byte(nil), prefix...), bytes.Repeat([]byte{0x61}, bodyLength)...)
+			trailer = append(trailer, suffix...)
+			tail := append(append([]byte(nil), frame...), trailer...)
+			got, err := analyzeDirectFLACTail(
+				header,
+				int64(42+len(tail)),
+				42,
+				tail,
+			)
+			if test.wantErr {
+				if !errors.Is(err, errDirectFLACIntegrity) {
+					t.Fatalf("error = %v, want direct FLAC integrity error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("analyze tail: %v", err)
+			}
+			if got.trailerLen != int64(test.length) {
+				t.Fatalf("trailer length = %d, want %d", got.trailerLen, test.length)
+			}
+		})
+	}
+}
+
+func TestDirectFLACProbeRangeUsesDeclaredFrameBound(t *testing.T) {
+	header := productionDirectFLACHeader(t)
+	rawSize := int64(directFLACMaxFrameSize + directFLACTrailerSearchSize + 123)
+
+	t.Run("unknown max frame uses four MiB", func(t *testing.T) {
+		unknown := header
+		clear(unknown[15:18])
+		start, err := directFLACProbeRangeStart(unknown, rawSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if start != 123 {
+			t.Fatalf("range start = %d, want 123", start)
+		}
+	})
+
+	t.Run("declared max frame", func(t *testing.T) {
+		start, err := directFLACProbeRangeStart(header, rawSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := rawSize -
+			int64(mustDirectFLACStreamInfo(t, header[:]).maxFrameSize+
+				directFLACTrailerSearchSize)
+		if start != want {
+			t.Fatalf("range start = %d, want %d", start, want)
+		}
+	})
+
+	t.Run("declared size above limit", func(t *testing.T) {
+		oversized := header
+		putTestFLACUint24(
+			oversized[15:18],
+			directFLACMaxFrameSize+1,
+		)
+		if _, err := directFLACProbeRangeStart(oversized, rawSize); !errors.Is(err, errDirectFLACIntegrity) {
+			t.Fatalf("error = %v, want direct FLAC integrity error", err)
+		}
+	})
+}
 
 func TestDirectFLACDownloaderStripsOnlyKnownTrailerAndCommits(t *testing.T) {
 	cleartext := makeDirectFLACTestStream(t, 32<<10)
@@ -79,18 +364,26 @@ func TestDirectFLACDownloaderStripsOnlyKnownTrailerAndCommits(t *testing.T) {
 	if len(progress) == 0 || progress[len(progress)-1] != [2]int64{int64(len(cleartext)), int64(len(cleartext))} {
 		t.Fatalf("final progress = %v, want clean output size", progress)
 	}
+	for index, update := range progress {
+		if update[0] < 0 || update[0] > int64(len(cleartext)) ||
+			update[1] != int64(len(cleartext)) {
+			t.Fatalf("progress exceeded output size: %v", progress)
+		}
+		if index < len(progress)-1 && update[0] >= int64(len(cleartext)) {
+			t.Fatalf("progress completed before atomic publish: %v", progress)
+		}
+	}
 	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
 
-func TestDirectFLACDownloaderPreservesNonMatchingTrailer(t *testing.T) {
-	cleartext := makeDirectFLACTestStream(t, 4096)
-	differentTrailer := append([]byte(nil), knownDirectFLACTrailer...)
-	differentTrailer[len(differentTrailer)-1] ^= 0x01
-	raw := append(append([]byte(nil), cleartext...), differentTrailer...)
+func TestDirectFLACDownloaderStripsProductionThirtyByteTrailerAndCommits(t *testing.T) {
+	cleartext := makeDirectFLACTestStream(t, 32<<10)
+	raw := append(append([]byte(nil), cleartext...), productionDirectFLACTrailer...)
 	client := directFLACTestClient(raw)
 	info := &platform.DownloadInfo{
-		URL:  directFLACTestURL,
-		Size: int64(len(raw)),
+		URL:    directFLACTestURL,
+		Size:   int64(len(cleartext)),
+		Format: "flac",
 	}
 	destination := filepath.Join(t.TempDir(), "song.flac")
 
@@ -108,38 +401,166 @@ func TestDirectFLACDownloaderPreservesNonMatchingTrailer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("download direct FLAC: %v", err)
 	}
+	if written != int64(len(cleartext)) {
+		t.Fatalf("written = %d, want %d", written, len(cleartext))
+	}
 	got, err := os.ReadFile(destination)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read destination: %v", err)
 	}
-	if written != int64(len(raw)) || !bytes.Equal(got, raw) {
-		t.Fatalf("non-matching trailer changed: written=%d size=%d", written, len(got))
+	if !bytes.Equal(got, cleartext) {
+		t.Fatal("production trailer was not stripped exactly")
+	}
+	if info.Size != int64(len(cleartext)) {
+		t.Fatalf("info size = %d, want %d", info.Size, len(cleartext))
 	}
 	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
 
-func TestProbeDirectFLACOutputSizeMatchesOnlyKnownTrailer(t *testing.T) {
-	cleartext := makeDirectFLACTestStream(t, 2048)
+func TestDirectFLACDownloaderRejectsUnknownTrailingData(t *testing.T) {
+	cleartext := makeDirectFLACTestStream(t, 4096)
+	differentTrailer := append([]byte(nil), knownDirectFLACTrailer...)
+	differentTrailer[len(differentTrailer)-1] ^= 0x01
+	raw := append(append([]byte(nil), cleartext...), differentTrailer...)
+	client := directFLACTestClient(raw)
+	info := &platform.DownloadInfo{
+		URL:  directFLACTestURL,
+		Size: int64(len(raw)),
+	}
+	destination := filepath.Join(t.TempDir(), "song.flac")
+
+	_, err := client.directFLACDownloader(
+		directFLACTestURL,
+		int64(len(raw)),
+		mustDirectFLACHeader(t, raw),
+		uncheckedDirectFLACProbe(t, raw, int64(len(raw)), 0),
+	)(
+		context.Background(),
+		info,
+		destination,
+		nil,
+	)
+	if !errors.Is(err, errDirectFLACIntegrity) {
+		t.Fatalf("error = %v, want direct FLAC integrity error", err)
+	}
+	assertDirectFLACDestinationMissing(t, destination)
+	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
+}
+
+func TestDirectFLACDownloaderAcceptsDynamicPayloadButRejectsMarkerVariants(t *testing.T) {
+	mutate := func(index int) []byte {
+		tail := append([]byte(nil), productionDirectFLACTrailer...)
+		tail[index] ^= 0x01
+		return tail
+	}
+	removePayloadByte := append(
+		append([]byte(nil), productionDirectFLACTrailer[:10]...),
+		productionDirectFLACTrailer[11:]...,
+	)
+	insertPayloadByte := append(
+		append([]byte(nil), productionDirectFLACTrailer[:26]...),
+		0x7e,
+	)
+	insertPayloadByte = append(insertPayloadByte, productionDirectFLACTrailer[26:]...)
+	markerPlusOne := append(append([]byte(nil), productionDirectFLACTrailer...), 0x00)
+	oldPayloadMutation := append([]byte(nil), knownDirectFLACTrailer...)
+	oldPayloadMutation[6] ^= 0x01
+
 	for _, test := range []struct {
-		name string
-		tail []byte
-		want int64
+		name   string
+		tail   []byte
+		accept bool
+	}{
+		{name: "production prefix bit", tail: mutate(0)},
+		{name: "production payload bit", tail: mutate(12), accept: true},
+		{name: "production suffix bit", tail: mutate(len(productionDirectFLACTrailer) - 1)},
+		{name: "production 29 bytes", tail: removePayloadByte, accept: true},
+		{name: "production 31 bytes", tail: insertPayloadByte, accept: true},
+		{name: "production marker plus one", tail: markerPlusOne},
+		{name: "legacy payload bit", tail: oldPayloadMutation, accept: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cleartext := makeDirectFLACTestStream(t, 4096)
+			raw := append(append([]byte(nil), cleartext...), test.tail...)
+			client := directFLACTestClient(raw)
+			probe := uncheckedDirectFLACProbe(t, raw, int64(len(raw)), 0)
+			outputSize := int64(len(raw))
+			if test.accept {
+				probe = directFLACTail(t, raw)
+				outputSize = int64(len(cleartext))
+			}
+			info := &platform.DownloadInfo{URL: directFLACTestURL, Size: outputSize}
+			destination := filepath.Join(t.TempDir(), "song.flac")
+
+			written, err := client.directFLACDownloader(
+				directFLACTestURL,
+				int64(len(raw)),
+				mustDirectFLACHeader(t, raw),
+				probe,
+			)(
+				context.Background(),
+				info,
+				destination,
+				nil,
+			)
+			if !test.accept {
+				if !errors.Is(err, errDirectFLACIntegrity) {
+					t.Fatalf("error = %v, want direct FLAC integrity error", err)
+				}
+				assertDirectFLACDestinationMissing(t, destination)
+				assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
+				return
+			}
+			if err != nil {
+				t.Fatalf("download direct FLAC: %v", err)
+			}
+			got, err := os.ReadFile(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if written != int64(len(cleartext)) || !bytes.Equal(got, cleartext) {
+				t.Fatalf("dynamic trailer was not stripped: written=%d size=%d", written, len(got))
+			}
+			assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
+		})
+	}
+}
+
+func TestProbeDirectFLACProvesOutputBoundaryAndSnapshotsTail(t *testing.T) {
+	cleartext := makeDirectFLACTestStream(t, 2048)
+	dynamicTrailer := append(
+		append([]byte{0xf0, 0x00, 0xff, 0x0f}, bytes.Repeat([]byte{0xa5}, 19)...),
+		0x0e, 0x55, 0xff, 0xf0,
+	)
+	for _, test := range []struct {
+		name           string
+		tail           []byte
+		wantTrailerLen int64
 	}{
 		{
-			name: "known",
-			tail: append([]byte(nil), knownDirectFLACTrailer...),
-			want: int64(len(cleartext)),
+			name:           "legacy",
+			tail:           append([]byte(nil), knownDirectFLACTrailer...),
+			wantTrailerLen: int64(len(knownDirectFLACTrailer)),
 		},
 		{
-			name: "different",
-			tail: append([]byte(nil), bytes.Repeat([]byte{0xa5}, len(knownDirectFLACTrailer))...),
-			want: int64(len(cleartext) + len(knownDirectFLACTrailer)),
+			name:           "production",
+			tail:           append([]byte(nil), productionDirectFLACTrailer...),
+			wantTrailerLen: int64(len(productionDirectFLACTrailer)),
+		},
+		{
+			name:           "dynamic payload",
+			tail:           dynamicTrailer,
+			wantTrailerLen: int64(len(dynamicTrailer)),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw := append(append([]byte(nil), cleartext...), test.tail...)
+			header := mustDirectFLACHeader(t, raw)
+			start, err := directFLACProbeRangeStart(header, int64(len(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
 			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				start := int64(len(raw) - len(test.tail))
 				if req.Header.Get("Range") != "bytes="+
 					strconvFormatInt(start)+"-"+strconvFormatInt(int64(len(raw)-1)) {
 					t.Fatalf("Range = %q", req.Header.Get("Range"))
@@ -165,24 +586,74 @@ func TestProbeDirectFLACOutputSizeMatchesOnlyKnownTrailer(t *testing.T) {
 				context.Background(),
 				directFLACTestURL,
 				int64(len(raw)),
+				header,
 			)
 			if err != nil {
 				t.Fatalf("probe output size: %v", err)
 			}
-			if got.outputSize != test.want {
-				t.Fatalf("output size = %d, want %d", got.outputSize, test.want)
+			if got.outputSize != int64(len(cleartext)) {
+				t.Fatalf("output size = %d, want %d", got.outputSize, len(cleartext))
 			}
-			if got.strip != (test.name == "known") {
-				t.Fatalf("strip = %t for %s trailer", got.strip, test.name)
+			if got.trailerLen != test.wantTrailerLen {
+				t.Fatalf("trailer length = %d, want %d", got.trailerLen, test.wantTrailerLen)
 			}
-			if got.tail != directFLACTail(t, raw) {
-				t.Fatalf("tail = %x, want %x", got.tail, test.tail)
+			if got != directFLACTail(t, raw) {
+				t.Fatalf("probe snapshot = %+v, want %+v", got, directFLACTail(t, raw))
 			}
 		})
 	}
 }
 
+func TestProbeDirectFLACTrailerUsesSTREAMINFOBoundedWindow(t *testing.T) {
+	cleartext := makeDirectFLACTestStream(t, 64<<10)
+	raw := append(append([]byte(nil), cleartext...), productionDirectFLACTrailer...)
+	header := mustDirectFLACHeader(t, raw)
+	start, err := directFLACProbeRangeStart(header, int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start <= 0 {
+		t.Fatalf("test fixture did not exercise a bounded range: start=%d", start)
+	}
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		wantRange := "bytes=" + strconvFormatInt(start) + "-" +
+			strconvFormatInt(int64(len(raw)-1))
+		if req.Header.Get("Range") != wantRange {
+			t.Fatalf("Range = %q, want %q", req.Header.Get("Range"), wantRange)
+		}
+		body := append([]byte(nil), raw[start:]...)
+		return &http.Response{
+			StatusCode: http.StatusPartialContent,
+			Header: http.Header{
+				"Content-Range": []string{
+					"bytes " + strconvFormatInt(start) + "-" +
+						strconvFormatInt(int64(len(raw)-1)) + "/" +
+						strconvFormatInt(int64(len(raw))),
+				},
+			},
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+		}, nil
+	})
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{})
+	client.downloadHTTPClient = &http.Client{Transport: transport}
+
+	got, err := client.probeDirectFLACTrailer(
+		context.Background(),
+		directFLACTestURL,
+		int64(len(raw)),
+		header,
+	)
+	if err != nil {
+		t.Fatalf("probe output size: %v", err)
+	}
+	if got.outputSize != int64(len(cleartext)) {
+		t.Fatalf("output size = %d, want %d", got.outputSize, len(cleartext))
+	}
+}
+
 func TestProbeDirectFLACTrailerPreservesTypedRateLimit(t *testing.T) {
+	stream := makeDirectFLACTestStream(t, 4096)
 	var requests atomic.Int32
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests.Add(1)
@@ -200,7 +671,8 @@ func TestProbeDirectFLACTrailerPreservesTypedRateLimit(t *testing.T) {
 	_, err := client.probeDirectFLACTrailer(
 		context.Background(),
 		directFLACTestURL,
-		4096,
+		int64(len(stream)),
+		mustDirectFLACHeader(t, stream),
 	)
 	if !errors.Is(err, platform.ErrRateLimited) {
 		t.Fatalf("error = %v, want typed rate limit", err)
@@ -272,17 +744,18 @@ func TestDirectFLACDownloaderRejectsMissingExpectedHeaderBeforeRequest(t *testin
 }
 
 func TestDirectFLACDownloaderRejectsInvalidStreamInfo(t *testing.T) {
-	stream := makeDirectFLACTestStream(t, 4096)
+	expectedStream := makeDirectFLACTestStream(t, 4096)
+	stream := append([]byte(nil), expectedStream...)
 	stream[7] = 33
 	client := directFLACTestClient(stream)
 	destination := filepath.Join(t.TempDir(), "song.flac")
 
-	expectedHeader := mustDirectFLACHeader(t, makeDirectFLACTestStream(t, 4096))
+	expectedHeader := mustDirectFLACHeader(t, expectedStream)
 	_, err := client.directFLACDownloader(
 		directFLACTestURL,
 		int64(len(stream)),
 		expectedHeader,
-		directFLACTail(t, stream),
+		directFLACTail(t, expectedStream),
 	)(
 		context.Background(),
 		&platform.DownloadInfo{URL: directFLACTestURL},
@@ -302,7 +775,9 @@ func TestDirectFLACDownloaderRetriesInterruptedBody(t *testing.T) {
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		response := directFLACResponse(stream)
 		if requests.Add(1) == 1 {
-			response.Body = io.NopCloser(&unexpectedEOFReader{data: stream[:128]})
+			response.Body = io.NopCloser(&unexpectedEOFReader{
+				data: stream[:len(stream)-1],
+			})
 		}
 		return response, nil
 	})
@@ -310,6 +785,7 @@ func TestDirectFLACDownloaderRetriesInterruptedBody(t *testing.T) {
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 	client.downloadMaxRetries = 2
 	destination := filepath.Join(t.TempDir(), "song.flac")
+	var progress []int64
 
 	written, err := client.directFLACDownloader(
 		directFLACTestURL,
@@ -320,13 +796,26 @@ func TestDirectFLACDownloaderRetriesInterruptedBody(t *testing.T) {
 		context.Background(),
 		&platform.DownloadInfo{URL: directFLACTestURL},
 		destination,
-		nil,
+		func(written, total int64) {
+			if total != int64(len(stream)) {
+				t.Fatalf("progress total = %d, want %d", total, len(stream))
+			}
+			progress = append(progress, written)
+		},
 	)
 	if err != nil {
 		t.Fatalf("download after retry: %v", err)
 	}
 	if written != int64(len(stream)) || requests.Load() != 2 {
 		t.Fatalf("written=%d requests=%d", written, requests.Load())
+	}
+	if len(progress) == 0 || progress[len(progress)-1] != int64(len(stream)) {
+		t.Fatalf("progress = %v, want final output size", progress)
+	}
+	for index := 1; index < len(progress); index++ {
+		if progress[index] <= progress[index-1] {
+			t.Fatalf("progress is not a strict high-water mark: %v", progress)
+		}
 	}
 	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
@@ -481,6 +970,38 @@ func TestDirectFLACDownloaderRejectsUnsafeRedirectWithoutLeakingURL(t *testing.T
 	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
 
+func TestDirectFLACHTTPClientBoundsRequestLifetime(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		baseTimeout time.Duration
+		want        time.Duration
+	}{
+		{
+			name: "unbounded client",
+			want: 20 * time.Minute,
+		},
+		{
+			name:        "shorter client timeout",
+			baseTimeout: 5 * time.Minute,
+			want:        5 * time.Minute,
+		},
+		{
+			name:        "excessive client timeout",
+			baseTimeout: 24 * time.Hour,
+			want:        20 * time.Minute,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := directFLACHTTPClient(&http.Client{
+				Timeout: test.baseTimeout,
+			})
+			if got.Timeout != test.want {
+				t.Fatalf("timeout = %v, want %v", got.Timeout, test.want)
+			}
+		})
+	}
+}
+
 func directFLACTestClient(stream []byte) *Client {
 	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{})
 	client.downloadHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -499,6 +1020,15 @@ func TestDirectFLACDownloaderRejectsTrailerStateChangedSinceProbe(t *testing.T) 
 		append([]byte(nil), cleartext...),
 		bytes.Repeat([]byte{0xa5}, len(knownDirectFLACTrailer))...,
 	)
+	productionTrailerStream := append(
+		append([]byte(nil), cleartext...),
+		productionDirectFLACTrailer...,
+	)
+	changedProductionTrailerStream := append(
+		[]byte(nil),
+		productionTrailerStream...,
+	)
+	changedProductionTrailerStream[len(cleartext)+4] ^= 0x01
 	cases := []struct {
 		name           string
 		expectedStream []byte
@@ -511,8 +1041,23 @@ func TestDirectFLACDownloaderRejectsTrailerStateChangedSinceProbe(t *testing.T) 
 		},
 		{
 			name:           "unexpected trailer appeared",
-			expectedStream: differentTrailerStream,
+			expectedStream: cleartext,
 			actualStream:   knownTrailerStream,
+		},
+		{
+			name:           "production content changed outside legacy window",
+			expectedStream: productionTrailerStream,
+			actualStream:   changedProductionTrailerStream,
+		},
+		{
+			name:           "production trailer changed to legacy trailer",
+			expectedStream: productionTrailerStream,
+			actualStream:   knownTrailerStream,
+		},
+		{
+			name:           "legacy trailer changed to production trailer",
+			expectedStream: knownTrailerStream,
+			actualStream:   productionTrailerStream,
 		},
 	}
 	for _, test := range cases {
@@ -538,6 +1083,56 @@ func TestDirectFLACDownloaderRejectsTrailerStateChangedSinceProbe(t *testing.T) 
 			assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 		})
 	}
+}
+
+func TestDirectFLACDownloaderRejectsMiddleFrameCorruption(t *testing.T) {
+	cleartext := makeTestFLAC(
+		t,
+		128<<10,
+		48000,
+		24,
+		2,
+		213*time.Second,
+	)
+	expectedStream := append(
+		append([]byte(nil), cleartext...),
+		knownDirectFLACTrailer...,
+	)
+	actualStream := append([]byte(nil), expectedStream...)
+	streamInfo := mustDirectFLACStreamInfo(t, cleartext)
+	firstFrame := testFLACFirstFrameOffset(t, cleartext)
+	mutationIndex := firstFrame + streamInfo.minFrameSize - 1
+	probe := directFLACTail(t, expectedStream)
+	if int64(mutationIndex) >= probe.rangeStart {
+		t.Fatalf(
+			"corruption offset %d is inside verified tail starting at %d",
+			mutationIndex,
+			probe.rangeStart,
+		)
+	}
+	actualStream[mutationIndex] ^= 0x01
+
+	client := directFLACTestClient(actualStream)
+	destination := filepath.Join(t.TempDir(), "song.flac")
+	_, err := client.directFLACDownloader(
+		directFLACTestURL,
+		int64(len(expectedStream)),
+		mustDirectFLACHeader(t, expectedStream),
+		probe,
+	)(
+		context.Background(),
+		&platform.DownloadInfo{
+			URL:  directFLACTestURL,
+			Size: int64(len(cleartext)),
+		},
+		destination,
+		nil,
+	)
+	if !errors.Is(err, errDirectFLACIntegrity) {
+		t.Fatalf("error = %v, want direct FLAC integrity error", err)
+	}
+	assertDirectFLACDestinationMissing(t, destination)
+	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
 
 func TestDirectFLACDownloaderRejectsStreamInfoChangedSinceProbe(t *testing.T) {
@@ -629,16 +1224,14 @@ func TestDirectFLACDownloaderRejectsNonSemanticStreamInfoByteChangedSinceProbe(t
 	assertNoDirectFLACPartFiles(t, filepath.Dir(destination))
 }
 
-func TestDirectFLACDownloaderRejectsDifferentUnknownTrailerSinceProbe(t *testing.T) {
+func TestDirectFLACDownloaderRejectsDynamicPayloadChangedSinceProbe(t *testing.T) {
 	cleartext := makeDirectFLACTestStream(t, 4096)
 	expectedStream := append(
 		append([]byte(nil), cleartext...),
-		bytes.Repeat([]byte{0xa5}, len(knownDirectFLACTrailer))...,
+		knownDirectFLACTrailer...,
 	)
-	changedStream := append(
-		append([]byte(nil), cleartext...),
-		bytes.Repeat([]byte{0x5a}, len(knownDirectFLACTrailer))...,
-	)
+	changedStream := append([]byte(nil), expectedStream...)
+	changedStream[len(cleartext)+6] ^= 0x01
 	client := directFLACTestClient(changedStream)
 	destination := filepath.Join(t.TempDir(), "song.flac")
 
@@ -723,30 +1316,26 @@ func (reader *dataWithEOFReader) Read(buffer []byte) (int, error) {
 
 func makeDirectFLACTestStream(t *testing.T, size int) []byte {
 	t.Helper()
-	if size < 42 {
-		t.Fatalf("test FLAC size = %d, want at least 42", size)
+	return makeTestFLAC(t, size, 48000, 24, 2, time.Second)
+}
+
+func productionDirectFLACHeader(t *testing.T) [42]byte {
+	t.Helper()
+	data := mustDecodeHex(t, productionDirectFLACHeaderHex)
+	var header [42]byte
+	if copy(header[:], data) != len(header) || len(data) != len(header) {
+		t.Fatalf("production FLAC header length = %d, want %d", len(data), len(header))
 	}
-	const (
-		sampleRate    = 44100
-		bitsPerSample = 16
-		channels      = 2
-	)
-	stream := make([]byte, size)
-	copy(stream, "fLaC")
-	stream[4] = 0x80
-	stream[7] = 34
-	binary.BigEndian.PutUint16(stream[8:10], 4096)
-	binary.BigEndian.PutUint16(stream[10:12], 4096)
-	totalSamples := uint64(sampleRate * 60)
-	packed := uint64(sampleRate)<<44 |
-		uint64(channels-1)<<41 |
-		uint64(bitsPerSample-1)<<36 |
-		totalSamples
-	binary.BigEndian.PutUint64(stream[18:26], packed)
-	for index := 42; index < len(stream); index++ {
-		stream[index] = byte(index*29 + 11)
+	return header
+}
+
+func mustDecodeHex(t *testing.T, value string) []byte {
+	t.Helper()
+	data, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("decode test hex: %v", err)
 	}
-	return stream
+	return data
 }
 
 func mustDirectFLACStreamInfo(t *testing.T, stream []byte) flacStreamInfo {
@@ -771,18 +1360,79 @@ func mustDirectFLACHeader(t *testing.T, stream []byte) [42]byte {
 	return header
 }
 
-func directFLACTail(t *testing.T, stream []byte) [15]byte {
+func directFLACTail(t *testing.T, stream []byte) directFLACTrailerProbe {
 	t.Helper()
-	if len(stream) < len(knownDirectFLACTrailer) {
-		t.Fatalf(
-			"test FLAC size = %d, want at least %d",
-			len(stream),
-			len(knownDirectFLACTrailer),
-		)
+	header := mustDirectFLACHeader(t, stream)
+	rawSize := int64(len(stream))
+	rangeStart, err := directFLACProbeRangeStart(header, rawSize)
+	if err != nil {
+		t.Fatalf("derive test FLAC tail range: %v", err)
 	}
-	var tail [15]byte
-	copy(tail[:], stream[len(stream)-len(tail):])
-	return tail
+	tail := stream[rangeStart:]
+	analysis, err := analyzeDirectFLACTail(
+		header,
+		rawSize,
+		rangeStart,
+		tail,
+	)
+	if err != nil {
+		t.Fatalf("analyze test FLAC tail: %v", err)
+	}
+	return directFLACTrailerProbe{
+		rawSize:    rawSize,
+		outputSize: analysis.outputSize,
+		rangeStart: rangeStart,
+		trailerLen: analysis.trailerLen,
+		tailHash:   sha256.Sum256(tail),
+		header:     header,
+	}
+}
+
+func uncheckedDirectFLACProbe(
+	t *testing.T,
+	stream []byte,
+	outputSize int64,
+	trailerLen int64,
+) directFLACTrailerProbe {
+	t.Helper()
+	header := mustDirectFLACHeader(t, stream)
+	rawSize := int64(len(stream))
+	rangeStart, err := directFLACProbeRangeStart(header, rawSize)
+	if err != nil {
+		t.Fatalf("derive unchecked test FLAC range: %v", err)
+	}
+	return directFLACTrailerProbe{
+		rawSize:    rawSize,
+		outputSize: outputSize,
+		rangeStart: rangeStart,
+		trailerLen: trailerLen,
+		tailHash:   sha256.Sum256(stream[rangeStart:]),
+		header:     header,
+	}
+}
+
+func testFLACFirstFrameOffset(t *testing.T, stream []byte) int {
+	t.Helper()
+	if len(stream) < 8 || !bytes.Equal(stream[:4], []byte("fLaC")) {
+		t.Fatal("invalid test FLAC stream")
+	}
+	offset := 4
+	for {
+		if offset+4 > len(stream) {
+			t.Fatal("truncated test FLAC metadata")
+		}
+		isLast := stream[offset]&0x80 != 0
+		length := int(stream[offset+1])<<16 |
+			int(stream[offset+2])<<8 |
+			int(stream[offset+3])
+		offset += 4 + length
+		if offset > len(stream) {
+			t.Fatal("test FLAC metadata exceeds stream")
+		}
+		if isLast {
+			return offset
+		}
+	}
 }
 
 func assertDirectFLACDestinationMissing(t *testing.T, destination string) {

@@ -11,6 +11,7 @@ require (
 	github.com/guohuiyuan/music-lib v1.0.6-0.20260308165809-ea321c84b16a
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/iyear/gowidevine v0.1.3
+	github.com/mewkiz/flac v1.0.13
 	github.com/mymmrac/telego v1.10.0
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
@@ -31,6 +32,9 @@ require (
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/devgianlu/shannon v0.0.0-20230613115856-82ec90b7fa7e // indirect
+	github.com/icza/bitio v1.1.0 // indirect
+	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect
+	github.com/mewpkg/term v0.0.0-20241026122259-37a80af23985 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect

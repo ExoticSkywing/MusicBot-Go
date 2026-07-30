@@ -66,6 +66,10 @@ type mediaProbe struct {
 }
 
 type flacStreamInfo struct {
+	minBlockSize  int
+	maxBlockSize  int
+	minFrameSize  int
+	maxFrameSize  int
 	sampleRate    int
 	channels      int
 	bitsPerSample int
@@ -391,6 +395,11 @@ func parseFLACStreamInfo(data []byte) (flacStreamInfo, error) {
 	if minBlock < 16 || maxBlock < 16 || minBlock > maxBlock {
 		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC block size")
 	}
+	minFrame := int(data[12])<<16 | int(data[13])<<8 | int(data[14])
+	maxFrame := int(data[15])<<16 | int(data[16])<<8 | int(data[17])
+	if minFrame > 0 && maxFrame > 0 && minFrame > maxFrame {
+		return flacStreamInfo{}, errors.New("kuwo: invalid FLAC frame size")
+	}
 	packed := binary.BigEndian.Uint64(data[18:26])
 	sampleRate := int((packed >> 44) & 0xfffff)
 	channels := int((packed>>41)&7) + 1
@@ -401,6 +410,10 @@ func parseFLACStreamInfo(data []byte) (flacStreamInfo, error) {
 	}
 	duration := time.Duration(float64(totalSamples) / float64(sampleRate) * float64(time.Second))
 	return flacStreamInfo{
+		minBlockSize:  int(minBlock),
+		maxBlockSize:  int(maxBlock),
+		minFrameSize:  minFrame,
+		maxFrameSize:  maxFrame,
 		sampleRate:    sampleRate,
 		bitsPerSample: bitsPerSample,
 		channels:      channels,
@@ -510,30 +523,29 @@ type mobilePlayResponse struct {
 	Data mobilePlayData `json:"data"`
 }
 
-// mobileJSONValue deliberately preserves composite and null values. The shared
+// rawJSONValue deliberately preserves composite and null values. The shared
 // jsonScalar rejects composites during decoding, which is the right default for
-// Kuwo's other response models. Mobile play responses need field-level
-// classification instead: malformed identity, type, or duration values are
-// terminal, while malformed quality metadata may still fall back to another
-// candidate.
-type mobileJSONValue struct {
+// most Kuwo response models. Candidate media responses need field-level
+// classification instead: malformed identity values fail closed, while a valid
+// identity for a different track may discard only that candidate.
+type rawJSONValue struct {
 	raw json.RawMessage
 }
 
-func (v *mobileJSONValue) UnmarshalJSON(data []byte) error {
+func (v *rawJSONValue) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	v.raw = append(v.raw[:0], trimmed...)
 	return nil
 }
 
-func (v mobileJSONValue) scalar() jsonScalar {
+func (v rawJSONValue) scalar() jsonScalar {
 	return jsonScalar{raw: v.raw}
 }
 
 // canonicalMediaTypeZero accepts only the numeric token 0 or a JSON string
 // whose value is exactly "0". In particular, numeric/string spellings such as
 // -0, 0.0, "+0", "00", and "-0" are not canonical mobile media types.
-func (v mobileJSONValue) canonicalMediaTypeZero() bool {
+func (v rawJSONValue) canonicalMediaTypeZero() bool {
 	raw := bytes.TrimSpace(v.raw)
 	if bytes.Equal(raw, []byte("0")) {
 		return true
@@ -543,12 +555,12 @@ func (v mobileJSONValue) canonicalMediaTypeZero() bool {
 }
 
 type mobilePlayData struct {
-	RID      mobileJSONValue `json:"rid"`
-	URL      mobileJSONValue `json:"url"`
-	Format   mobileJSONValue `json:"format"`
-	Bitrate  mobileJSONValue `json:"bitrate"`
-	Duration mobileJSONValue `json:"duration"`
-	Type     mobileJSONValue `json:"type"`
+	RID      rawJSONValue `json:"rid"`
+	URL      rawJSONValue `json:"url"`
+	Format   rawJSONValue `json:"format"`
+	Bitrate  rawJSONValue `json:"bitrate"`
+	Duration rawJSONValue `json:"duration"`
+	Type     rawJSONValue `json:"type"`
 }
 
 func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
@@ -724,8 +736,11 @@ func (c *Client) resolveMobileDownload(ctx context.Context, detail *trackDetail,
 
 func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDetail, candidate mobileQuality, data mobilePlayData) (*platform.DownloadInfo, error) {
 	rid := normalizeRID(scalarText(data.RID.scalar()))
-	if rid == "" || rid != detail.ID {
+	if rid == "" {
 		return nil, terminalUnavailable(errTrackIdentityMismatch)
+	}
+	if rid != detail.ID {
+		return nil, errTrackIdentityMismatch
 	}
 	if !data.Type.canonicalMediaTypeZero() {
 		return nil, terminalUnavailable(errPreviewMedia)
@@ -738,6 +753,17 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	if !durationsMatch(duration, detail.Duration) {
 		return nil, terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
 	}
+	declaredBitrate, bitrateOK := data.Bitrate.scalar().Int64()
+	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
+		return nil, terminalUnavailable(errPreviewMedia)
+	}
+	if !bitrateOK || declaredBitrate != int64(candidate.bitrate) {
+		return nil, errors.New("kuwo: candidate bitrate mismatch")
+	}
+	declaredFormat := strings.ToLower(scalarText(data.Format.scalar()))
+	if declaredFormat == "" || declaredFormat != candidate.format {
+		return nil, errors.New("kuwo: candidate format mismatch")
+	}
 	rawURLValue := scalarText(data.URL.scalar())
 	var rawURL string
 	if strings.TrimSpace(rawURLValue) != "" {
@@ -749,17 +775,6 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 			}
 			return nil, err
 		}
-	}
-	declaredBitrate, bitrateOK := data.Bitrate.scalar().Int64()
-	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
-		return nil, terminalUnavailable(errPreviewMedia)
-	}
-	if !bitrateOK || declaredBitrate != int64(candidate.bitrate) {
-		return nil, errors.New("kuwo: candidate bitrate mismatch")
-	}
-	declaredFormat := strings.ToLower(scalarText(data.Format.scalar()))
-	if declaredFormat == "" || declaredFormat != candidate.format {
-		return nil, errors.New("kuwo: candidate format mismatch")
 	}
 	if rawURL == "" {
 		var err error

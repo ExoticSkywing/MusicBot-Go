@@ -127,27 +127,12 @@ func TestResolvePlayableLosslessUsesDirect2000ContractAndCleansTrailer(t *testin
 					},
 					raw[:42],
 				), nil
-			case "bytes=" + strconv.FormatInt(int64(len(cleartext)), 10) + "-" +
-				strconv.FormatInt(int64(len(raw)-1), 10):
-				tailResponse := response(
-					http.StatusPartialContent,
-					map[string]string{
-						"Content-Range": "bytes " +
-							strconv.FormatInt(int64(len(cleartext)), 10) + "-" +
-							strconv.FormatInt(int64(len(raw)-1), 10) + "/" +
-							strconv.FormatInt(int64(len(raw)), 10),
-					},
-					knownDirectFLACTrailer,
-				)
-				tailResponse.ContentLength = int64(len(knownDirectFLACTrailer))
-				return tailResponse, nil
 			case "":
 				fullResponse := response(http.StatusOK, nil, raw)
 				fullResponse.ContentLength = int64(len(raw))
 				return fullResponse, nil
 			default:
-				t.Fatalf("unexpected media Range %q", req.Header.Get("Range"))
-				return nil, nil
+				return directFLACTestTailResponse(t, req, raw), nil
 			}
 		default:
 			t.Fatalf("unexpected request %s", req.URL)
@@ -225,6 +210,10 @@ func TestResolvePlayableLosslessRejectsResponseIdentityAndPreviewSignals(t *test
 			body: "url=https://kw-er.kuwo.cn/a.flac\nformat=mp3\nrid=41378936\nduration=213\ntype=0\n",
 		},
 		{
+			name: "encrypted master format",
+			body: "url=https://kw-er.kuwo.cn/a.flac\nformat=mflac\nbitrate=2000\nrid=41378936\nduration=213\ntype=0\n",
+		},
+		{
 			name: "missing format",
 			body: "url=https://kw-er.kuwo.cn/a.flac\nbitrate=2000\nrid=41378936\nduration=213\ntype=0\n",
 		},
@@ -279,37 +268,128 @@ func TestResolvePlayableLosslessRejectsResponseIdentityAndPreviewSignals(t *test
 	}
 }
 
-func TestResolvePlayableLosslessRejectsHiResStreamOn2000Selector(t *testing.T) {
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.Host {
-		case "mobi.kuwo.cn":
-			return response(http.StatusOK, nil, []byte(
-				"format=flac\n"+
-					"bitrate=2000\n"+
-					"rid=41378936\n"+
-					"duration=213\n"+
-					"type=0\n"+
-					"url=https://kw-lw.kuwo.cn/audio/wrong-tier.flac\n",
-			)), nil
-		case "kw-lw.kuwo.cn":
-			streamInfo := makeTestFLAC(t, 42, 96000, 24, 2, 213*time.Second)
-			return response(
-				http.StatusPartialContent,
-				map[string]string{"Content-Range": "bytes 0-41/78024024"},
-				streamInfo,
-			), nil
-		default:
-			t.Fatalf("unexpected request host %q", req.URL.Host)
-			return nil, nil
-		}
-	})
-	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = transport
-	client.mediaHTTPClient.Transport = transport
+func TestResolvePlayableLosslessAcceptsSupportedStereoPCMOn2000Selector(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		sampleRate    int
+		bitsPerSample int
+		wantQuality   platform.Quality
+	}{
+		{name: "16-bit 44.1 kHz", sampleRate: 44100, bitsPerSample: 16, wantQuality: platform.QualityLossless},
+		{name: "16-bit 48 kHz", sampleRate: 48000, bitsPerSample: 16, wantQuality: platform.QualityLossless},
+		{name: "24-bit 44.1 kHz", sampleRate: 44100, bitsPerSample: 24, wantQuality: platform.QualityHiRes},
+		{name: "24-bit 48 kHz", sampleRate: 48000, bitsPerSample: 24, wantQuality: platform.QualityHiRes},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cleartext := makeTestFLAC(
+				t,
+				64<<10,
+				tt.sampleRate,
+				tt.bitsPerSample,
+				2,
+				213*time.Second,
+			)
+			raw := append(append([]byte(nil), cleartext...), knownDirectFLACTrailer...)
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "mobi.kuwo.cn":
+					return response(http.StatusOK, nil, []byte(
+						"format=flac\n"+
+							"bitrate=2000\n"+
+							"rid=41378936\n"+
+							"duration=213\n"+
+							"type=0\n"+
+							"url=https://kw-lw.kuwo.cn/audio/supported.flac\n",
+					)), nil
+				case "kw-lw.kuwo.cn":
+					switch req.Header.Get("Range") {
+					case "bytes=0-41":
+						return response(
+							http.StatusPartialContent,
+							map[string]string{
+								"Content-Range": "bytes 0-41/" + strconv.Itoa(len(raw)),
+							},
+							raw[:42],
+						), nil
+					default:
+						return directFLACTestTailResponse(t, req, raw), nil
+					}
+				default:
+					t.Fatalf("unexpected request host %q", req.URL.Host)
+					return nil, nil
+				}
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+			client.downloadHTTPClient = &http.Client{Transport: transport}
 
-	if _, err := client.resolvePlayableLossless(context.Background(), &trackDetail{
-		Track: platform.Track{ID: "41378936", Duration: 213 * time.Second},
-	}); err == nil || errors.Is(err, platform.ErrUnavailable) {
-		t.Fatalf("resolvePlayableLossless() error = %v, want retryable tier mismatch", err)
+			info, err := client.resolvePlayableLossless(context.Background(), &trackDetail{
+				Track: platform.Track{ID: "41378936", Duration: 213 * time.Second},
+			})
+			if err != nil {
+				t.Fatalf("resolvePlayableLossless() = %v", err)
+			}
+			if info.Quality != tt.wantQuality ||
+				info.Size != int64(len(cleartext)) ||
+				info.Downloader == nil {
+				t.Fatalf("info = %#v", info)
+			}
+		})
+	}
+}
+
+func TestResolvePlayableLosslessRejectsUnsupportedStreamOn2000Selector(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		sampleRate    int
+		bitsPerSample int
+		channels      int
+	}{
+		{name: "above 48 kHz", sampleRate: 96000, bitsPerSample: 24, channels: 2},
+		{name: "above 24 bit", sampleRate: 48000, bitsPerSample: 32, channels: 2},
+		{name: "multichannel", sampleRate: 48000, bitsPerSample: 24, channels: 6},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Host {
+				case "mobi.kuwo.cn":
+					return response(http.StatusOK, nil, []byte(
+						"format=flac\n"+
+							"bitrate=2000\n"+
+							"rid=41378936\n"+
+							"duration=213\n"+
+							"type=0\n"+
+							"url=https://kw-lw.kuwo.cn/audio/wrong-tier.flac\n",
+					)), nil
+				case "kw-lw.kuwo.cn":
+					streamInfo := makeTestFLAC(
+						t,
+						42,
+						tt.sampleRate,
+						tt.bitsPerSample,
+						tt.channels,
+						213*time.Second,
+					)
+					return response(
+						http.StatusPartialContent,
+						map[string]string{"Content-Range": "bytes 0-41/78024024"},
+						streamInfo,
+					), nil
+				default:
+					t.Fatalf("unexpected request host %q", req.URL.Host)
+					return nil, nil
+				}
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+
+			if _, err := client.resolvePlayableLossless(context.Background(), &trackDetail{
+				Track: platform.Track{ID: "41378936", Duration: 213 * time.Second},
+			}); err == nil || errors.Is(err, platform.ErrUnavailable) {
+				t.Fatalf("resolvePlayableLossless() error = %v, want retryable tier mismatch", err)
+			}
+		})
 	}
 }

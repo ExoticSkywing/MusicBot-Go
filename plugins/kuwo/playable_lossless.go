@@ -190,8 +190,9 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 		}
 		return nil, err
 	}
-	if probe.quality != platform.QualityLossless ||
-		probe.bitsPerSample != 16 ||
+	supportedQuality := (probe.bitsPerSample == 16 && probe.quality == platform.QualityLossless) ||
+		(probe.bitsPerSample == 24 && probe.quality == platform.QualityHiRes)
+	if !supportedQuality ||
 		(probe.sampleRate != 44100 && probe.sampleRate != 48000) ||
 		probe.channels != 2 {
 		return nil, errors.New("kuwo: legacy lossless STREAMINFO mismatch")
@@ -201,6 +202,7 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 		ctx,
 		rawURL,
 		rawSize,
+		probe.flacHeader,
 	)
 	if err != nil {
 		if errors.Is(err, errUnsafeMediaURL) {
@@ -215,7 +217,7 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 		rawURL,
 		rawSize,
 		probe.flacHeader,
-		trailerProbe.tail,
+		trailerProbe,
 	)
 	return info, nil
 }

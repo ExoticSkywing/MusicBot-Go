@@ -19,7 +19,6 @@ func TestResolvePlayableHiResBuildsVerifiedDirectFLAC(t *testing.T) {
 		totalSize = 1 << 20
 	)
 	fullStream := makeTestFLAC(t, totalSize, 96000, 24, 2, time.Second)
-	clear(fullStream[len(fullStream)-len(knownDirectFLACTrailer):])
 	streamInfo := fullStream[:42]
 	var resolverRequests atomic.Int32
 	var mediaRequests atomic.Int32
@@ -57,21 +56,6 @@ func TestResolvePlayableHiResBuildsVerifiedDirectFLAC(t *testing.T) {
 					},
 					streamInfo,
 				), nil
-			case "bytes=1048561-1048575":
-				tail := fullStream[len(fullStream)-len(knownDirectFLACTrailer):]
-				tailResponse := response(
-					http.StatusPartialContent,
-					map[string]string{
-						"Content-Range": fmt.Sprintf(
-							"bytes 1048561-1048575/%d",
-							totalSize,
-						),
-						"Content-Type": "audio/flac",
-					},
-					tail,
-				)
-				tailResponse.ContentLength = int64(len(tail))
-				return tailResponse, nil
 			case "":
 				fullResponse := response(
 					http.StatusOK,
@@ -81,8 +65,7 @@ func TestResolvePlayableHiResBuildsVerifiedDirectFLAC(t *testing.T) {
 				fullResponse.ContentLength = totalSize
 				return fullResponse, nil
 			default:
-				t.Fatalf("unexpected probe range %q", got)
-				return nil, nil
+				return directFLACTestTailResponse(t, req, fullStream), nil
 			}
 		default:
 			return nil, fmt.Errorf("unexpected host %q", req.URL.Host)
