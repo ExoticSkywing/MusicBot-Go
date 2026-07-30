@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +35,65 @@ type downloadRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f downloadRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+var redirectPolicyHeaders = map[string]string{
+	"Authorization":    "Bearer top-secret",
+	"Cookie":           "session=top-secret",
+	"X-Download-Token": "top-secret",
+	"User-Agent":       "policy-agent",
+	"Referer":          "https://www.kuwo.cn/",
+}
+
+func localhostTestURL(t *testing.T, rawURL string) string {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Host = net.JoinHostPort("localhost", parsed.Port())
+	return parsed.String()
+}
+
+func TestSameDownloadOrigin(t *testing.T) {
+	parse := func(raw string) *url.URL {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	for _, tt := range []struct {
+		name        string
+		left, right string
+		want        bool
+	}{
+		{name: "host case", left: "http://EXAMPLE.com/a", right: "http://example.COM/b", want: true},
+		{name: "HTTP default port", left: "http://example.com/a", right: "http://example.com:80/b", want: true},
+		{name: "HTTPS default port", left: "https://example.com/a", right: "https://example.com:443/b", want: true},
+		{name: "IPv6 default port", left: "http://[::1]/a", right: "http://[::1]:80/b", want: true},
+		{name: "scheme changed", left: "http://example.com/a", right: "https://example.com/a"},
+		{name: "host changed", left: "https://example.com/a", right: "https://cdn.example.com/a"},
+		{name: "port changed", left: "https://example.com/a", right: "https://example.com:444/a"},
+		{name: "IPv6 port changed", left: "http://[::1]/a", right: "http://[::1]:8080/a"},
+		{name: "unknown scheme", left: "ftp://example.com/a", right: "ftp://example.com/b"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sameDownloadOrigin(parse(tt.left), parse(tt.right)); got != tt.want {
+				t.Fatalf("sameDownloadOrigin(%q, %q) = %v, want %v", tt.left, tt.right, got, tt.want)
+			}
+		})
+	}
+	if sameDownloadOrigin(nil, parse("https://example.com")) {
+		t.Fatal("nil origin accepted")
+	}
+
+	origin := &http.Request{URL: parse("https://example.com/start")}
+	crossOrigin := &http.Request{URL: parse("https://cdn.example.com/step")}
+	backAtOrigin := &http.Request{URL: parse("https://example.com/final")}
+	if redirectChainSameOrigin(backAtOrigin, []*http.Request{origin, crossOrigin}) {
+		t.Fatal("A -> B -> A redirect chain restored original policy headers")
+	}
 }
 
 func TestDownloadSinglePreservesKnownSizeAndRejectsAnyMismatch(t *testing.T) {
@@ -167,6 +229,113 @@ func TestDownloadMultipartPreservesKnownSizeAndRejectsLongerSource(t *testing.T)
 	}
 }
 
+func TestDownloadMultipartIntegrityConflictNeverFallsBack(t *testing.T) {
+	const expectedSize = int64(9)
+	for _, tt := range []struct {
+		name       string
+		headSize   int64
+		rangeTotal int64
+	}{
+		{name: "HEAD total conflicts with trusted size", headSize: expectedSize + 1},
+		{name: "Content-Range total conflicts with trusted size", headSize: expectedSize, rangeTotal: expectedSize + 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var headHits atomic.Int32
+			var rangeHits atomic.Int32
+			var plainHits atomic.Int32
+			var candidateHits atomic.Int32
+
+			candidate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				candidateHits.Add(1)
+				_, _ = io.WriteString(w, "123456789")
+			}))
+			defer candidate.Close()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodHead:
+					headHits.Add(1)
+					w.Header().Set("Accept-Ranges", "bytes")
+					w.Header().Set("Content-Length", strconv.FormatInt(tt.headSize, 10))
+				case r.Header.Get("Range") != "":
+					rangeHits.Add(1)
+					w.Header().Set(
+						"Content-Range",
+						fmt.Sprintf("bytes 0-%d/%d", expectedSize-1, tt.rangeTotal),
+					)
+					w.Header().Set("Content-Length", strconv.FormatInt(expectedSize, 10))
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = io.WriteString(w, "123456789")
+				default:
+					plainHits.Add(1)
+					w.Header().Set("Content-Length", strconv.FormatInt(expectedSize, 10))
+					_, _ = io.WriteString(w, "123456789")
+				}
+			}))
+			defer server.Close()
+
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := newPolicyTestService(true).Download(context.Background(), &platform.DownloadInfo{
+				URL:           server.URL,
+				CandidateURLs: []string{candidate.URL},
+				Size:          expectedSize,
+			}, dest, nil)
+			if !errors.Is(err, errDownloadIntegrity) {
+				t.Fatalf("Download() = (%d, %v), want errDownloadIntegrity", written, err)
+			}
+			if headHits.Load() != 1 {
+				t.Fatalf("HEAD hits = %d, want 1", headHits.Load())
+			}
+			if tt.rangeTotal > 0 && rangeHits.Load() != 1 {
+				t.Fatalf("Range hits = %d, want 1", rangeHits.Load())
+			}
+			if plainHits.Load() != 0 {
+				t.Fatalf("plain GET fallback hits = %d, want 0", plainHits.Load())
+			}
+			if candidateHits.Load() != 0 {
+				t.Fatalf("candidate fallback hits = %d, want 0", candidateHits.Load())
+			}
+			if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("integrity-conflicted destination still exists: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestDownloadMultipartPolicyRangeCannotOverrideInternalRange(t *testing.T) {
+	const payload = "123456789"
+	var rangeHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+			return
+		}
+		if got := r.Header.Get("Range"); got != "bytes=0-8" {
+			t.Fatalf("Range = %q, want downloader-owned bytes=0-8", got)
+		}
+		rangeHits.Add(1)
+		w.Header().Set("Content-Range", "bytes 0-8/9")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer server.Close()
+
+	dest := filepath.Join(t.TempDir(), "audio.bin")
+	written, err := newPolicyTestService(true).Download(context.Background(), &platform.DownloadInfo{
+		URL:     server.URL,
+		Headers: map[string]string{"range": "bytes=0-0"},
+		Size:    int64(len(payload)),
+	}, dest, nil)
+	if err != nil || written != int64(len(payload)) {
+		t.Fatalf("Download() = (%d, %v)", written, err)
+	}
+	if rangeHits.Load() != 1 {
+		t.Fatalf("Range hits = %d, want 1", rangeHits.Load())
+	}
+}
+
 func TestDownloadURLValidatorChecksInitialAndRedirectTargets(t *testing.T) {
 	var finalHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +404,173 @@ func TestDownloadURLValidatorStopsBeforeEleventhRequest(t *testing.T) {
 	if hits.Load() != 10 {
 		t.Fatalf("requests = %d, want 10 before the eleventh request is blocked", hits.Load())
 	}
+}
+
+func TestDownloadHeadersWithoutValidatorNeverCrossOriginalOrigin(t *testing.T) {
+	payload := bytesOfSize(256 * 1024)
+	for _, multipart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multipart=%v", multipart), func(t *testing.T) {
+			var leakedPolicyValues atomic.Int32
+			var targetHits atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetHits.Add(1)
+				for key, value := range redirectPolicyHeaders {
+					if r.Header.Get(key) == value {
+						leakedPolicyValues.Add(1)
+					}
+				}
+				if r.URL.Path == "/step" {
+					http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+					return
+				}
+				if r.Method == http.MethodHead {
+					w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+					if multipart {
+						w.Header().Set("Accept-Ranges", "bytes")
+					}
+					return
+				}
+				if value := r.Header.Get("Range"); value != "" {
+					var start, end int
+					if _, err := fmt.Sscanf(value, "bytes=%d-%d", &start, &end); err != nil {
+						http.Error(w, "bad range", http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = w.Write(payload[start : end+1])
+					return
+				}
+				w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+				_, _ = w.Write(payload)
+			}))
+			defer target.Close()
+
+			var missingInitialPolicy atomic.Int32
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for key, value := range redirectPolicyHeaders {
+					if r.Header.Get(key) != value {
+						missingInitialPolicy.Add(1)
+					}
+				}
+				http.Redirect(w, r, target.URL+"/step", http.StatusTemporaryRedirect)
+			}))
+			defer origin.Close()
+
+			dest := filepath.Join(t.TempDir(), "audio.bin")
+			written, err := newPolicyTestService(multipart).Download(context.Background(), &platform.DownloadInfo{
+				URL:     localhostTestURL(t, origin.URL) + "/start",
+				Headers: redirectPolicyHeaders,
+				Size:    int64(len(payload)),
+			}, dest, nil)
+			if err != nil {
+				t.Fatalf("Download() = %v", err)
+			}
+			if written != int64(len(payload)) {
+				t.Fatalf("written = %d, want %d", written, len(payload))
+			}
+			if missingInitialPolicy.Load() != 0 {
+				t.Fatalf("initial requests missing policy values %d times", missingInitialPolicy.Load())
+			}
+			if targetHits.Load() < 2 {
+				t.Fatalf("cross-origin target hits = %d, want at least two redirect hops", targetHits.Load())
+			}
+			if leakedPolicyValues.Load() != 0 {
+				t.Fatalf("cross-origin target received %d policy header values", leakedPolicyValues.Load())
+			}
+		})
+	}
+}
+
+func TestDownloadHeadersWithoutValidatorSurviveSameOriginRedirect(t *testing.T) {
+	var missingPolicy atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+			return
+		}
+		for key, value := range redirectPolicyHeaders {
+			if r.Header.Get(key) != value {
+				missingPolicy.Add(1)
+			}
+		}
+		_, _ = io.WriteString(w, "audio")
+	}))
+	defer server.Close()
+
+	dest := filepath.Join(t.TempDir(), "audio.bin")
+	if _, err := newPolicyTestService(false).Download(context.Background(), &platform.DownloadInfo{
+		URL:     server.URL + "/start",
+		Headers: redirectPolicyHeaders,
+	}, dest, nil); err != nil {
+		t.Fatalf("Download() = %v", err)
+	}
+	if missingPolicy.Load() != 0 {
+		t.Fatalf("same-origin redirect lost %d policy header values", missingPolicy.Load())
+	}
+}
+
+func TestDownloadValidatorControlsCrossOriginHeaderReattachment(t *testing.T) {
+	t.Run("approved", func(t *testing.T) {
+		var missingPolicy atomic.Int32
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for key, value := range redirectPolicyHeaders {
+				if r.Header.Get(key) != value {
+					missingPolicy.Add(1)
+				}
+			}
+			_, _ = io.WriteString(w, "audio")
+		}))
+		defer target.Close()
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+"/final", http.StatusTemporaryRedirect)
+		}))
+		defer origin.Close()
+
+		dest := filepath.Join(t.TempDir(), "audio.bin")
+		if _, err := newPolicyTestService(false).Download(context.Background(), &platform.DownloadInfo{
+			URL:         localhostTestURL(t, origin.URL) + "/start",
+			Headers:     redirectPolicyHeaders,
+			ValidateURL: func(string) error { return nil },
+		}, dest, nil); err != nil {
+			t.Fatalf("Download() = %v", err)
+		}
+		if missingPolicy.Load() != 0 {
+			t.Fatalf("approved cross-origin redirect lost %d policy header values", missingPolicy.Load())
+		}
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		var targetHits atomic.Int32
+		errBlocked := errors.New("blocked cross-origin redirect")
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targetHits.Add(1)
+			_, _ = io.WriteString(w, "stolen")
+		}))
+		defer target.Close()
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+"/final", http.StatusTemporaryRedirect)
+		}))
+		defer origin.Close()
+
+		dest := filepath.Join(t.TempDir(), "audio.bin")
+		_, err := newPolicyTestService(false).Download(context.Background(), &platform.DownloadInfo{
+			URL:     localhostTestURL(t, origin.URL) + "/start",
+			Headers: redirectPolicyHeaders,
+			ValidateURL: func(rawURL string) error {
+				if strings.HasPrefix(rawURL, target.URL) {
+					return errBlocked
+				}
+				return nil
+			},
+		}, dest, nil)
+		if !errors.Is(err, errBlocked) {
+			t.Fatalf("Download() error = %v, want blocked sentinel", err)
+		}
+		if targetHits.Load() != 0 {
+			t.Fatalf("rejected redirect target hits = %d", targetHits.Load())
+		}
+	})
 }
 
 func TestDownloadHeadersSurviveSingleAndMultipartRedirects(t *testing.T) {

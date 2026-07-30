@@ -69,9 +69,10 @@ const (
 )
 
 var (
-	retryJitterMu       sync.Mutex
-	retryJitterRng      = rand.New(rand.NewSource(time.Now().UnixNano()))
-	neteaseHostReplacer = strings.NewReplacer("m8.", "m7.", "m801.", "m701.", "m804.", "m701.", "m704.", "m701.")
+	retryJitterMu        sync.Mutex
+	retryJitterRng       = rand.New(rand.NewSource(time.Now().UnixNano()))
+	neteaseHostReplacer  = strings.NewReplacer("m8.", "m7.", "m801.", "m701.", "m804.", "m701.", "m704.", "m701.")
+	errDownloadIntegrity = errors.New("download integrity check failed")
 )
 
 func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
@@ -98,18 +99,20 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 		Transport: transport,
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
 		if policy, ok := req.Context().Value(downloadPolicyContextKey{}).(downloadPolicy); ok {
 			if policy.validateURL != nil {
 				if err := policy.validateURL(req.URL.String()); err != nil {
 					return err
 				}
+				setDownloadPolicyHeaders(req, policy.headers)
+			} else if redirectChainSameOrigin(req, via) {
+				setDownloadPolicyHeaders(req, policy.headers)
+			} else {
+				deleteDownloadPolicyHeaders(req, policy.headers)
 			}
-			for key, value := range policy.headers {
-				req.Header.Set(key, value)
-			}
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
 		}
 		return nil
 	}
@@ -138,6 +141,75 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 	s.multipartDownloader = NewMultipartDownloader(client, opts.Timeout, s.multipartOpts)
 
 	return s
+}
+
+func setDownloadPolicyHeaders(req *http.Request, headers map[string]string) {
+	if req == nil {
+		return
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+}
+
+func deleteDownloadPolicyHeaders(req *http.Request, headers map[string]string) {
+	if req == nil {
+		return
+	}
+	for key := range headers {
+		req.Header.Del(key)
+	}
+}
+
+func redirectChainSameOrigin(req *http.Request, via []*http.Request) bool {
+	if req == nil || req.URL == nil || len(via) == 0 || via[0] == nil || via[0].URL == nil {
+		return false
+	}
+	origin := via[0].URL
+	for _, previous := range via[1:] {
+		if previous == nil || !sameDownloadOrigin(origin, previous.URL) {
+			return false
+		}
+	}
+	return sameDownloadOrigin(origin, req.URL)
+}
+
+func sameDownloadOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftScheme := strings.ToLower(left.Scheme)
+	rightScheme := strings.ToLower(right.Scheme)
+	if (leftScheme != "http" && leftScheme != "https") ||
+		(rightScheme != "http" && rightScheme != "https") ||
+		leftScheme != rightScheme {
+		return false
+	}
+	if left.Hostname() == "" || right.Hostname() == "" ||
+		!strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return effectiveURLPort(left) == effectiveURLPort(right)
+}
+
+func effectiveURLPort(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func (s *DownloadService) FillMetadata(info *platform.DownloadInfo, resp *http.Response) {
@@ -325,6 +397,9 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 			}
 			lastErr = err
 			_ = os.Remove(destPath)
+			if errors.Is(err, errDownloadIntegrity) {
+				return 0, err
+			}
 			continue
 		}
 
@@ -344,6 +419,9 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 			}
 			lastErr = err
 			_ = os.Remove(destPath)
+			if errors.Is(err, errDownloadIntegrity) {
+				return 0, err
+			}
 		}
 
 		for attempt := 0; attempt < s.maxRetries; attempt++ {
@@ -351,7 +429,7 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 			if err == nil {
 				if info.Size > 0 && written != info.Size {
 					_ = os.Remove(destPath)
-					return 0, fmt.Errorf("download size mismatch: got %d bytes, expected %d", written, info.Size)
+					return 0, fmt.Errorf("%w: download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, info.Size)
 				}
 				if s.checkMD5 && info.MD5 != "" {
 					if ok, err := util.VerifyMD5(destPath, info.MD5); err != nil || !ok {
@@ -366,6 +444,9 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 			}
 			lastErr = err
 			_ = os.Remove(destPath)
+			if errors.Is(err, errDownloadIntegrity) {
+				return 0, err
+			}
 			if attempt < s.maxRetries-1 {
 				wait := retryDelayWithJitter(attempt)
 				select {
@@ -527,11 +608,14 @@ func (s *DownloadService) tryMultipartDownload(ctx context.Context, baseURL stri
 	written, err := s.multipartDownloader.Download(ctx, baseURL, info, destPath, progress)
 	if err != nil {
 		_ = os.Remove(destPath)
+		if errors.Is(err, errDownloadIntegrity) {
+			return 0, fmt.Errorf("multipart download failed: %w", err)
+		}
 		return 0, fmt.Errorf("multipart download failed (will retry with single-thread): %w", err)
 	}
 	if info.Size > 0 && written != info.Size {
 		_ = os.Remove(destPath)
-		return 0, fmt.Errorf("multipart download size mismatch: got %d bytes, expected %d", written, info.Size)
+		return 0, fmt.Errorf("%w: multipart download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, info.Size)
 	}
 	return written, nil
 }
@@ -555,7 +639,7 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	}
 	expectedSize := info.Size
 	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
-		return 0, fmt.Errorf("download content length mismatch: got %d bytes, expected %d", resp.ContentLength, expectedSize)
+		return 0, fmt.Errorf("%w: download content length mismatch: got %d bytes, expected %d", errDownloadIntegrity, resp.ContentLength, expectedSize)
 	}
 
 	s.FillMetadata(info, resp)
@@ -599,7 +683,7 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	}
 	if expectedSize > 0 && written != expectedSize {
 		_ = os.Remove(destPath)
-		return 0, fmt.Errorf("download size mismatch: got %d bytes, expected %d", written, expectedSize)
+		return 0, fmt.Errorf("%w: download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, expectedSize)
 	}
 	return written, nil
 }

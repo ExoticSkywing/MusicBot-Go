@@ -178,7 +178,7 @@ func (md *MultipartDownloader) Download(ctx context.Context, rawURL string, info
 		return md.downloadSingle(ctx, rawURL, info, destPath, info.Size, progress)
 	}
 	if info.Size > 0 && contentLength > 0 && contentLength != info.Size {
-		return 0, fmt.Errorf("download content length mismatch: got %d bytes, expected %d", contentLength, info.Size)
+		return 0, fmt.Errorf("%w: download content length mismatch: got %d bytes, expected %d", errDownloadIntegrity, contentLength, info.Size)
 	}
 
 	totalSize := contentLength
@@ -401,7 +401,7 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 
 	// Copy other headers
 	for k, v := range info.Headers {
-		if k != "Range" {
+		if !strings.EqualFold(k, "Range") {
 			req.Header.Set(k, v)
 		}
 	}
@@ -422,11 +422,11 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 	contentRange := resp.Header.Get("Content-Range")
 	expectedContentRange := fmt.Sprintf("bytes %d-%d/%d", part.start, part.end, tracker.total)
 	if contentRange != expectedContentRange {
-		return fmt.Errorf("range content mismatch: got %q, expected %q", contentRange, expectedContentRange)
+		return fmt.Errorf("%w: range content mismatch: got %q, expected %q", errDownloadIntegrity, contentRange, expectedContentRange)
 	}
 	expectedSize := part.end - part.start + 1
 	if resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
-		return fmt.Errorf("range body size mismatch: got %d bytes, expected %d", resp.ContentLength, expectedSize)
+		return fmt.Errorf("%w: range body size mismatch: got %d bytes, expected %d", errDownloadIntegrity, resp.ContentLength, expectedSize)
 	}
 
 	// Create part file
@@ -487,12 +487,12 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 		return err
 	}
 	if len(extra) != 0 {
-		return fmt.Errorf("range body exceeds expected %d bytes", expectedSize)
+		return fmt.Errorf("%w: range body exceeds expected %d bytes", errDownloadIntegrity, expectedSize)
 	}
 
 	// Verify part size
 	if written != expectedSize {
-		return fmt.Errorf("part size mismatch: got %d, expected %d", written, expectedSize)
+		return fmt.Errorf("%w: part size mismatch: got %d, expected %d", errDownloadIntegrity, written, expectedSize)
 	}
 
 	part.written = written

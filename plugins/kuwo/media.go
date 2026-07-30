@@ -77,6 +77,11 @@ func mediaHeaders() map[string]string {
 }
 
 func parseSafeMediaURL(rawURL string) (*url.URL, error) {
+	// net/url intentionally drops an empty fragment delimiter when serializing,
+	// so reject the raw delimiter before parsing or normalizing it away.
+	if strings.Contains(rawURL, "#") {
+		return nil, errUnsafeMediaURL
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, errUnsafeMediaURL
@@ -114,6 +119,9 @@ func normalizeSafeMediaURL(rawURL string) (string, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return "", errors.New("kuwo: empty media URL")
+	}
+	if strings.Contains(trimmed, "#") {
+		return "", errUnsafeMediaURL
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {

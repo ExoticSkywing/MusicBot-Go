@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -91,6 +92,35 @@ func TestValidateMediaURL(t *testing.T) {
 		if err := validateMediaURL(raw, "flac"); err == nil {
 			t.Errorf("validateMediaURL(%q) succeeded", raw)
 		}
+	}
+}
+
+func TestMediaURLRejectsTrailingEmptyFragmentWithoutMisclassifyingEncodedPath(t *testing.T) {
+	for _, raw := range []string{
+		"https://kw-er.kuwo.cn/signed.flac#",
+		"https://er-sycdn.kuwo.cn/signed.mp3#",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := normalizeSafeMediaURL(raw); !errors.Is(err, errUnsafeMediaURL) {
+				t.Fatalf("normalizeSafeMediaURL(%q) error = %v, want errUnsafeMediaURL", raw, err)
+			}
+			format := strings.TrimSuffix(path.Ext(strings.TrimSuffix(raw, "#")), "#")
+			format = strings.TrimPrefix(format, ".")
+			if err := validateMediaURL(raw, format); !errors.Is(err, errUnsafeMediaURL) {
+				t.Fatalf("validateMediaURL(%q) error = %v, want errUnsafeMediaURL", raw, err)
+			}
+		})
+	}
+
+	const encoded = "https://kw-er.kuwo.cn/path/signed%23.flac"
+	if normalized, err := normalizeSafeMediaURL(encoded); err != nil || normalized != encoded {
+		t.Fatalf("normalizeSafeMediaURL(%q) = (%q, %v)", encoded, normalized, err)
+	}
+	if err := validateMediaURL(encoded, "flac"); err != nil {
+		t.Fatalf("validateMediaURL(%q) = %v", encoded, err)
+	}
+	if err := validateMediaURL("https://kw-er.kuwo.cn/path/signed.flac%23", "flac"); err == nil || errors.Is(err, errUnsafeMediaURL) {
+		t.Fatalf("encoded suffix mismatch error = %v, want ordinary suffix error", err)
 	}
 }
 
@@ -442,6 +472,77 @@ func TestResolveDownloadUntrustedMobileHostIsTerminal(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestResolveDownloadTrailingEmptyFragmentIsTerminal(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		quality    platform.Quality
+		format     string
+		bitrate    int
+		mediaTotal int64
+	}{
+		{name: "mp3", quality: platform.QualityStandard, format: "mp3", bitrate: 128, mediaTotal: 3410341},
+		{name: "flac", quality: platform.QualityLossless, format: "flac", bitrate: 2000, mediaTotal: 27383481},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var mobileCalls atomic.Int32
+			var mediaCalls atomic.Int32
+			var webCalls atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Hostname() {
+				case "www.kuwo.cn":
+					switch {
+					case req.URL.Path == "/":
+						return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+					case strings.Contains(req.URL.Path, "musicInfo"):
+						return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`)), nil
+					case strings.Contains(req.URL.Path, "playUrl"):
+						webCalls.Add(1)
+						return response(http.StatusOK, nil, []byte(`{"code":200,"data":{"url":"https://er-sycdn.kuwo.cn/web.mp3"}}`)), nil
+					}
+				case "mobi.kuwo.cn":
+					mobileCalls.Add(1)
+					body := fmt.Sprintf(
+						`{"code":200,"data":{"rid":41378936,"url":"https://kw-er.kuwo.cn/signed.%s#","format":%q,"bitrate":%d,"duration":213,"type":0}}`,
+						tt.format,
+						tt.format,
+						tt.bitrate,
+					)
+					return response(http.StatusOK, nil, []byte(body)), nil
+				case "kw-er.kuwo.cn":
+					mediaCalls.Add(1)
+					if tt.format == "flac" {
+						return response(
+							http.StatusPartialContent,
+							map[string]string{"Content-Range": fmt.Sprintf("bytes 0-41/%d", tt.mediaTotal)},
+							validFLACStreamInfo(213*time.Second),
+						), nil
+					}
+					return mp3ProbeTransport(t, tt.mediaTotal, nil).Transport.RoundTrip(req)
+				}
+				t.Fatalf("unexpected request %s", req.URL)
+				return nil, nil
+			})
+			client := NewClient(time.Second, nil)
+			client.apiHTTPClient.Transport = transport
+			client.mediaHTTPClient.Transport = transport
+
+			_, err := client.GetDownloadInfo(context.Background(), "41378936", tt.quality)
+			if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, errUnsafeMediaURL) {
+				t.Fatalf("error = %v, want ErrUnavailable + errUnsafeMediaURL", err)
+			}
+			if got := mobileCalls.Load(); got != 1 {
+				t.Fatalf("mobile calls = %d, want 1", got)
+			}
+			if got := mediaCalls.Load(); got != 0 {
+				t.Fatalf("media probe calls = %d, want 0", got)
+			}
+			if got := webCalls.Load(); got != 0 {
+				t.Fatalf("web calls = %d, want 0", got)
+			}
+		})
 	}
 }
 
