@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,3 +210,784 @@ func kuwoFixtureServer(t *testing.T, fixture string) *httptest.Server {
 }
 
 var uuidV4Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+type playlistTestServer struct {
+	server    *httptest.Server
+	homeCalls atomic.Int32
+	apiCalls  atomic.Int32
+}
+
+type contextDeadlineBody struct {
+	ctx  context.Context
+	data []byte
+	read bool
+}
+
+func (body *contextDeadlineBody) Read(buffer []byte) (int, error) {
+	if body.read {
+		return 0, io.EOF
+	}
+	<-body.ctx.Done()
+	body.read = true
+	return copy(buffer, body.data), io.EOF
+}
+
+func (*contextDeadlineBody) Close() error {
+	return nil
+}
+
+func newPlaylistTestServer(
+	t *testing.T,
+	responder func(call int, request *http.Request) (int, string),
+) (*Client, *playlistTestServer) {
+	t.Helper()
+	fixture := &playlistTestServer{}
+	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/":
+			fixture.homeCalls.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: kuwoSessionCookie, Value: "abcdefghijklmnop", Path: "/"})
+		case "/playlist":
+			call := int(fixture.apiCalls.Add(1))
+			status, body := responder(call, request)
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
+		home:     fixture.server.URL + "/",
+		playlist: fixture.server.URL + "/playlist",
+	})
+	return client, fixture
+}
+
+func (s *playlistTestServer) Close() {
+	if s != nil && s.server != nil {
+		s.server.Close()
+	}
+}
+
+func playlistFixture(playlistID string, total string, tracks ...string) string {
+	return fmt.Sprintf(
+		`{"code":200,"data":{"id":%q,"name":"Fixture","desc":"Description","img700":"https://img.test/700.jpg","userName":"Creator","total":%s,"musicList":[%s]}}`,
+		playlistID,
+		total,
+		strings.Join(tracks, ","),
+	)
+}
+
+func playlistTrackFixture(id string) string {
+	return fmt.Sprintf(`{"rid":%q,"name":"Track %s","artist":"Artist","duration":"180"}`, id, id)
+}
+
+func TestGetPlaylistValidatesStrictPlaylistIDBeforeNetwork(t *testing.T) {
+	client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+		return http.StatusOK, playlistFixture("1", "0")
+	})
+	defer fixture.Close()
+
+	for _, playlistID := range []string{
+		"",
+		" \t\r\n ",
+		"MUSIC_123",
+		"+123",
+		"-123",
+		"12a3",
+		"１２３",
+		"١٢٣",
+		"123456789012345678901",
+	} {
+		t.Run(strconv.Quote(playlistID), func(t *testing.T) {
+			playlist, err := client.GetPlaylist(context.Background(), playlistID, 0, 50)
+			if playlist != nil || !errors.Is(err, platform.ErrNotFound) {
+				t.Fatalf("GetPlaylist(%q) = %#v, %v; want ErrNotFound", playlistID, playlist, err)
+			}
+		})
+	}
+	if got := fixture.homeCalls.Load(); got != 0 {
+		t.Fatalf("invalid IDs made %d homepage requests, want 0", got)
+	}
+	if got := fixture.apiCalls.Load(); got != 0 {
+		t.Fatalf("invalid IDs made %d API requests, want 0", got)
+	}
+}
+
+func TestGetPlaylistAcceptsTwentyDigitPlaylistIDAsString(t *testing.T) {
+	const playlistID = "99999999999999999999"
+	client, fixture := newPlaylistTestServer(t, func(_ int, request *http.Request) (int, string) {
+		if got := request.URL.Query().Get("pid"); got != playlistID {
+			t.Errorf("pid = %q, want %q", got, playlistID)
+		}
+		return http.StatusOK, playlistFixture(playlistID, "0")
+	})
+	defer fixture.Close()
+
+	playlist, err := client.GetPlaylist(context.Background(), " \t"+playlistID+"\n ", 0, 50)
+	if err != nil {
+		t.Fatalf("GetPlaylist() = %v", err)
+	}
+	if playlist == nil || playlist.ID != playlistID || playlist.TrackCount != 0 {
+		t.Fatalf("playlist = %#v", playlist)
+	}
+	if fixture.homeCalls.Load() != 1 || fixture.apiCalls.Load() != 1 {
+		t.Fatalf("calls = home:%d api:%d, want 1/1", fixture.homeCalls.Load(), fixture.apiCalls.Load())
+	}
+}
+
+func TestGetPlaylistNormalizesOffsetAndLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		offset      int
+		limit       int
+		wantPage    string
+		wantLimit   string
+		wantErr     bool
+		wantAPICall int32
+	}{
+		{name: "negative offset", offset: -99, limit: 1, wantPage: "1", wantLimit: "1", wantAPICall: 1},
+		{name: "default zero limit", offset: 0, limit: 0, wantPage: "1", wantLimit: "50", wantAPICall: 1},
+		{name: "default negative limit before division", offset: 51, limit: -1, wantPage: "2", wantLimit: "50", wantAPICall: 1},
+		{name: "limit 100", offset: 100, limit: 100, wantPage: "2", wantLimit: "100", wantAPICall: 1},
+		{name: "cap limit before division", offset: 101, limit: 101, wantPage: "2", wantLimit: "100", wantAPICall: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, request *http.Request) (int, string) {
+				query := request.URL.Query()
+				if query.Get("pn") != test.wantPage || query.Get("rn") != test.wantLimit {
+					t.Errorf("query pn/rn = %q/%q, want %q/%q", query.Get("pn"), query.Get("rn"), test.wantPage, test.wantLimit)
+				}
+				return http.StatusOK, playlistFixture("123", "0")
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", test.offset, test.limit)
+			if test.wantErr {
+				if !errors.Is(err, platform.ErrUnavailable) {
+					t.Fatalf("error = %v, want ErrUnavailable", err)
+				}
+				return
+			}
+			if err != nil || playlist == nil {
+				t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+			}
+			if got := fixture.apiCalls.Load(); got != test.wantAPICall {
+				t.Fatalf("API calls = %d, want %d", got, test.wantAPICall)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistPaginationBoundaries(t *testing.T) {
+	maxOffset := (int(maxKuwoPlaylistPage) - 1)
+	client, fixture := newPlaylistTestServer(t, func(_ int, request *http.Request) (int, string) {
+		if got := request.URL.Query().Get("pn"); got != strconv.Itoa(maxKuwoPlaylistPage) {
+			t.Fatalf("pn = %q, want %d", got, maxKuwoPlaylistPage)
+		}
+		return http.StatusOK, playlistFixture("123", "0")
+	})
+	defer fixture.Close()
+	if _, err := client.GetPlaylist(context.Background(), "123", maxOffset, 1); err != nil {
+		t.Fatalf("maximum page GetPlaylist() = %v", err)
+	}
+
+	before := fixture.apiCalls.Load()
+	if playlist, err := client.GetPlaylist(context.Background(), "123", int(maxKuwoPlaylistPage), 1); playlist != nil || !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("page max+1 = %#v, %v; want ErrUnavailable", playlist, err)
+	}
+	if got := fixture.apiCalls.Load(); got != before {
+		t.Fatalf("page max+1 made API call: before=%d after=%d", before, got)
+	}
+
+	if playlist, err := client.GetPlaylist(context.Background(), "123", math.MaxInt, 100); playlist != nil || !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("MaxInt offset = %#v, %v; want ErrUnavailable", playlist, err)
+	}
+	if got := fixture.apiCalls.Load(); got != before {
+		t.Fatalf("MaxInt offset made API call: before=%d after=%d", before, got)
+	}
+}
+
+func TestGetPlaylistRejectsPotentialSecondPageOverflowBeforeNetwork(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("max Kuwo page plus nonzero skip is not representable on 32-bit")
+	}
+	offsetValue := (uint64(maxKuwoPlaylistPage)-1)*2 + 1
+	offset := int(offsetValue)
+	client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+		return http.StatusOK, playlistFixture("123", "0")
+	})
+	defer fixture.Close()
+	playlist, err := client.GetPlaylist(context.Background(), "123", offset, 2)
+	if playlist != nil || !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("GetPlaylist() = %#v, %v; want ErrUnavailable", playlist, err)
+	}
+	if fixture.homeCalls.Load() != 0 || fixture.apiCalls.Load() != 0 {
+		t.Fatalf("overflow risk made network calls home=%d api=%d", fixture.homeCalls.Load(), fixture.apiCalls.Load())
+	}
+}
+
+func TestPlaylistPageWindowRejectsPotentialSecondPageOverflow(t *testing.T) {
+	offset := (uint64(maxKuwoPlaylistPage)-1)*2 + 1
+	if page, skip, ok := playlistPageWindow(offset, 2); ok {
+		t.Fatalf("playlistPageWindow() = page %d skip %d, want rejected", page, skip)
+	}
+}
+
+func TestGetPlaylistEnforcesRawPageLength(t *testing.T) {
+	tests := []struct {
+		name      string
+		offset    int
+		limit     int
+		body      string
+		wantError bool
+		wantCount int
+	}{
+		{name: "zero missing list", offset: 0, limit: 3, body: `{"code":200,"data":{"id":"123","total":0}}`, wantCount: 0},
+		{name: "zero null list", offset: 0, limit: 3, body: `{"code":200,"data":{"id":"123","total":0,"musicList":null}}`, wantCount: 0},
+		{name: "page base equals total", offset: 3, limit: 3, body: playlistFixture("123", "3"), wantCount: 0},
+		{name: "page base beyond total", offset: 6, limit: 3, body: playlistFixture("123", "2"), wantCount: 0},
+		{name: "missing expected rows", offset: 0, limit: 3, body: `{"code":200,"data":{"id":"123","total":2}}`, wantError: true},
+		{name: "short full page", offset: 0, limit: 3, body: playlistFixture("123", "3", playlistTrackFixture("1"), playlistTrackFixture("2")), wantError: true},
+		{name: "rows beyond zero total", offset: 0, limit: 3, body: playlistFixture("123", "0", playlistTrackFixture("1")), wantError: true},
+		{name: "rows beyond last page", offset: 3, limit: 3, body: playlistFixture("123", "4", playlistTrackFixture("4"), playlistTrackFixture("5")), wantError: true},
+		{name: "exact partial last page", offset: 3, limit: 3, body: playlistFixture("123", "5", playlistTrackFixture("4"), playlistTrackFixture("5")), wantCount: 2},
+		{name: "exact full page", offset: 0, limit: 3, body: playlistFixture("123", "3", playlistTrackFixture("1"), playlistTrackFixture("2"), playlistTrackFixture("3")), wantCount: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+				return http.StatusOK, test.body
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", test.offset, test.limit)
+			if test.wantError {
+				if playlist != nil || !errors.Is(err, platform.ErrUnavailable) {
+					t.Fatalf("GetPlaylist() = %#v, %v; want ErrUnavailable", playlist, err)
+				}
+			} else {
+				if err != nil || playlist == nil || len(playlist.Tracks) != test.wantCount {
+					t.Fatalf("GetPlaylist() = %#v, %v; want %d tracks", playlist, err, test.wantCount)
+				}
+			}
+			if got := fixture.apiCalls.Load(); got != 1 {
+				t.Fatalf("API calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistNonAlignedOffsetAtOrBeyondTotal(t *testing.T) {
+	tests := []struct {
+		name      string
+		offset    int
+		total     string
+		tracks    []string
+		wantIDs   []string
+		wantTotal int
+	}{
+		{
+			name:      "skip beyond short legitimate page",
+			offset:    5,
+			total:     "4",
+			tracks:    []string{playlistTrackFixture("4")},
+			wantTotal: 4,
+		},
+		{
+			name:      "skip equals legitimate page length",
+			offset:    5,
+			total:     "5",
+			tracks:    []string{playlistTrackFixture("4"), playlistTrackFixture("5")},
+			wantTotal: 5,
+		},
+		{
+			name:      "tail remains after prefix",
+			offset:    4,
+			total:     "5",
+			tracks:    []string{playlistTrackFixture("4"), playlistTrackFixture("5")},
+			wantIDs:   []string{"5"},
+			wantTotal: 5,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, request *http.Request) (int, string) {
+				if request.URL.Query().Get("pn") != "2" || request.URL.Query().Get("rn") != "3" {
+					t.Errorf("query = %v, want pn=2 rn=3", request.URL.Query())
+				}
+				return http.StatusOK, playlistFixture("123", test.total, test.tracks...)
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", test.offset, 3)
+			if err != nil || playlist == nil {
+				t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+			}
+			gotIDs := make([]string, len(playlist.Tracks))
+			for index := range playlist.Tracks {
+				gotIDs[index] = playlist.Tracks[index].ID
+			}
+			if strings.Join(gotIDs, ",") != strings.Join(test.wantIDs, ",") {
+				t.Fatalf("track IDs = %v, want %v", gotIDs, test.wantIDs)
+			}
+			if playlist.TrackCount != test.wantTotal || fixture.apiCalls.Load() != 1 {
+				t.Fatalf("TrackCount/calls = %d/%d, want %d/1", playlist.TrackCount, fixture.apiCalls.Load(), test.wantTotal)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistTotalIntegerBoundaries(t *testing.T) {
+	maxTotal := strconv.FormatUint(uint64(math.MaxInt), 10)
+	tooLarge := strconv.FormatUint(uint64(math.MaxInt)+1, 10)
+	tests := []struct {
+		name      string
+		total     string
+		wantError bool
+	}{
+		{name: "max int", total: maxTotal},
+		{name: "max int plus one", total: tooLarge, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+				return http.StatusOK, playlistFixture("123", test.total, playlistTrackFixture("1"))
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", 0, 1)
+			if test.wantError {
+				if playlist != nil || !errors.Is(err, platform.ErrUnavailable) {
+					t.Fatalf("GetPlaylist() = %#v, %v; want ErrUnavailable", playlist, err)
+				}
+			} else if err != nil || playlist == nil || playlist.TrackCount != math.MaxInt {
+				t.Fatalf("GetPlaylist() = %#v, %v; want total MaxInt", playlist, err)
+			}
+			if got := fixture.apiCalls.Load(); got != 1 {
+				t.Fatalf("API calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistRejectsInvalidEnvelopeAndIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantNotFound bool
+	}{
+		{name: "numeric code minus one", body: `{"code":-1}`, wantNotFound: true},
+		{name: "string code minus one", body: `{"code":"-1"}`, wantNotFound: true},
+		{name: "missing code", body: `{"data":{"id":"123","total":0}}`},
+		{name: "null code", body: `{"code":null,"data":{"id":"123","total":0}}`},
+		{name: "boolean code", body: `{"code":true,"data":{"id":"123","total":0}}`},
+		{name: "unexpected code", body: `{"code":201,"data":{"id":"123","total":0}}`},
+		{name: "signed success code", body: `{"code":"+200","data":{"id":"123","total":0}}`},
+		{name: "zero padded success code", body: `{"code":"0200","data":{"id":"123","total":0}}`},
+		{name: "zero padded not found code", body: `{"code":"-01"}`},
+		{name: "missing data", body: `{"code":200}`},
+		{name: "null data", body: `{"code":"200","data":null}`},
+		{name: "missing id", body: `{"code":200,"data":{"total":0}}`},
+		{name: "boolean id", body: `{"code":200,"data":{"id":true,"total":0}}`},
+		{name: "mismatched id", body: `{"code":200,"data":{"id":"124","total":0}}`},
+		{name: "missing total", body: `{"code":200,"data":{"id":"123"}}`},
+		{name: "null total", body: `{"code":200,"data":{"id":"123","total":null}}`},
+		{name: "boolean total", body: `{"code":200,"data":{"id":"123","total":false}}`},
+		{name: "negative total", body: `{"code":200,"data":{"id":"123","total":-1}}`},
+		{name: "fractional total", body: `{"code":200,"data":{"id":"123","total":1.5}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+				return http.StatusOK, test.body
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", 0, 50)
+			if playlist != nil {
+				t.Fatalf("playlist = %#v, want nil", playlist)
+			}
+			if test.wantNotFound {
+				if !errors.Is(err, platform.ErrNotFound) {
+					t.Fatalf("error = %v, want ErrNotFound", err)
+				}
+			} else if !errors.Is(err, platform.ErrUnavailable) {
+				t.Fatalf("error = %v, want ErrUnavailable", err)
+			}
+		})
+	}
+
+	for _, code := range []string{"200", `"200"`} {
+		t.Run("successful code "+code, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+				return http.StatusOK, fmt.Sprintf(`{"code":%s,"data":{"id":123,"total":"0"}}`, code)
+			})
+			defer fixture.Close()
+			if playlist, err := client.GetPlaylist(context.Background(), "123", 0, 50); err != nil || playlist == nil {
+				t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistNonAlignedOffsetReturnsExactRawWindow(t *testing.T) {
+	var requestIDs []string
+	var requestMu sync.Mutex
+	client, fixture := newPlaylistTestServer(t, func(call int, request *http.Request) (int, string) {
+		query := request.URL.Query()
+		if len(query) != 5 {
+			t.Errorf("query = %v, want exactly pid/pn/rn/httpsStatus/reqId", query)
+		}
+		if query.Get("pid") != "123" || query.Get("rn") != "2" || query.Get("httpsStatus") != "1" {
+			t.Errorf("query = %v", query)
+		}
+		if request.Header.Get("Cookie") == "" || request.Header.Get("Secret") == "" {
+			t.Errorf("signed headers missing: %#v", request.Header)
+		}
+		if request.Referer() != kuwoHomeURL || request.UserAgent() != kuwoUserAgent {
+			t.Errorf("referer/user-agent = %q/%q", request.Referer(), request.UserAgent())
+		}
+		reqID := query.Get("reqId")
+		if !uuidV4Pattern.MatchString(reqID) {
+			t.Errorf("reqId = %q", reqID)
+		}
+		requestMu.Lock()
+		requestIDs = append(requestIDs, reqID)
+		requestMu.Unlock()
+		switch call {
+		case 1:
+			if query.Get("pn") != "2" {
+				t.Errorf("first pn = %q, want 2", query.Get("pn"))
+			}
+			return http.StatusOK, playlistFixture(
+				"123",
+				"6",
+				`{"rid":"bad","name":"discarded invalid prefix"}`,
+				`{"rid":"4","name":"Paid","artist":"Artist","duration":180,"isListenFee":true,"payInfo":{"cannotOnlinePlay":1}}`,
+			)
+		case 2:
+			if query.Get("pn") != "3" {
+				t.Errorf("second pn = %q, want 3", query.Get("pn"))
+			}
+			return http.StatusOK, playlistFixture("123", "6", playlistTrackFixture("5"), playlistTrackFixture("6"))
+		default:
+			t.Fatalf("unexpected API call %d", call)
+			return 0, ""
+		}
+	})
+	defer fixture.Close()
+
+	playlist, err := client.GetPlaylist(context.Background(), "123", 3, 2)
+	if err != nil {
+		t.Fatalf("GetPlaylist() = %v", err)
+	}
+	if playlist == nil || len(playlist.Tracks) != 2 ||
+		playlist.Tracks[0].ID != "4" || playlist.Tracks[1].ID != "5" {
+		t.Fatalf("tracks = %#v, want exact raw window [3,5)", playlist)
+	}
+	if playlist.Tracks[0].Title != "Paid" {
+		t.Fatalf("paid browse track was not retained: %#v", playlist.Tracks[0])
+	}
+	if fixture.apiCalls.Load() != 2 || len(requestIDs) != 2 || requestIDs[0] == requestIDs[1] {
+		t.Fatalf("calls/request IDs = %d/%v, want two distinct", fixture.apiCalls.Load(), requestIDs)
+	}
+}
+
+func TestGetPlaylistCrossPageConsistencyIsAtomic(t *testing.T) {
+	tests := []struct {
+		name       string
+		secondBody string
+		wantError  error
+	}{
+		{name: "id mismatch", secondBody: playlistFixture("124", "6", playlistTrackFixture("5"), playlistTrackFixture("6")), wantError: platform.ErrUnavailable},
+		{name: "total drift", secondBody: playlistFixture("123", "7", playlistTrackFixture("5"), playlistTrackFixture("6")), wantError: platform.ErrUnavailable},
+		{name: "short second page", secondBody: playlistFixture("123", "6", playlistTrackFixture("5")), wantError: platform.ErrUnavailable},
+		{name: "rate limited second page", wantError: platform.ErrRateLimited},
+		{name: "malformed second page", secondBody: `{`, wantError: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, fixture := newPlaylistTestServer(t, func(call int, _ *http.Request) (int, string) {
+				if call == 1 {
+					return http.StatusOK, playlistFixture("123", "6", playlistTrackFixture("3"), playlistTrackFixture("4"))
+				}
+				if test.name == "rate limited second page" {
+					return http.StatusTooManyRequests, ""
+				}
+				return http.StatusOK, test.secondBody
+			})
+			defer fixture.Close()
+			playlist, err := client.GetPlaylist(context.Background(), "123", 3, 2)
+			if playlist != nil || err == nil {
+				t.Fatalf("GetPlaylist() = %#v, %v; want atomic failure", playlist, err)
+			}
+			if test.wantError != nil && !errors.Is(err, test.wantError) {
+				t.Fatalf("error = %v, want errors.Is(%v)", err, test.wantError)
+			}
+			if test.name == "malformed second page" &&
+				(!strings.Contains(err.Error(), "kuwo: decode playlist response") || errors.Is(err, platform.ErrNotFound)) {
+				t.Fatalf("decode error = %v", err)
+			}
+			if got := fixture.apiCalls.Load(); got != 2 {
+				t.Fatalf("API calls = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestGetPlaylistStopsBeforeSecondPageOnTerminalError(t *testing.T) {
+	t.Run("first page rate limit", func(t *testing.T) {
+		client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+			return http.StatusTooManyRequests, ""
+		})
+		defer fixture.Close()
+		if playlist, err := client.GetPlaylist(context.Background(), "123", 3, 2); playlist != nil || !errors.Is(err, platform.ErrRateLimited) {
+			t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+		}
+		if fixture.apiCalls.Load() != 1 {
+			t.Fatalf("API calls = %d, want 1", fixture.apiCalls.Load())
+		}
+	})
+
+	t.Run("context canceled after first page", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		client, fixture := newPlaylistTestServer(t, func(call int, _ *http.Request) (int, string) {
+			if call == 1 {
+				cancel()
+				return http.StatusOK, playlistFixture("123", "6", playlistTrackFixture("3"), playlistTrackFixture("4"))
+			}
+			t.Fatalf("unexpected second page request after cancellation")
+			return 0, ""
+		})
+		defer fixture.Close()
+		playlist, err := client.GetPlaylist(ctx, "123", 3, 2)
+		if playlist != nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("GetPlaylist() = %#v, %v; want context.Canceled", playlist, err)
+		}
+		if fixture.apiCalls.Load() != 1 {
+			t.Fatalf("API calls = %d, want 1", fixture.apiCalls.Load())
+		}
+	})
+
+	t.Run("deadline expires after first page", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		var apiCalls atomic.Int32
+		client := NewClient(time.Second, nil)
+		client.endpoints.home = "https://kuwo-deadline.test/"
+		client.endpoints.playlist = "https://kuwo-deadline.test/playlist"
+		client.apiHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/":
+				return response(http.StatusOK, map[string]string{
+					"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
+				}, nil), nil
+			case "/playlist":
+				call := apiCalls.Add(1)
+				if call != 1 {
+					t.Fatalf("unexpected page request %d after deadline", call)
+				}
+				payload := []byte(playlistFixture(
+					"123",
+					"6",
+					playlistTrackFixture("3"),
+					playlistTrackFixture("4"),
+				))
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       &contextDeadlineBody{ctx: ctx, data: payload},
+				}, nil
+			default:
+				t.Fatalf("unexpected request URL %s", request.URL)
+				return nil, errors.New("unexpected request")
+			}
+		})
+		playlist, err := client.GetPlaylist(ctx, "123", 3, 2)
+		if playlist != nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetPlaylist() = %#v, %v; want context.DeadlineExceeded", playlist, err)
+		}
+		if apiCalls.Load() != 1 {
+			t.Fatalf("API calls = %d, want 1", apiCalls.Load())
+		}
+	})
+}
+
+func TestGetPlaylistSecondPageTransportErrorPreservesCause(t *testing.T) {
+	sentinel := errors.New("second page transport failed")
+	var apiCalls atomic.Int32
+	client := NewClient(time.Second, nil)
+	client.endpoints.home = "https://kuwo-transport.test/"
+	client.endpoints.playlist = "https://kuwo-transport.test/playlist"
+	client.apiHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/":
+			return response(http.StatusOK, map[string]string{
+				"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
+			}, nil), nil
+		case "/playlist":
+			call := apiCalls.Add(1)
+			if call == 1 {
+				return response(http.StatusOK, nil, []byte(playlistFixture(
+					"123",
+					"6",
+					playlistTrackFixture("3"),
+					playlistTrackFixture("4"),
+				))), nil
+			}
+			if call == 2 {
+				return nil, sentinel
+			}
+			t.Fatalf("unexpected third page request")
+			return nil, errors.New("unexpected request")
+		default:
+			t.Fatalf("unexpected request URL %s", request.URL)
+			return nil, errors.New("unexpected request")
+		}
+	})
+	playlist, err := client.GetPlaylist(context.Background(), "123", 3, 2)
+	if playlist != nil || !errors.Is(err, sentinel) {
+		t.Fatalf("GetPlaylist() = %#v, %v; want transport sentinel", playlist, err)
+	}
+	if apiCalls.Load() != 2 {
+		t.Fatalf("API calls = %d, want 2", apiCalls.Load())
+	}
+}
+
+func TestGetPlaylistFieldFallbackAndRawThenConvert(t *testing.T) {
+	body := `{"code":200,"data":{
+		"id":"123",
+		"name":"Playlist",
+		"desc":"",
+		"info":"Fallback description",
+		"img700":"",
+		"img500":"https://img.test/500.jpg",
+		"img300":"https://img.test/300.jpg",
+		"img":"https://img.test/base.jpg",
+		"userName":"",
+		"uname":"Fallback creator",
+		"total":5,
+		"unknown":{"nested":true},
+		"musicList":[
+			{"rid":"1","name":"One","artist":"A","album":"Album","duration":"03:00","pic":"https://img.test/one.jpg","isListenFee":true},
+			{"rid":"bad","name":"Bad"},
+			{"rid":"2","name":"Two","artist":"B","duration":180},
+			{"rid":"2","name":"Two duplicate","artist":"B","duration":"180"},
+			{"MUSICRID":"MUSIC_3","SONGNAME":"Three","ARTIST":"C","DURATION":"180","web_albumpic_short":"three.jpg"}
+		]
+	}}`
+	client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+		return http.StatusOK, body
+	})
+	defer fixture.Close()
+	playlist, err := client.GetPlaylist(context.Background(), "123", 0, 5)
+	if err != nil {
+		t.Fatalf("GetPlaylist() = %v", err)
+	}
+	if playlist.Description != "Fallback description" ||
+		playlist.CoverURL != "https://img.test/500.jpg" ||
+		playlist.Creator != "Fallback creator" ||
+		playlist.TrackCount != 5 ||
+		playlist.URL != "https://www.kuwo.cn/playlist_detail/123" {
+		t.Fatalf("playlist metadata = %#v", playlist)
+	}
+	if len(playlist.Tracks) != 4 ||
+		playlist.Tracks[0].ID != "1" ||
+		playlist.Tracks[1].ID != "2" ||
+		playlist.Tracks[2].ID != "2" ||
+		playlist.Tracks[3].ID != "3" {
+		t.Fatalf("tracks = %#v, want invalid filtered, duplicates preserved", playlist.Tracks)
+	}
+}
+
+func TestGetPlaylistMalformedKnownScalarPreservesDecodeCause(t *testing.T) {
+	client, fixture := newPlaylistTestServer(t, func(_ int, _ *http.Request) (int, string) {
+		return http.StatusOK, `{"code":200,"data":{"id":"123","name":{"bad":true},"total":0,"musicList":[]}}`
+	})
+	defer fixture.Close()
+	playlist, err := client.GetPlaylist(context.Background(), "123", 0, 50)
+	if playlist != nil || err == nil ||
+		!strings.Contains(err.Error(), "kuwo: decode playlist response") ||
+		!strings.Contains(err.Error(), "scalar cannot be composite") ||
+		errors.Is(err, platform.ErrNotFound) {
+		t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+	}
+}
+
+func TestGetPlaylistAlignedBoundaryDoesNotFetchExtraPage(t *testing.T) {
+	client, fixture := newPlaylistTestServer(t, func(call int, request *http.Request) (int, string) {
+		if call != 1 {
+			t.Fatalf("unexpected API call %d", call)
+		}
+		if request.URL.Query().Get("pn") != "2" || request.URL.Query().Get("rn") != "2" {
+			t.Fatalf("query = %v, want pn=2 rn=2", request.URL.Query())
+		}
+		return http.StatusOK, playlistFixture("123", "6", playlistTrackFixture("3"), playlistTrackFixture("4"))
+	})
+	defer fixture.Close()
+	playlist, err := client.GetPlaylist(context.Background(), "123", 2, 2)
+	if err != nil || playlist == nil || len(playlist.Tracks) != 2 {
+		t.Fatalf("GetPlaylist() = %#v, %v", playlist, err)
+	}
+	if fixture.apiCalls.Load() != 1 {
+		t.Fatalf("API calls = %d, want 1", fixture.apiCalls.Load())
+	}
+}
+
+func TestGetPlaylistConcurrentWindowsDoNotCross(t *testing.T) {
+	client, fixture := newPlaylistTestServer(t, func(_ int, request *http.Request) (int, string) {
+		query := request.URL.Query()
+		switch query.Get("pid") + "/" + query.Get("pn") + "/" + query.Get("rn") {
+		case "111/1/2":
+			return http.StatusOK, playlistFixture("111", "2", playlistTrackFixture("11"), playlistTrackFixture("12"))
+		case "222/1/2":
+			return http.StatusOK, playlistFixture("222", "4", playlistTrackFixture("21"), playlistTrackFixture("22"))
+		case "222/2/2":
+			return http.StatusOK, playlistFixture("222", "4", playlistTrackFixture("23"), playlistTrackFixture("24"))
+		default:
+			t.Fatalf("unexpected query %v", query)
+			return 0, ""
+		}
+	})
+	defer fixture.Close()
+
+	type result struct {
+		playlist *platform.Playlist
+		err      error
+	}
+	aligned := make(chan result, 1)
+	nonAligned := make(chan result, 1)
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		playlist, err := client.GetPlaylist(context.Background(), "111", 0, 2)
+		aligned <- result{playlist: playlist, err: err}
+	}()
+	go func() {
+		defer group.Done()
+		playlist, err := client.GetPlaylist(context.Background(), "222", 1, 2)
+		nonAligned <- result{playlist: playlist, err: err}
+	}()
+	group.Wait()
+	close(aligned)
+	close(nonAligned)
+
+	first := <-aligned
+	second := <-nonAligned
+	if first.err != nil || first.playlist == nil ||
+		first.playlist.ID != "111" || first.playlist.TrackCount != 2 ||
+		len(first.playlist.Tracks) != 2 ||
+		first.playlist.Tracks[0].ID != "11" || first.playlist.Tracks[1].ID != "12" {
+		t.Fatalf("aligned result = %#v, %v", first.playlist, first.err)
+	}
+	if second.err != nil || second.playlist == nil ||
+		second.playlist.ID != "222" || second.playlist.TrackCount != 4 ||
+		len(second.playlist.Tracks) != 2 ||
+		second.playlist.Tracks[0].ID != "22" || second.playlist.Tracks[1].ID != "23" {
+		t.Fatalf("non-aligned result = %#v, %v", second.playlist, second.err)
+	}
+	if fixture.apiCalls.Load() != 3 {
+		t.Fatalf("API calls = %d, want 3", fixture.apiCalls.Load())
+	}
+}

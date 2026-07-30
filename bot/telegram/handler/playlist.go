@@ -132,7 +132,12 @@ func (h *PlaylistHandler) TryHandle(ctx context.Context, b *telego.Bot, update *
 	}
 	collectionType = detectCollectionType(playlistID, playlist.URL)
 	collectionLabel := collectionTypeLabel(ctx, collectionType)
-	if len(playlist.Tracks) == 0 {
+	totalTracks := playlist.TrackCount
+	if totalTracks <= 0 {
+		totalTracks = len(playlist.Tracks)
+	}
+	exactFilteredEmpty := shouldUseExactCollectionPage(platformName) && playlist.TrackCount > 0 && len(playlist.Tracks) == 0
+	if len(playlist.Tracks) == 0 && !exactFilteredEmpty {
 		emptyText := tr(ctx, "playlist_empty")
 		if collectionType == collectionTypeAlbum {
 			emptyText = tr(ctx, "pl_album_empty")
@@ -141,10 +146,6 @@ func (h *PlaylistHandler) TryHandle(ctx context.Context, b *telego.Bot, update *
 		return true
 	}
 
-	totalTracks := playlist.TrackCount
-	if totalTracks <= 0 {
-		totalTracks = len(playlist.Tracks)
-	}
 	effectiveTotal := totalTracks
 	pageTracks, pageOffset := h.slicePlaylistPage(playlist.Tracks, 1)
 	requesterID := int64(0)
@@ -311,7 +312,7 @@ func (h *PlaylistCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 			_ = b.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: query.ID, Text: tr(ctx, "pl_load_failed", map[string]any{"Label": collectionLabel})})
 			return
 		}
-		if len(pageTracks) == 0 {
+		if len(pageTracks) == 0 && !(shouldUseExactCollectionPage(state.platform) && state.totalTracks > 0) {
 			_ = b.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: query.ID, Text: tr(ctx, "pl_no_results")})
 			return
 		}
@@ -346,7 +347,8 @@ func (h *PlaylistCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 }
 
 func (h *PlaylistHandler) buildPlaylistPage(ctx context.Context, tracks []platform.Track, totalTracks, _ int, platformName, qualityValue string, requesterID int64, messageID int, page int) (string, *telego.InlineKeyboardMarkup) {
-	if len(tracks) == 0 {
+	exactFilteredEmpty := len(tracks) == 0 && shouldUseExactCollectionPage(platformName) && totalTracks > 0
+	if len(tracks) == 0 && !exactFilteredEmpty {
 		return tr(ctx, "no_results"), nil
 	}
 	if totalTracks <= 0 {
@@ -365,6 +367,9 @@ func (h *PlaylistHandler) buildPlaylistPage(ctx context.Context, tracks []platfo
 		textMessage.WriteString(tr(ctx, "pl_page_of", map[string]any{"Page": page, "Total": pageCount}) + "\n\n")
 	} else {
 		textMessage.WriteString("\n")
+	}
+	if exactFilteredEmpty {
+		textMessage.WriteString(tr(ctx, "pl_no_results") + "\n")
 	}
 	buttons := make([]telego.InlineKeyboardButton, 0, len(tracks))
 	for idx, track := range tracks {
@@ -465,7 +470,11 @@ func (h *PlaylistHandler) shouldLazyLoad(platformName string) bool {
 
 func shouldLazyLoadCollection(platformName string) bool {
 	name := strings.TrimSpace(platformName)
-	return name == "qqmusic" || name == "netease" || name == "soda"
+	return name == "qqmusic" || name == "netease" || name == "soda" || name == "kuwo"
+}
+
+func shouldUseExactCollectionPage(platformName string) bool {
+	return strings.TrimSpace(platformName) == "kuwo"
 }
 
 func collectionChunkForPage(page, pageSize int) (int, int) {
@@ -516,9 +525,14 @@ func (h *PlaylistHandler) fetchInitialPlaylist(ctx context.Context, plat platfor
 	}
 	requestCtx := ctx
 	if lazy {
-		chunkOffset, chunkLimit := collectionChunkForPage(1, h.pageSize())
-		requestCtx = platform.WithPlaylistOffset(requestCtx, chunkOffset)
-		requestCtx = platform.WithPlaylistLimit(requestCtx, chunkLimit)
+		if shouldUseExactCollectionPage(plat.Name()) {
+			requestCtx = platform.WithPlaylistOffset(requestCtx, 0)
+			requestCtx = platform.WithPlaylistLimit(requestCtx, h.pageSize())
+		} else {
+			chunkOffset, chunkLimit := collectionChunkForPage(1, h.pageSize())
+			requestCtx = platform.WithPlaylistOffset(requestCtx, chunkOffset)
+			requestCtx = platform.WithPlaylistLimit(requestCtx, chunkLimit)
+		}
 	}
 	return plat.GetPlaylist(requestCtx, playlistID)
 }
@@ -578,6 +592,9 @@ func (h *PlaylistHandler) getCachedPage(ctx context.Context, plat platform.Platf
 	if pageStart >= effectiveTotal {
 		return nil, pageStart, nil
 	}
+	if shouldUseExactCollectionPage(state.platform) {
+		return h.getCachedExactPage(ctx, plat, state, pageStart)
+	}
 	pageEnd := pageStart + h.pageSize()
 	if effectiveTotal > 0 && pageEnd > effectiveTotal {
 		pageEnd = effectiveTotal
@@ -611,6 +628,26 @@ func (h *PlaylistHandler) getCachedPage(ctx context.Context, plat platform.Platf
 		}
 	}
 	return tracks, pageStart, nil
+}
+
+func (h *PlaylistHandler) getCachedExactPage(ctx context.Context, plat platform.Platform, state *playlistState, pageStart int) ([]platform.Track, int, error) {
+	if state.cacheOffset == pageStart {
+		return state.playlist.Tracks, pageStart, nil
+	}
+
+	requestCtx := platform.WithPlaylistOffset(ctx, pageStart)
+	requestCtx = platform.WithPlaylistLimit(requestCtx, h.pageSize())
+	next, err := plat.GetPlaylist(requestCtx, state.playlist.ID)
+	if err != nil {
+		return nil, pageStart, err
+	}
+	if next == nil || next.ID != state.playlist.ID || next.TrackCount != state.totalTracks {
+		return nil, pageStart, platform.NewUnavailableError(state.platform, "playlist", state.playlist.ID)
+	}
+
+	state.playlist.Tracks = next.Tracks
+	state.cacheOffset = pageStart
+	return state.playlist.Tracks, pageStart, nil
 }
 
 func (h *PlaylistHandler) chunkContainsOffset(state *playlistState, offset int) bool {

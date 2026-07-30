@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,19 +23,22 @@ import (
 )
 
 const (
-	kuwoHomeURL        = "https://www.kuwo.cn/"
-	kuwoSearchURL      = "https://www.kuwo.cn/search/searchMusicBykeyWord"
-	kuwoDetailURL      = "https://www.kuwo.cn/api/www/music/musicInfo"
-	kuwoWordLyricURL   = "https://newlyric.kuwo.cn/newlyric.lrc"
-	kuwoMobileLyricURL = "https://m.kuwo.cn/newh5/singles/songinfoandlrc"
-	kuwoUserAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	maxJSONBodyBytes   = 4 << 20
+	kuwoHomeURL         = "https://www.kuwo.cn/"
+	kuwoSearchURL       = "https://www.kuwo.cn/search/searchMusicBykeyWord"
+	kuwoDetailURL       = "https://www.kuwo.cn/api/www/music/musicInfo"
+	kuwoPlaylistURL     = "https://www.kuwo.cn/api/www/playlist/playListInfo"
+	kuwoWordLyricURL    = "https://newlyric.kuwo.cn/newlyric.lrc"
+	kuwoMobileLyricURL  = "https://m.kuwo.cn/newh5/singles/songinfoandlrc"
+	kuwoUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	maxJSONBodyBytes    = 4 << 20
+	maxKuwoPlaylistPage = math.MaxInt32
 )
 
 type kuwoEndpoints struct {
 	home        string
 	search      string
 	detail      string
+	playlist    string
 	mobile      string
 	play        string
 	wordLyric   string
@@ -59,9 +64,30 @@ func NewClient(timeout time.Duration, logger bot.Logger) *Client {
 		home:        kuwoHomeURL,
 		search:      kuwoSearchURL,
 		detail:      kuwoDetailURL,
+		playlist:    kuwoPlaylistURL,
 		wordLyric:   kuwoWordLyricURL,
 		mobileLyric: kuwoMobileLyricURL,
 	})
+}
+
+type playlistResponse struct {
+	Code jsonScalar    `json:"code"`
+	Data *playlistWire `json:"data"`
+}
+
+type playlistWire struct {
+	ID        jsonScalar  `json:"id"`
+	Name      jsonScalar  `json:"name"`
+	Desc      jsonScalar  `json:"desc"`
+	Info      jsonScalar  `json:"info"`
+	Img700    jsonScalar  `json:"img700"`
+	Img500    jsonScalar  `json:"img500"`
+	Img300    jsonScalar  `json:"img300"`
+	Img       jsonScalar  `json:"img"`
+	UserName  jsonScalar  `json:"userName"`
+	UName     jsonScalar  `json:"uname"`
+	Total     jsonScalar  `json:"total"`
+	MusicList []trackWire `json:"musicList"`
 }
 
 // newClientWithEndpoints keeps endpoint and transport injection private to the
@@ -188,6 +214,267 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track,
 		return nil, err
 	}
 	return &detail.Track, nil
+}
+
+func (c *Client) GetPlaylist(
+	ctx context.Context,
+	playlistID string,
+	offset, limit int,
+) (*platform.Playlist, error) {
+	playlistID = strings.TrimSpace(playlistID)
+	if !isASCIIUnsignedDecimal(playlistID, 20) {
+		return nil, platform.NewNotFoundError("kuwo", "playlist", playlistID)
+	}
+	if c == nil {
+		return nil, platform.NewUnavailableError("kuwo", "playlist", playlistID)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset > math.MaxInt-limit {
+		return nil, platform.NewUnavailableError("kuwo", "playlist", playlistID)
+	}
+
+	page, skip, ok := playlistPageWindow(uint64(offset), limit)
+	if !ok {
+		return nil, platform.NewUnavailableError("kuwo", "playlist", playlistID)
+	}
+
+	first, total, err := c.fetchPlaylistPage(ctx, playlistID, page, limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	firstStart := skip
+	if firstStart > len(first.MusicList) {
+		firstStart = len(first.MusicList)
+	}
+	rawWindow := append([]trackWire(nil), first.MusicList[firstStart:]...)
+
+	pageBase := int64(page-1) * int64(limit)
+	needSecond := false
+	if skip > 0 && int64(total) > pageBase {
+		needSecond = int64(total)-pageBase > int64(limit)
+	}
+	if needSecond {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		second, secondTotal, err := c.fetchPlaylistPage(ctx, playlistID, page+1, limit)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if secondTotal != total {
+			return nil, playlistUnavailable(playlistID, "playlist total changed between pages")
+		}
+		secondCount := skip
+		if secondCount > len(second.MusicList) {
+			secondCount = len(second.MusicList)
+		}
+		rawWindow = append(rawWindow, second.MusicList[:secondCount]...)
+	}
+	if len(rawWindow) > limit {
+		rawWindow = rawWindow[:limit]
+	}
+
+	tracks := make([]platform.Track, 0, len(rawWindow))
+	for _, item := range rawWindow {
+		detail, _, ok := convertTrack(item)
+		if ok {
+			tracks = append(tracks, detail.Track)
+		}
+	}
+
+	return &platform.Playlist{
+		ID:          playlistID,
+		Platform:    "kuwo",
+		Title:       scalarText(first.Name),
+		Description: firstScalarText(first.Desc, first.Info),
+		CoverURL:    firstScalarText(first.Img700, first.Img500, first.Img300, first.Img),
+		Creator:     firstScalarText(first.UserName, first.UName),
+		TrackCount:  total,
+		Tracks:      tracks,
+		URL:         "https://www.kuwo.cn/playlist_detail/" + playlistID,
+	}, nil
+}
+
+func (c *Client) fetchPlaylistPage(
+	ctx context.Context,
+	playlistID string,
+	page, limit int,
+) (*playlistWire, int, error) {
+	if page < 1 || page > maxKuwoPlaylistPage || limit < 1 || limit > 100 {
+		return nil, 0, platform.NewUnavailableError("kuwo", "playlist", playlistID)
+	}
+	endpoint := kuwoPlaylistURL
+	if c != nil && strings.TrimSpace(c.endpoints.playlist) != "" {
+		endpoint = c.endpoints.playlist
+	}
+	requestURL, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, 0, fmt.Errorf("kuwo: parse playlist URL: %w", err)
+	}
+	query := requestURL.Query()
+	query.Set("pid", playlistID)
+	query.Set("pn", strconv.Itoa(page))
+	query.Set("rn", strconv.Itoa(limit))
+	query.Set("httpsStatus", "1")
+	requestURL.RawQuery = query.Encode()
+
+	body, err := c.signedGet(ctx, requestURL.String(), kuwoHomeURL)
+	if err != nil {
+		return nil, 0, err
+	}
+	var response playlistResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, 0, fmt.Errorf("kuwo: decode playlist response: %w", err)
+	}
+	code, ok := playlistResponseCode(response.Code)
+	if ok && code == -1 {
+		return nil, 0, platform.NewNotFoundError("kuwo", "playlist", playlistID)
+	}
+	if !ok || code != 200 || response.Data == nil {
+		return nil, 0, playlistUnavailable(playlistID, "invalid playlist response")
+	}
+	responseID, ok := scalarASCIIUnsignedDecimal(response.Data.ID, 20)
+	if !ok || responseID != playlistID {
+		return nil, 0, playlistUnavailable(playlistID, "playlist identity mismatch")
+	}
+	total, ok := scalarNonNegativeInt(response.Data.Total)
+	if !ok {
+		return nil, 0, playlistUnavailable(playlistID, "invalid playlist total")
+	}
+
+	pageBase := int64(page-1) * int64(limit)
+	remaining := 0
+	if int64(total) > pageBase {
+		difference := int64(total) - pageBase
+		if difference > int64(limit) {
+			remaining = limit
+		} else {
+			remaining = int(difference)
+		}
+	}
+	if len(response.Data.MusicList) != remaining {
+		return nil, 0, playlistUnavailable(
+			playlistID,
+			fmt.Sprintf("playlist page length %d does not match expected %d", len(response.Data.MusicList), remaining),
+		)
+	}
+	return response.Data, total, nil
+}
+
+func isASCIIUnsignedDecimal(value string, maxDigits int) bool {
+	if len(value) == 0 || len(value) > maxDigits {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func playlistPageWindow(offset uint64, limit int) (page, skip int, ok bool) {
+	if limit < 1 || limit > 100 {
+		return 0, 0, false
+	}
+	unsignedLimit := uint64(limit)
+	pageZero := offset / unsignedLimit
+	if pageZero >= uint64(maxKuwoPlaylistPage) {
+		return 0, 0, false
+	}
+	page = int(pageZero) + 1
+	skip = int(offset % unsignedLimit)
+	if skip > 0 && page == maxKuwoPlaylistPage {
+		return 0, 0, false
+	}
+	return page, skip, true
+}
+
+func playlistResponseCode(value jsonScalar) (int64, bool) {
+	decoded, ok := value.value()
+	if !ok {
+		return 0, false
+	}
+	var text string
+	switch decoded := decoded.(type) {
+	case string:
+		text = decoded
+	case json.Number:
+		text = decoded.String()
+	default:
+		return 0, false
+	}
+	switch text {
+	case "-1":
+		return -1, true
+	case "200":
+		return 200, true
+	default:
+		return 0, false
+	}
+}
+
+func scalarASCIIUnsignedDecimal(value jsonScalar, maxDigits int) (string, bool) {
+	decoded, ok := value.value()
+	if !ok {
+		return "", false
+	}
+	var text string
+	switch decoded := decoded.(type) {
+	case string:
+		text = decoded
+	case json.Number:
+		text = decoded.String()
+	default:
+		return "", false
+	}
+	return text, isASCIIUnsignedDecimal(text, maxDigits)
+}
+
+func scalarNonNegativeInt(value jsonScalar) (int, bool) {
+	text, ok := scalarASCIIUnsignedDecimal(value, 20)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseUint(text, 10, 64)
+	if err != nil || parsed > uint64(math.MaxInt) {
+		return 0, false
+	}
+	return int(parsed), true
+}
+
+func firstScalarText(values ...jsonScalar) string {
+	for _, value := range values {
+		if text := scalarText(value); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func playlistUnavailable(playlistID, reason string) error {
+	base := platform.NewUnavailableError("kuwo", "playlist", playlistID)
+	if strings.TrimSpace(reason) == "" {
+		return base
+	}
+	return fmt.Errorf("kuwo: %s: %w", reason, base)
 }
 
 func (c *Client) getTrackDetail(ctx context.Context, trackID string) (*trackDetail, trackAccess, error) {
