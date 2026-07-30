@@ -1,45 +1,45 @@
+//go:build live
+
 package bilibili
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	logpkg "github.com/liuran001/MusicBot-Go/bot/logger"
 )
 
-func getTestClient() *Client {
+// Live end-to-end checks against real Bilibili servers. Run:
+//
+//	go test -tags live ./plugins/bilibili/ -v
+//
+// Requires network and is not part of default test runs. The IDs below are real
+// and can be removed upstream at any time, so a failure here is not necessarily
+// a regression in this package — check the ID still exists first. Offline
+// coverage of request shape and response parsing lives in client_offline_test.go.
+func getLiveTestClient() *Client {
 	logger, _ := logpkg.New("debug", "text", false)
 	return New(logger, "", "", false, 0, nil)
 }
 
-func TestClient_GetAudioSongInfo(t *testing.T) {
-	// Skip in CI, only for local testing
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping Bilibili API call in CI")
-	}
-
-	client := getTestClient()
+func TestLiveGetAudioSongInfo(t *testing.T) {
+	client := getLiveTestClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Testing with a known auid, e.g. au3302094
 	sid := 3302094
 
 	resp, err := client.GetAudioSongInfo(ctx, sid)
 	if err != nil {
 		t.Fatalf("Failed to get audio song info: %v", err)
 	}
-
 	if resp == nil {
 		t.Fatalf("Expected response but got nil")
 	}
-
 	if resp.ID != sid {
 		t.Errorf("Expected sid %d, got %d", sid, resp.ID)
 	}
-
 	if resp.Title == "" {
 		t.Errorf("Expected non-empty title")
 	}
@@ -48,12 +48,8 @@ func TestClient_GetAudioSongInfo(t *testing.T) {
 		resp.ID, resp.Title, resp.Author, resp.Duration)
 }
 
-func TestClient_GetAudioStreamUrl(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping Bilibili API call in CI")
-	}
-
-	client := getTestClient()
+func TestLiveGetAudioStreamUrl(t *testing.T) {
+	client := getLiveTestClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -64,11 +60,9 @@ func TestClient_GetAudioStreamUrl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get stream url: %v", err)
 	}
-
 	if resp == nil {
 		t.Fatalf("Expected response but got nil")
 	}
-
 	if len(resp.Cdns) == 0 {
 		t.Errorf("Expected valid CDN list but got empty")
 	} else {
@@ -76,12 +70,8 @@ func TestClient_GetAudioStreamUrl(t *testing.T) {
 	}
 }
 
-func TestClient_GetVideoInfo(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping Bilibili API call in CI")
-	}
-
-	client := getTestClient()
+func TestLiveGetVideoInfo(t *testing.T) {
+	client := getLiveTestClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -91,11 +81,9 @@ func TestClient_GetVideoInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get video info: %v", err)
 	}
-
 	if resp == nil {
 		t.Fatalf("Expected response but got nil")
 	}
-
 	if resp.Bvid != bvid {
 		t.Errorf("Expected bvid %s, got %s", bvid, resp.Bvid)
 	}
@@ -103,12 +91,8 @@ func TestClient_GetVideoInfo(t *testing.T) {
 	t.Logf("Got Video Info: BVID=%s, CID=%d, Title=%s", resp.Bvid, resp.Cid, resp.Title)
 }
 
-func TestClient_GetVideoPlayUrl(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping Bilibili API call in CI")
-	}
-
-	client := getTestClient()
+func TestLiveGetVideoPlayUrl(t *testing.T) {
+	client := getLiveTestClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -119,7 +103,6 @@ func TestClient_GetVideoPlayUrl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get video play url: %v", err)
 	}
-
 	if len(audioStreams) == 0 {
 		t.Fatalf("Expected audio stream but got none")
 	}
@@ -130,7 +113,6 @@ func TestClient_GetVideoPlayUrl(t *testing.T) {
 			highestAudio = audio
 		}
 	}
-
 	if highestAudio.BaseURL == "" {
 		t.Errorf("Expected non-empty stream URL")
 	}
@@ -138,22 +120,17 @@ func TestClient_GetVideoPlayUrl(t *testing.T) {
 	t.Logf("Got Video Play URL: Bandwidth=%d, URL=%s... (total streams: %d)", highestAudio.Bandwidth, highestAudio.BaseURL[:50], len(audioStreams))
 }
 
-func TestClient_ResolveB23ID(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping Bilibili API call in CI")
-	}
-
-	client := getTestClient()
+func TestLiveResolveB23ID(t *testing.T) {
+	client := getLiveTestClient()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	shortID := "ysjTEMn" // from user's provided link: https://b23.tv/ysjTEMn
+	shortID := "ysjTEMn"
 
 	resolvedID, err := client.ResolveB23ID(ctx, shortID)
 	if err != nil {
 		t.Fatalf("Failed to resolve b23 link: %v", err)
 	}
-
 	if resolvedID == "" {
 		t.Fatalf("Expected resolved ID but got empty string")
 	}
