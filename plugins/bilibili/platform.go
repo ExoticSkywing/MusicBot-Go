@@ -258,7 +258,9 @@ func (b *BilibiliPlatform) Capabilities() platform.Capabilities {
 		Search:      true,
 		Lyrics:      true,
 		Recognition: false,
-		HiRes:       false,
+		// Dash streams carry FLAC (audio id 30251) and Dolby/high-rate audio
+		// (30250 / 30280), which resolve to Hi-Res and lossless respectively.
+		HiRes: true,
 	}
 }
 
