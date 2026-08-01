@@ -19,10 +19,10 @@
 | Spotify | ✓ ³ | ✓ | ✓ | — | — |
 
 ¹ 哔哩哔哩取 Dash 流里的 FLAC / Dolby 音轨（音频 id 30251 / 30250 / 30280），视稿件是否提供。
-² Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
-³ Spotify 下载需要 `sp_dc` 加自备的 Widevine L3 设备文件（仓库不内置），上限 AAC 256k；只配 Web API 时仅提供搜索与元数据。
 
-酷我无需配置账号即可使用公开曲目。实现不信任接口的音质标签，会逐层校验 RID、档位、CDN URL、实际媒体格式、时长、平均码率与最终大小，档位不实或返回试听片段时按请求音质逐级降级，绝不交付错配媒体。
+² Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
+
+³ Spotify 下载需要 `sp_dc` 加自备的 Widevine L3 设备文件（仓库不内置），上限 AAC 256k；只配 Web API 时仅提供搜索与元数据。
 
 ## 快速开始
 
