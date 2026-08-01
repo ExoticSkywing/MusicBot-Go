@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1452,6 +1453,10 @@ func (c *Client) fetchPlaylistSongsV2(ctx context.Context, globalID string) ([]m
 	return songs, choosePositiveInt(total, len(allEntries)), nil
 }
 
+// maxPlaylistAllocHint bounds the initial buffer sized from a caller-supplied
+// pagesize, so an outsized value cannot turn into an outsized allocation.
+const maxPlaylistAllocHint = 1000
+
 func (c *Client) fetchLegacyPlaylistSongs(ctx context.Context, params map[string]string, secret, userAgent string) ([]model.Song, error) {
 	page := 1
 	if rawPage := strings.TrimSpace(params["page"]); rawPage != "" {
@@ -1465,7 +1470,12 @@ func (c *Client) fetchLegacyPlaylistSongs(ctx context.Context, params map[string
 			pageSize = parsed
 		}
 	}
-	allEntries := make([]map[string]any, 0, pageSize)
+	// The request still carries the full pageSize; only the buffer hint is bounded.
+	allocHint := pageSize
+	if allocHint > maxPlaylistAllocHint {
+		allocHint = maxPlaylistAllocHint
+	}
+	allEntries := make([]map[string]any, 0, allocHint)
 	seenPageKeys := make(map[string]struct{})
 	for {
 		query := url.Values{}
@@ -2551,8 +2561,18 @@ func parseKugouInt64(value any) int64 {
 	return 0
 }
 
+// parseKugouInt narrows an upstream numeric field to int. Values come from a
+// remote JSON payload, so on 32-bit builds an unchecked conversion would wrap;
+// clamp instead of truncating.
 func parseKugouInt(value any) int {
-	return int(parseKugouInt64(value))
+	parsed := parseKugouInt64(value)
+	if parsed > int64(math.MaxInt) {
+		return math.MaxInt
+	}
+	if parsed < int64(math.MinInt) {
+		return math.MinInt
+	}
+	return int(parsed)
 }
 
 func formatAnyIDList(value any) string {
