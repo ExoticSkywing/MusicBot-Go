@@ -66,7 +66,7 @@ MusicBot-Go 使用基于接口的插件系统，允许轻松扩展对不同音�
 ### 最小可行插件
 
 ```go
-package spotify
+package examplemusic
 
 import (
     "context"
@@ -75,50 +75,50 @@ import (
     "github.com/liuran001/MusicBot-Go/bot/platform"
 )
 
-type SpotifyPlatform struct{}
+type ExampleMusicPlatform struct{}
 
-func (p *SpotifyPlatform) Name() string {
-    return "spotify"
+func (p *ExampleMusicPlatform) Name() string {
+    return "examplemusic"
 }
 
-func (p *SpotifyPlatform) SupportsDownload() bool    { return false }
-func (p *SpotifyPlatform) SupportsSearch() bool      { return false }
-func (p *SpotifyPlatform) SupportsLyrics() bool      { return false }
-func (p *SpotifyPlatform) SupportsRecognition() bool { return false }
+func (p *ExampleMusicPlatform) SupportsDownload() bool    { return false }
+func (p *ExampleMusicPlatform) SupportsSearch() bool      { return false }
+func (p *ExampleMusicPlatform) SupportsLyrics() bool      { return false }
+func (p *ExampleMusicPlatform) SupportsRecognition() bool { return false }
 
-func (p *SpotifyPlatform) Capabilities() platform.Capabilities {
+func (p *ExampleMusicPlatform) Capabilities() platform.Capabilities {
     return platform.Capabilities{}
 }
 
-func (p *SpotifyPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
+func (p *ExampleMusicPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
+func (p *ExampleMusicPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetLyrics(ctx context.Context, trackID string) (*platform.Lyrics, error) {
+func (p *ExampleMusicPlatform) GetLyrics(ctx context.Context, trackID string) (*platform.Lyrics, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) RecognizeAudio(ctx context.Context, audioData io.Reader) (*platform.Track, error) {
+func (p *ExampleMusicPlatform) RecognizeAudio(ctx context.Context, audioData io.Reader) (*platform.Track, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetTrack(ctx context.Context, trackID string) (*platform.Track, error) {
+func (p *ExampleMusicPlatform) GetTrack(ctx context.Context, trackID string) (*platform.Track, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
+func (p *ExampleMusicPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
+func (p *ExampleMusicPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
+func (p *ExampleMusicPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
     return nil, platform.ErrUnsupported
 }
 
@@ -136,7 +136,7 @@ func (p *SpotifyPlatform) GetPlaylist(ctx context.Context, playlistID string) (*
 #### 必需方法
 
 **Name() string**
-- 返回平台唯一标识符 (小写，如 "spotify", "qqmusic")。
+- 返回平台唯一标识符 (小写，如 "netease", "qqmusic")。
 - 用于 URL 路由、缓存键和日志。
 
 **能力检查方法**
@@ -193,13 +193,14 @@ type AutoParseDecider interface {
 
 ---
 
-## 实现示例: Spotify 插件
+## 实现示例: 一个完整插件
 
-以下是一个简化的 Spotify 插件实现示例。
+以下用虚构的 `examplemusic` 平台演示一个完整插件。真实插件可参考 `plugins/kuwo/`（多档位校验）
+或 `plugins/soda/`（结构最简）。
 
 ### 文件结构
 ```
-plugins/spotify/
+plugins/examplemusic/
 ├── platform.go    # 主实现
 ├── matcher.go     # URL 匹配
 ├── types.go       # 类型转换辅助
@@ -210,7 +211,7 @@ plugins/spotify/
 ### platform.go
 
 ```go
-package spotify
+package examplemusic
 
 import (
     "context"
@@ -218,84 +219,83 @@ import (
     "fmt"
     
     "github.com/liuran001/MusicBot-Go/bot/platform"
-    "github.com/zmb3/spotify/v2"
 )
 
-type SpotifyPlatform struct {
-    client *spotify.Client
+type ExampleMusicPlatform struct {
+    client *Client
 }
 
-func New(client *spotify.Client) *SpotifyPlatform {
-    return &SpotifyPlatform{client: client}
+func New(client *Client) *ExampleMusicPlatform {
+    return &ExampleMusicPlatform{client: client}
 }
 
-func (p *SpotifyPlatform) Name() string {
-    return "spotify"
+func (p *ExampleMusicPlatform) Name() string {
+    return "examplemusic"
 }
 
-func (p *SpotifyPlatform) SupportsDownload() bool {
-    return false // Spotify API 不支持直接下载音频流
+func (p *ExampleMusicPlatform) SupportsDownload() bool {
+    return false // 该平台只提供元数据，不支持直接下载音频流
 }
 
-func (p *SpotifyPlatform) SupportsSearch() bool {
+func (p *ExampleMusicPlatform) SupportsSearch() bool {
     return true
 }
 
-func (p *SpotifyPlatform) SupportsLyrics() bool {
+func (p *ExampleMusicPlatform) SupportsLyrics() bool {
     return false
 }
 
-func (p *SpotifyPlatform) SupportsRecognition() bool {
+func (p *ExampleMusicPlatform) SupportsRecognition() bool {
     return false
 }
 
-func (p *SpotifyPlatform) Capabilities() platform.Capabilities {
+func (p *ExampleMusicPlatform) Capabilities() platform.Capabilities {
     return platform.Capabilities{Search: true}
 }
 
-func (p *SpotifyPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
+func (p *ExampleMusicPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
-    results, err := p.client.Search(ctx, query, spotify.SearchTypeTrack, spotify.Limit(limit))
+func (p *ExampleMusicPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {
+    results, err := p.client.SearchTracks(ctx, query, limit)
     if err != nil {
-        return nil, fmt.Errorf("spotify search: %w", err)
+        return nil, fmt.Errorf("examplemusic search: %w", err)
     }
     
     var tracks []platform.Track
-    for _, item := range results.Tracks.Tracks {
-        tracks = append(tracks, p.convertTrack(&item))
+    for i := range results {
+        tracks = append(tracks, p.convertTrack(&results[i]))
     }
     return tracks, nil
 }
 
-func (p *SpotifyPlatform) GetTrack(ctx context.Context, trackID string) (*platform.Track, error) {
-    track, err := p.client.GetTrack(ctx, spotify.ID(trackID))
+func (p *ExampleMusicPlatform) GetTrack(ctx context.Context, trackID string) (*platform.Track, error) {
+    track, err := p.client.GetTrack(ctx, trackID)
     if err != nil {
-        return nil, platform.NewNotFoundError("spotify", "track", trackID)
+        return nil, platform.NewNotFoundError("examplemusic", "track", trackID)
     }
     res := p.convertTrack(track)
     return &res, nil
 }
 
-func (p *SpotifyPlatform) GetLyrics(ctx context.Context, trackID string) (*platform.Lyrics, error) {
+func (p *ExampleMusicPlatform) GetLyrics(ctx context.Context, trackID string) (*platform.Lyrics, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) RecognizeAudio(ctx context.Context, audioData io.Reader) (*platform.Track, error) {
+func (p *ExampleMusicPlatform) RecognizeAudio(ctx context.Context, audioData io.Reader) (*platform.Track, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
+func (p *ExampleMusicPlatform) GetArtist(ctx context.Context, artistID string) (*platform.Artist, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
+func (p *ExampleMusicPlatform) GetAlbum(ctx context.Context, albumID string) (*platform.Album, error) {
     return nil, platform.ErrUnsupported
 }
 
-func (p *SpotifyPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
+func (p *ExampleMusicPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
     return nil, platform.ErrUnsupported
 }
 
@@ -305,23 +305,23 @@ func (p *SpotifyPlatform) GetPlaylist(ctx context.Context, playlistID string) (*
 ### 类型转换 (types.go)
 
 ```go
-func (p *SpotifyPlatform) convertTrack(st *spotify.FullTrack) platform.Track {
+func (p *ExampleMusicPlatform) convertTrack(st *apiTrack) platform.Track {
     artists := make([]platform.Artist, len(st.Artists))
     for i, a := range st.Artists {
         artists[i] = platform.Artist{
-            ID:       string(a.ID),
+            ID:       a.ID,
             Name:     a.Name,
-            Platform: "spotify",
+            Platform: "examplemusic",
         }
     }
-    
+
     return platform.Track{
-        ID:       string(st.ID),
-        Platform: "spotify",
+        ID:       st.ID,
+        Platform: "examplemusic",
         Title:    st.Name,
         Artists:  artists,
-        Duration: st.TimeDuration(),
-        CoverURL: st.Album.Images[0].URL,
+        Duration: time.Duration(st.DurationMS) * time.Millisecond,
+        CoverURL: st.CoverURL,
     }
 }
 ```
@@ -335,7 +335,7 @@ func (p *SpotifyPlatform) convertTrack(st *spotify.FullTrack) platform.Track {
 ### matcher.go
 
 ```go
-package spotify
+package examplemusic
 
 import (
     "net/url"
@@ -350,8 +350,8 @@ func (m *URLMatcher) MatchURL(rawURL string) (string, bool) {
         return "", false
     }
     
-    // 匹配 open.spotify.com/track/xxx
-    if !strings.Contains(u.Host, "spotify.com") {
+    // 匹配 music.example.com/track/xxx
+    if !strings.Contains(u.Host, "music.example.com") {
         return "", false
     }
     
@@ -367,7 +367,7 @@ func (m *URLMatcher) MatchURL(rawURL string) (string, bool) {
 ### TextMatcher (可选)
 
 ```go
-func (p *SpotifyPlatform) MatchText(text string) (string, bool) {
+func (p *ExampleMusicPlatform) MatchText(text string) (string, bool) {
     // 解析短链或纯 ID，返回 trackID
     return "", false
 }
@@ -377,7 +377,7 @@ func (p *SpotifyPlatform) MatchText(text string) (string, bool) {
 
 ```go
 // 在 platform.go 中
-func (p *SpotifyPlatform) MatchURL(url string) (string, bool) {
+func (p *ExampleMusicPlatform) MatchURL(url string) (string, bool) {
     return (&URLMatcher{}).MatchURL(url)
 }
 ```
@@ -414,7 +414,7 @@ func TestURLMatcher(t *testing.T) {
         wantID string
         ok     bool
     }{
-        {"https://open.spotify.com/track/4cOdK2wG6ZIB9s99v9p9p9", "4cOdK2wG6ZIB9s99v9p9p9", true},
+        {"https://music.example.com/track/abc123", "abc123", true},
         {"https://music.163.com/song?id=123", "", false},
     }
     
@@ -436,8 +436,8 @@ func TestURLMatcher(t *testing.T) {
 在插件包内注册工厂，并在 `plugins/all` 中添加空白导入。示例：
 
 ```go
-// plugins/spotify/register.go
-package spotify
+// plugins/examplemusic/register.go
+package examplemusic
 
 import (
     "github.com/liuran001/MusicBot-Go/bot/config"
@@ -446,13 +446,13 @@ import (
 )
 
 func init() {
-    if err := platformplugins.Register("spotify", buildContribution); err != nil {
+    if err := platformplugins.Register("examplemusic", buildContribution); err != nil {
         panic(err)
     }
 }
 
 func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplugins.Contribution, error) {
-    client := NewClient(cfg.GetString("SPOTIFY_ID"), cfg.GetString("SPOTIFY_SECRET"))
+    client := NewClient(cfg.GetPluginString("examplemusic", "api_key"))
     platform := NewPlatform(client)
     return &platformplugins.Contribution{Platform: platform}, nil
 }
@@ -465,13 +465,18 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 package all
 
 import (
-    _ "github.com/liuran001/MusicBot-Go/plugins/spotify"
+    _ "github.com/liuran001/MusicBot-Go/plugins/examplemusic"
 )
 ```
 
 ### 2. 添加配置
 
-在 `config.ini` 中添加插件所需的配置项，并在 `bot/config/config.go` 中确保它们能被正确读取。
+`[plugins.<name>]` 段是自动解析的，不需要改动 `bot/config/`。在 `config_example.ini`
+里补上带注释的配置项，插件用 `cfg.GetPluginString/GetPluginInt/GetPluginBool(
+"<name>", "<key>")` 读取即可。约定项：`enabled`（是否启用）、`timeout`（秒）、
+`api_proxy_*`（平台级 API 代理，用 `cfg.ResolveAPIProxyConfig("<name>")` 取）。
+
+需要在运行时回写配置（如 Cookie 自动续期）时用 `cfg.PersistPluginConfig("<name>", pairs)`。
 
 ---
 

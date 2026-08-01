@@ -11,11 +11,17 @@ MusicBot-Go/
 ├── main.go                      # 应用程序入口
 ├── bot/                         # 核心代码
 │   ├── app/                     # 应用初始化和依赖注入
+│   ├── admincmd/                # 管理员命令框架
 │   ├── config/                  # 配置管理 (Viper + INI)
 │   ├── db/                      # 数据库层 (SQLite/GORM)
 │   │   ├── models.go            # 数据模型定义
 │   │   └── repository.go        # 数据访问接口实现
+│   ├── download/                # 下载服务 (多线程分片、完整性校验、并发去重)
+│   ├── httpproxy/               # HTTP 代理与重试传输
+│   ├── i18n/                    # 多语言本地化 (zh/en/ja/ru，TOML 分片)
+│   ├── id3/                     # 音频标签写入
 │   ├── logger/                  # 日志系统 (slog)
+│   ├── lyric/                   # 歌词格式转换 (lrc/qrc/krc/yrc/ttml/ass/srt 等)
 │   ├── dynplugin/               # 动态脚本插件加载 (yaegi)
 │   ├── platform/                # 平台抽象层
 │   │   ├── interface.go         # Platform 核心接口定义
@@ -36,18 +42,22 @@ MusicBot-Go/
 │   │       ├── recognize.go     # 语音识曲
 │   │       └── router.go        # 路由注册
 │   ├── worker/                  # 并发工作池
-│   ├── updater/                 # 动态更新抽象 (未来扩展)
+│   ├── updater/                 # 配置与脚本插件热重载
+│   ├── util/                    # 通用工具
 │   ├── interfaces.go            # 全局接口定义
 │   └── types.go                 # 全局类型定义
 └── plugins/                     # 平台插件
     ├── all/                     # 插件聚合 (空白导入，决定编译进哪些平台)
     ├── scripts/                 # 动态脚本插件 (PluginScriptDir, yaegi 解释执行)
-    ├── netease/                 # 网易云音乐（含 recognize/ 识曲 Node.js 服务）
+    ├── netease/                 # 网易云音乐（含 recognize/ 纯 Go 识曲，wazero + afp.wasm）
     ├── qqmusic/                 # QQ 音乐
     ├── kugou/                   # 酷狗音乐（含概念版扫码登录）
+    ├── kuwo/                    # 酷我音乐（多档位实测校验）
     ├── soda/                    # 汽水音乐
-    ├── bilibili/                # 哔哩哔哩
-    └── applemusic/              # Apple Music（Widevine 原生解密 + 可选 FairPlay wrapper）
+    ├── bilibili/                # 哔哩哔哩（Dash FLAC / Dolby）
+    ├── applemusic/              # Apple Music（Widevine 原生解密 + 可选 FairPlay wrapper）
+    ├── youtubemusic/            # YouTube Music（InnerTube）
+    └── spotify/                 # Spotify（元数据 + 原生 Widevine 下载）
 
 每个平台插件目录的典型结构：`client.go`（API 客户端）、`platform.go`（Platform
 接口实现）、`matcher.go` / `textmatcher.go`（URL / 短链 / 平台特定文本识别）、
@@ -69,7 +79,8 @@ main.go
              ├─> 加载动态脚本插件 (PluginScriptDir)
              ├─> 创建 Telegram Bot
              ├─> 注册命令处理器
-             ├─> 启动识曲服务 (Node.js)
+             ├─> 按语言注册命令菜单与 Bot 简介 (SetMyCommands)
+             ├─> 初始化识曲运行时 (wazero 加载内嵌 afp.wasm)
              └─> 启动 Bot 轮询
 ```
 
@@ -159,6 +170,23 @@ type Platform interface {
 - 平台切换和回退
 - 统一错误处理
 
+### 下载服务 (`bot/download/`)
+
+`DownloadService.Download()` 是所有平台落盘音频的统一入口：
+
+- **多线程分片**：文件超过 `MultipartMinSize` 且源支持 Range 时并发分片下载，
+  否则回退单线程。声明了 `MaxChunkSize` 的源（如 googlevideo）强制走受限大小的
+  Range 分片，不做无 Range 的回退。
+- **并发去重**：同一 URL 的并发请求由 inflight 表合并成一次下载，其余调用方复用
+  结果（硬链接或拷贝）。
+- **完整性校验**：默认要求落盘字节数与平台声明的 `DownloadInfo.Size` **完全相等**，
+  防止 CDN 掉包成其他内容。个别平台的 size 元数据本身不准（QQ 音乐部分 FLAC 少报
+  15 字节），这类平台在 `DownloadInfo` 上置 `SizeIsAdvisory`，此时只有**短于**声明
+  值才算失败，实际长度取服务器返回值。分片内部的 Range 边界由我们自己计算，
+  始终精确校验，不受该开关影响。
+- **失败语义**：完整性错误不重试（重试只会拿到同样的字节），网络类错误按指数退避
+  重试 `MaxRetries` 次。
+
 ### 数据层 (`bot/db/`)
 
 **核心接口**: `SongRepository`（由 `bot/db/Repository` 实现）
@@ -201,12 +229,17 @@ type SongRepository interface {
 - `SearchHandler`: 搜索功能 (使用用户默认平台)
 - `PlaylistHandler`: 专辑/歌单分页选择
 - `ArtistHandler`: 艺术家作品集
-- `LyricHandler`: 歌词获取
-- `SettingsHandler`: 用户/群聊设置 (平台/音质偏好)
+- `LyricHandler`: 歌词获取与格式切换
+- `FavoritesHandler`: 收藏列表（`/fav`）
+- `SettingsHandler`: 用户/群聊设置 (平台/音质/歌词格式偏好)
 - `RecognizeHandler`: 语音识曲（需 `EnableRecognize`）
 - `StatusHandler`: 状态与账号查询
-- `InlineHandler`: Inline 模式查询
+- `CancelHandler`: 取消自己正在进行的下载与发送
+- `InlineSearchHandler` / `GuestModeHandler`: Inline 模式与访客模式查询
 - 管理类：账号登录 (`/login`)、`/reload`、`/rmcache`、`/wl` 白名单
+
+配套的 `*CallbackHandler`（Playlist / Lyric / Favorite / DownloadQueue /
+InlineCollection 等）处理对应的按钮回调。
 
 **设计特点**:
 - 每个处理器独立，职责单一
@@ -231,8 +264,9 @@ type SongRepository interface {
 ## 用户设置系统
 
 ### 功能
-- 用户可设置默认音乐平台 (未来多平台时生效)
+- 用户可设置默认音乐平台
 - 用户可设置默认音质 (standard/high/lossless/hires)
+- 用户可设置歌词格式 (lrc/qrc/krc/yrc/ttml 等逐字与逐行格式)
 - 群聊可设置默认平台/音质（群聊优先级高于用户设置）
 
 ### 集成点
@@ -302,7 +336,9 @@ CREATE TABLE group_settings (
 1. 在 `bot/telegram/handler/` 创建新处理器
 2. 实现处理逻辑
 3. 在 `router.go` 注册命令
-4. (可选) 在 `app.go` 的 `SetMyCommands()` 添加命令描述
+4. (可选) 在 `app.go` 的 `botCommandSpecs` 添加命令与描述键，使其进入 Telegram 命令菜单
+
+用户可见文本一律走 i18n catalog，约定见 [`bot/i18n/README.md`](bot/i18n/README.md)。
 
 ## 技术栈
 
@@ -311,8 +347,13 @@ CREATE TABLE group_settings (
 - **数据库**: SQLite (github.com/glebarez/sqlite + GORM)
 - **配置**: Viper + INI
 - **日志**: slog
+- **本地化**: github.com/nicksnyder/go-i18n（TOML 分片，zh/en/ja/ru）
 - **HTTP 客户端**: hashicorp/go-retryablehttp
 - **熔断器**: sony/gobreaker
+- **动态插件**: github.com/traefik/yaegi（解释执行脚本插件）
+- **WASM 运行时**: wazero + wazero-emscripten-embind（识曲指纹，纯 Go 无需 Node.js）
+- **DRM**: github.com/iyear/gowidevine（Apple Music / Spotify 的 Widevine 解密）
+- **音频处理**: Eyevinn/mp4ff、mewkiz/flac、go-flac、go.senan.xyz/taglib
 - **网易云 API**: 网易云私有 EAPI 实现位于 `plugins/netease`
 
 ## 注意事项

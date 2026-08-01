@@ -11,14 +11,18 @@
 | 网易云音乐 | ✓ | ✓ | ✓ | ✓ | ✓ |
 | QQ 音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 酷狗音乐 | ✓ | ✓ | ✓ | ✓ | — |
-| 酷我 | ✓ | ✓ | ✓ | Hi-Res / 无损 | — |
+| 酷我音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 汽水音乐 | ✓ | ✓ | ✓ | ✓ | — |
-| 哔哩哔哩 | ✓ | ✓ | ✓ | — | — |
-| Apple Music | ✓ | ✓ | ✓ | ✓ ¹ | — |
+| 哔哩哔哩 | ✓ | ✓ | ✓ | ✓ ¹ | — |
+| Apple Music | ✓ | ✓ | ✓ | ✓ ² | — |
+| YouTube Music | ✓ | ✓ | ✓ | — | — |
+| Spotify | ✓ ³ | ✓ | ✓ | — | — |
 
-¹ Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
+¹ 哔哩哔哩取 Dash 流里的 FLAC / Dolby 音轨（音频 id 30251 / 30250 / 30280），视稿件是否提供。
+² Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
+³ Spotify 下载需要 `sp_dc` 加自备的 Widevine L3 设备文件（仓库不内置），上限 AAC 256k；只配 Web API 时仅提供搜索与元数据。
 
-酷我无需配置账号即可使用公开曲目。无损先请求官方 `2000kflac`，再尝试独立的 `level=lossless` 流；Hi-Res 依次尝试独立的 `4000kflac` / `level=hires`、官方 `2000kflac` 和独立 `level=lossless` 流；高品质优先使用独立 `level=exhigh` 的 320 kbps MP3，再尝试官方移动流。标准音质继续使用经验证的 128 kbps MP3 / Web MP3。所有路径都不会请求 `jymaster` / `20900kmflac` 超分母带。实现不相信接口质量标签，而会校验 RID、解析档位、CDN URL、Range 长度、实际媒体格式、时长、平均码率和最终大小：`2000kflac` / `level=lossless` 只接受双声道 44.1/48 kHz，16-bit 报告为无损、24-bit 报告为 Hi-Res，并拒绝更高采样率或位深；独立 Hi-Res 流必须实际达到对应档位；独立高品质流必须实际是 256–384 kbps 的 MP3。若 CDN 在完整 FLAC 后附加变长厂商尾数据，下载器只把其信封当作候选边界，并通过末帧 CRC、样本终点、全流逐帧解码、连续性、总样本数和 PCM MD5 证明音频完整后才截除并原子落盘。解析不可用时按请求档位逐级降级到经实际码率验证的较低音质；可选解析器或移动候选返回其他 RID 时会丢弃该候选，再从原始已验证 RID 继续独立链路，错配媒体绝不会交付。明确的付费或试听限制信号（`isListenFee`、`cannotOnlinePlay`、`listen_fragment`）、身份缺失或明显短时长媒体会立即拒绝，不能降级成 MP3。上述校验证明取得媒体的容器、PCM 内容和传输完整性符合预期，不证明录音母带来源。
+酷我无需配置账号即可使用公开曲目。实现不信任接口的音质标签，会逐层校验 RID、档位、CDN URL、实际媒体格式、时长、平均码率与最终大小，档位不实或返回试听片段时按请求音质逐级降级，绝不交付错配媒体。
 
 ## 快速开始
 
@@ -78,7 +82,13 @@ cookie = YOUR_QQMUSIC_COOKIE       # 高音质 / Hi-Res 需要
 
 [plugins.applemusic]
 media_user_token = YOUR_TOKEN      # 登录 music.apple.com 后从浏览器 Cookie 复制
+
+[plugins.spotify]
+sp_dc    = YOUR_SP_DC_COOKIE       # 下载需要；另需自备 .wvd（见下方注释）
+wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 ```
+
+酷我、汽水、哔哩哔哩和 YouTube Music 匿名即可使用；YouTube Music 配置 Cookie 可解锁 256k 并降低限流概率。
 
 完整选项（并发、缓存、限流、代理、日志、各平台细节等）见 `config_example.ini` 的注释，每一项都有说明。
 
@@ -93,13 +103,15 @@ media_user_token = YOUR_TOKEN      # 登录 music.apple.com 后从浏览器 Cook
 | `/music <URL 或关键词>` | 下载音乐；直接发音乐链接也会自动识别下载 |
 | `/search <关键词>` | 搜索并选择下载 |
 | `/lyric <URL>` | 获取歌词 |
+| `/fav` | 收藏歌曲 / 查看收藏列表 |
 | `/recognize` | 回复一条语音消息识别歌曲（需 `EnableRecognize`） |
-| `/settings` | 设置默认平台与音质（支持私聊 / 群聊维度） |
+| `/settings` | 默认平台、音质与歌词格式（支持私聊 / 群聊维度） |
 | `/status` | 查看统计与各平台账号状态 |
 | `/queue` | 查看当前下载、发送和 Telegram API 队列 |
+| `/cancel` | 取消自己正在进行的下载与发送 |
 | `/about` · `/help` | 关于 / 帮助 |
 
-也支持 Inline 模式（`@bot 关键词`）和直接粘贴链接。
+也支持 Inline 模式（`@bot 关键词`）和直接粘贴链接。命令菜单、帮助文本和 Bot 简介按客户端语言本地化，内置简体中文、English、日本語、Русский，可用 `[bot_profile.<lang>]` 段覆盖名称与简介。
 
 **管理员命令**（需在 `BotAdmin` 中）
 

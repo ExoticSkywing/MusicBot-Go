@@ -69,8 +69,11 @@ func GetPlaylist(platform, id string) (map[string]interface{}, error)
 
 返回结构需与 `bot/platform/types.go` 的 JSON 字段一致，例如：
 - `Track`: `id`, `platform`, `title`, `artists`, `album`, `duration`, `cover_url`, `url`
-- `DownloadInfo`: `url`, `format`, `bitrate`, `quality`, `headers`
+- `DownloadInfo`: `url`, `size`, `format`, `bitrate`, `quality`, `headers`
 - `Lyrics`: `plain`
+
+`DownloadInfo.size` 会被下载器当作精确校验值：落盘字节数与它不符即判为完整性失败。
+平台元数据不准时置 `size_is_advisory: true`，此时只有短于该值才算失败。填 0 表示未知。
 
 ## 错误返回
 可返回带 `Code() string` 方法的 error，Code 取值：
