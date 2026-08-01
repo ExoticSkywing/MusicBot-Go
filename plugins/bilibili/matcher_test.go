@@ -26,6 +26,23 @@ func TestURLMatcher_MatchURL(t *testing.T) {
 			wantMatch: true,
 		},
 		{
+			// bilibili.com appearing in another host's path must not be read as
+			// a bilibili link.
+			name:      "Foreign host with bilibili.com in path",
+			url:       "https://evil.example/bilibili.com/audio/au123456",
+			wantMatch: false,
+		},
+		{
+			name:      "Host merely ending in bilibili.com lookalike",
+			url:       "https://notbilibili.com/audio/au123456",
+			wantMatch: false,
+		},
+		{
+			name:      "Foreign host with b23.tv in path",
+			url:       "https://evil.example/b23.tv/ysjTEMn",
+			wantMatch: false,
+		},
+		{
 			name:      "Valid standard BV Video URL",
 			url:       "https://www.bilibili.com/video/BV1GJ411x7h7",
 			wantId:    "BV1GJ411x7h7",

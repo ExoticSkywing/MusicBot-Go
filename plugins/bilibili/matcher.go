@@ -74,9 +74,13 @@ func (m *URLMatcher) extractPage(raw string) int {
 }
 
 var (
-	bilibiliAudioPattern = regexp.MustCompile(`bilibili\.com/audio/au(\d+)`)
+	// The host-bearing patterns require bilibili.com / b23.tv to start the string,
+	// follow a scheme separator, or follow a dot (subdomain). Without that guard
+	// they also match the host appearing inside another site's path, e.g.
+	// https://evil.example/bilibili.com/audio/au1.
+	bilibiliAudioPattern = regexp.MustCompile(`(?:^|//|\.)bilibili\.com/audio/au(\d+)`)
 	bilibiliVideoPattern = regexp.MustCompile(`(?i)(BV[a-z0-9]{10}|av\d+)`)
-	bilibiliB23Pattern   = regexp.MustCompile(`(?i)b23\.tv/([a-z0-9]+)`)
+	bilibiliB23Pattern   = regexp.MustCompile(`(?i)(?:^|//|\.)b23\.tv/([a-z0-9]+)`)
 	bilibiliPagePattern  = regexp.MustCompile(`(?i)[?&]p=(\d+)`)
 
 	textAudioPattern = regexp.MustCompile(`(?i)^au(\d+)$`)
