@@ -144,6 +144,10 @@ func (q *QQMusicPlatform) GetDownloadInfo(ctx context.Context, trackID string, q
 			Format:  selected.Ext,
 			Bitrate: selected.Quality.Bitrate(),
 			Quality: selected.Quality,
+			// The size_* fields undercount some files: several FLAC releases are
+			// served with 15 trailing bytes the metadata never included, so an
+			// exact-size check would reject a perfectly playable download.
+			SizeIsAdvisory: true,
 		}, nil
 	}
 	return nil, platform.NewUnavailableError("qqmusic", "track", trackID)

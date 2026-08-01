@@ -177,8 +177,11 @@ func (md *MultipartDownloader) Download(ctx context.Context, rawURL string, info
 	if err != nil {
 		return md.downloadSingle(ctx, rawURL, info, destPath, info.Size, progress)
 	}
-	if info.Size > 0 && contentLength > 0 && contentLength != info.Size {
-		return 0, fmt.Errorf("%w: download content length mismatch: got %d bytes, expected %d", errDownloadIntegrity, contentLength, info.Size)
+	// The declared size is an exact contract unless the platform marked it
+	// advisory, in which case only a shorter body is a truncated transfer and the
+	// served length wins from here on.
+	if contentLength > 0 && violatesDeclaredSize(info, contentLength) {
+		return 0, declaredSizeError(info, contentLength, "download content length")
 	}
 
 	totalSize := contentLength
@@ -255,7 +258,7 @@ func (md *MultipartDownloader) downloadSingle(ctx context.Context, rawURL string
 			if readErr == io.EOF {
 				break
 			}
-			return written, wrapDownloadIntegrityReadError(readErr, written, expectedTotal, "download body")
+			return written, wrapDownloadIntegrityReadError(readErr, written, expectedTotal, "download body", info.SizeIsAdvisory)
 		}
 	}
 
@@ -488,7 +491,9 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 			if err == io.EOF {
 				break
 			}
-			return wrapDownloadIntegrityReadError(err, written, expectedSize, "range body")
+			// Range boundaries are computed by us, so a part is always an exact
+			// contract regardless of how the platform declares the total size.
+			return wrapDownloadIntegrityReadError(err, written, expectedSize, "range body", false)
 		}
 	}
 	extra, err := io.ReadAll(io.LimitReader(resp.Body, 1))

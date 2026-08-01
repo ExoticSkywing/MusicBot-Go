@@ -209,6 +209,16 @@ type DownloadInfo struct {
 	// must always issue bounded Range chunks of at most this size and never
 	// fall back to an unbounded GET.
 	MaxChunkSize int64 `json:"max_chunk_size,omitempty"`
+
+	// SizeIsAdvisory marks Size as a best-effort hint rather than an exact
+	// contract. By default the downloader requires the transferred bytes to
+	// match Size exactly, which keeps a CDN from swapping in different content
+	// than the platform described. A few platforms report a size that is simply
+	// wrong: QQ music understates some FLAC files by 15 bytes because its
+	// size_flac field omits trailing bytes the CDN still serves. For those, only
+	// a *short* transfer is an integrity failure; extra bytes are accepted and
+	// the served length wins.
+	SizeIsAdvisory bool `json:"size_is_advisory,omitempty"`
 }
 
 type DownloadFunc func(ctx context.Context, info *DownloadInfo, destPath string, progress func(written, total int64)) (written int64, err error)

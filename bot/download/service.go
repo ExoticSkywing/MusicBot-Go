@@ -202,8 +202,39 @@ func downloadOwnsHeader(ctx context.Context, header string) bool {
 	return ok
 }
 
-func wrapDownloadIntegrityReadError(err error, written, expected int64, subject string) error {
-	if err == nil || expected <= 0 || written == expected ||
+// violatesDeclaredSize reports whether a transferred byte count contradicts the
+// platform's declared size. The declared size is treated as an exact contract
+// unless the platform marked it advisory, in which case only a short transfer
+// counts — see platform.DownloadInfo.SizeIsAdvisory.
+func violatesDeclaredSize(info *platform.DownloadInfo, actual int64) bool {
+	if info == nil || info.Size <= 0 || actual < 0 {
+		return false
+	}
+	if info.SizeIsAdvisory {
+		return actual < info.Size
+	}
+	return actual != info.Size
+}
+
+// declaredSizeError describes a size violation using wording that matches how
+// the declared size is enforced for this source.
+func declaredSizeError(info *platform.DownloadInfo, actual int64, subject string) error {
+	if info != nil && info.SizeIsAdvisory {
+		return fmt.Errorf("%w: %s too small: got %d bytes, expected at least %d", errDownloadIntegrity, subject, actual, info.Size)
+	}
+	return fmt.Errorf("%w: %s mismatch: got %d bytes, expected %d", errDownloadIntegrity, subject, actual, info.Size)
+}
+
+// wrapDownloadIntegrityReadError marks a mid-transfer read failure as an
+// integrity problem only when the transfer fell short of what was expected.
+// When the expectation is advisory, reading at or past it means the platform
+// understated the file rather than that the transfer was truncated.
+func wrapDownloadIntegrityReadError(err error, written, expected int64, subject string, advisory bool) error {
+	satisfied := written == expected
+	if advisory {
+		satisfied = written >= expected
+	}
+	if err == nil || expected <= 0 || satisfied ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -325,6 +356,7 @@ func (s *DownloadService) Download(ctx context.Context, info *platform.DownloadI
 		infoCopy.Headers = policy.headers
 		written, err := s.downloadToPath(ctx, &infoCopy, destPath, progress)
 		if err == nil {
+			reconcileAdvisorySize(&infoCopy, written)
 			copyDownloadMetadata(info, &infoCopy)
 		}
 		return written, err
@@ -352,6 +384,9 @@ func (s *DownloadService) Download(ctx context.Context, info *platform.DownloadI
 
 		infoCopy := *info
 		written, err := s.downloadToPath(ctx, &infoCopy, call.temp, progress)
+		if err == nil {
+			reconcileAdvisorySize(&infoCopy, written)
+		}
 		call.written = written
 		call.err = err
 		call.size = infoCopy.Size
@@ -480,9 +515,9 @@ func (s *DownloadService) downloadToPath(ctx context.Context, info *platform.Dow
 		for attempt := 0; attempt < s.maxRetries; attempt++ {
 			written, err := s.downloadOnce(ctx, baseURL, info, destPath, progress)
 			if err == nil {
-				if info.Size > 0 && written != info.Size {
+				if violatesDeclaredSize(info, written) {
 					_ = os.Remove(destPath)
-					return 0, fmt.Errorf("%w: download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, info.Size)
+					return 0, declaredSizeError(info, written, "download size")
 				}
 				if s.checkMD5 && info.MD5 != "" {
 					if ok, err := util.VerifyMD5(destPath, info.MD5); err != nil || !ok {
@@ -533,6 +568,16 @@ func immutableDownloadPolicy(info *platform.DownloadInfo) downloadPolicy {
 		}
 	}
 	return policy
+}
+
+// reconcileAdvisorySize aligns an advisory declared size with what was actually
+// transferred. Callers use Size for the upload and the cache record, so once a
+// platform's understated size has been accepted it must be corrected to the
+// real byte count rather than left describing a shorter file than exists.
+func reconcileAdvisorySize(info *platform.DownloadInfo, written int64) {
+	if info != nil && info.SizeIsAdvisory && written > info.Size {
+		info.Size = written
+	}
 }
 
 func copyDownloadMetadata(destination, source *platform.DownloadInfo) {
@@ -666,9 +711,9 @@ func (s *DownloadService) tryMultipartDownload(ctx context.Context, baseURL stri
 		}
 		return 0, fmt.Errorf("multipart download failed (will retry with single-thread): %w", err)
 	}
-	if info.Size > 0 && written != info.Size {
+	if violatesDeclaredSize(info, written) {
 		_ = os.Remove(destPath)
-		return 0, fmt.Errorf("%w: multipart download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, info.Size)
+		return 0, declaredSizeError(info, written, "multipart download size")
 	}
 	return written, nil
 }
@@ -691,8 +736,8 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 		return 0, fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 	expectedSize := info.Size
-	if expectedSize > 0 && resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
-		return 0, fmt.Errorf("%w: download content length mismatch: got %d bytes, expected %d", errDownloadIntegrity, resp.ContentLength, expectedSize)
+	if resp.ContentLength >= 0 && violatesDeclaredSize(info, resp.ContentLength) {
+		return 0, declaredSizeError(info, resp.ContentLength, "download content length")
 	}
 
 	s.FillMetadata(info, resp)
@@ -719,13 +764,16 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 	}
 
 	totalSize := info.Size
+	if info.SizeIsAdvisory && resp.ContentLength > totalSize {
+		totalSize = resp.ContentLength
+	}
 	if totalSize <= 0 && resp.ContentLength > 0 {
 		totalSize = resp.ContentLength
 	}
 	written, err := util.CopyWithProgress(file, resp.Body, totalSize, throttledProgress)
 	closeErr := file.Close()
 	if err != nil {
-		return written, wrapDownloadIntegrityReadError(err, written, expectedSize, "download body")
+		return written, wrapDownloadIntegrityReadError(err, written, expectedSize, "download body", info.SizeIsAdvisory)
 	}
 	if closeErr != nil {
 		return written, closeErr
@@ -734,9 +782,9 @@ func (s *DownloadService) downloadOnce(ctx context.Context, rawURL string, info 
 		_ = os.Remove(destPath)
 		return 0, errors.New("download returned empty file")
 	}
-	if expectedSize > 0 && written != expectedSize {
+	if expectedSize > 0 && violatesDeclaredSize(info, written) {
 		_ = os.Remove(destPath)
-		return 0, fmt.Errorf("%w: download size mismatch: got %d bytes, expected %d", errDownloadIntegrity, written, expectedSize)
+		return 0, declaredSizeError(info, written, "download size")
 	}
 	return written, nil
 }
