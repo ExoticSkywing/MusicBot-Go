@@ -753,10 +753,6 @@ func collectionTypeLabel(ctx context.Context, collectionType string) string {
 	return tr(ctx, "pl_collection_playlist")
 }
 
-func collectionTypeLabelFromID(ctx context.Context, collectionID string) string {
-	return collectionTypeLabel(ctx, detectCollectionType(collectionID, ""))
-}
-
 func formatExpandableQuote(ctx context.Context, content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {

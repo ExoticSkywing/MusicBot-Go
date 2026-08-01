@@ -3,7 +3,6 @@ package native
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -181,26 +180,6 @@ func storageResolveMP4(ctx context.Context, hc *http.Client, auth WebAuth, fileI
 	return sr.CDNURL[0], nil
 }
 
-// fetchPSSH gets the Widevine PSSH box (base64) for an MP4 file from the public
-// seektable CDN (no auth).
-func fetchPSSH(ctx context.Context, hc *http.Client, fileID string) ([]byte, error) {
-	stURL := fmt.Sprintf("https://seektables.scdn.co/seektable/%s.json", fileID)
-	var st struct {
-		PSSH string `json:"pssh"`
-	}
-	if err := getJSONNoAuth(ctx, hc, stURL, &st); err != nil {
-		return nil, fmt.Errorf("seektable: %w", err)
-	}
-	if st.PSSH == "" {
-		return nil, fmt.Errorf("seektable returned empty pssh")
-	}
-	b, err := base64.StdEncoding.DecodeString(st.PSSH)
-	if err != nil {
-		return nil, fmt.Errorf("decode pssh: %w", err)
-	}
-	return b, nil
-}
-
 // buildSpotifyPSSH constructs a WidevinePsshData protobuf locally from a
 // 40-hex Spotify file_id, matching votify's _get_pssh() exactly. This is
 // preferred over the seektable CDN because votify (which works) uses this
@@ -267,26 +246,6 @@ func postLicense(ctx context.Context, hc *http.Client, auth WebAuth, payload []b
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return body, resp.StatusCode, resp.Header, nil
-}
-
-// fetchSpotifyServiceCert retrieves Spotify's Widevine service certificate so we
-// can build a privacy-mode (encrypted-ClientID) challenge. The browser web
-// player ALWAYS does this first; a plaintext-ClientID challenge is what Spotify
-// rejects with a bare 403. The service cert is obtained by POSTing the
-// well-known ServiceCertificateRequest ({0x08,0x04}) to the license endpoint.
-func fetchSpotifyServiceCert(ctx context.Context, hc *http.Client, auth WebAuth) (*widevinepb.DrmCertificate, error) {
-	body, status, _, err := postLicense(ctx, hc, auth, widevine.ServiceCertificateRequest)
-	if err != nil {
-		return nil, fmt.Errorf("service-cert post: %w", err)
-	}
-	if status != 200 || len(body) == 0 {
-		return nil, fmt.Errorf("service-cert HTTP %d (len=%d)", status, len(body))
-	}
-	cert, err := widevine.ParseServiceCert(body)
-	if err != nil {
-		return nil, fmt.Errorf("parse service-cert: %w", err)
-	}
-	return cert, nil
 }
 
 // fetchProductState queries Spotify's product_state endpoint and returns the

@@ -16,11 +16,6 @@ import (
 // chat titles) need no churn.
 var mdV2Replacer = i18n.MarkdownV2Replacer()
 
-// callbackText is a protocol token shown in callback acknowledgements; it is
-// intentionally NOT localized (Telegram treats empty/▾ differently and existing
-// clients expect the literal). Kept as a const for call-site clarity.
-const callbackText = "Success"
-
 // buildHelpText assembles the /help and /start text for the request language in
 // ctx. Structural markdown (bold headers, inline code, list markers) lives in
 // code; only the human-readable labels come from the catalog. Dynamic values

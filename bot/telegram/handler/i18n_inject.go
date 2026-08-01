@@ -20,11 +20,6 @@ func trMd(ctx context.Context, id string, args ...map[string]any) string {
 	return i18n.From(ctx).Tmd(id, args...)
 }
 
-// trn resolves a pluralized localized string for the request language.
-func trn(ctx context.Context, id string, count int, args ...map[string]any) string {
-	return i18n.From(ctx).Tn(id, count, args...)
-}
-
 // clientLanguageTag extracts the Telegram client UI language (an IETF tag like
 // "zh-hans") from whichever From field the update carries. Returns "" when the
 // update has no associated user (the resolver then falls back to default).

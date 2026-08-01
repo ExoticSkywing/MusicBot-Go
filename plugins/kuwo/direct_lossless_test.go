@@ -162,7 +162,6 @@ func TestResolvePlayableExternalLosslessRejectsUnsupportedSTREAMINFO(t *testing.
 		{name: "48 kHz multichannel", sampleRate: 48000, bitsPerSample: 24, channels: 6},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			const totalSize = 1 << 20
 			header := makeTestFLAC(
 				t,
 				42,

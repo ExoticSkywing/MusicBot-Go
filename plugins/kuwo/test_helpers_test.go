@@ -142,28 +142,6 @@ func makeTestFLACFrame(
 	return append(frame, byte(crc>>8), byte(crc))
 }
 
-func makeTestFLACFinalFrame(
-	t *testing.T,
-	totalSamples uint64,
-	bitsPerSample int,
-	channels int,
-) []byte {
-	t.Helper()
-	blockSize := totalSamples % 4096
-	frameNumber := totalSamples / 4096
-	if blockSize == 0 {
-		blockSize = 4096
-		frameNumber--
-	}
-	return makeTestFLACFrame(
-		t,
-		frameNumber,
-		blockSize,
-		bitsPerSample,
-		channels,
-	)
-}
-
 func encodeTestFLACUTF8Number(t *testing.T, value uint64) []byte {
 	t.Helper()
 	switch {
