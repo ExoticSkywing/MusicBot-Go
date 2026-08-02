@@ -7,10 +7,11 @@ import (
 )
 
 // TestParseKugouIntClampsOutOfRange pins the narrowing behaviour of
-// parseKugouInt. The values come from a remote JSON payload, so on 32-bit
-// builds a plain int64->int conversion would wrap a large upstream number into
-// a negative count. The expectations below hold on both 32- and 64-bit targets:
-// math.MaxInt is the platform's own ceiling.
+// parseKugouInt. The values come from a remote JSON payload, so an unchecked
+// int64->int conversion would wrap a large upstream number into a negative
+// count on 32-bit builds. Clamping to the int32 range is safe on every target
+// (int is at least 32 bits) and covers every call site: durations, bitrates and
+// privilege flags are all far below 2^31.
 func TestParseKugouIntClampsOutOfRange(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -25,8 +26,11 @@ func TestParseKugouIntClampsOutOfRange(t *testing.T) {
 		{name: "negative string", value: "-11", want: -11},
 		{name: "unparsable", value: "not-a-number", want: 0},
 		{name: "unsupported type", value: struct{}{}, want: 0},
-		{name: "above platform ceiling", value: int64(math.MaxInt64), want: math.MaxInt},
-		{name: "below platform floor", value: int64(math.MinInt64), want: math.MinInt},
+		{name: "typical duration ms", value: int64(600000), want: 600000},
+		{name: "at ceiling", value: int64(math.MaxInt32), want: math.MaxInt32},
+		{name: "above ceiling", value: int64(math.MaxInt64), want: math.MaxInt32},
+		{name: "at floor", value: int64(math.MinInt32), want: math.MinInt32},
+		{name: "below floor", value: int64(math.MinInt64), want: math.MinInt32},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := parseKugouInt(tt.value); got != tt.want {

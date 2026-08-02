@@ -1453,9 +1453,9 @@ func (c *Client) fetchPlaylistSongsV2(ctx context.Context, globalID string) ([]m
 	return songs, choosePositiveInt(total, len(allEntries)), nil
 }
 
-// maxPlaylistAllocHint bounds the initial buffer sized from a caller-supplied
-// pagesize, so an outsized value cannot turn into an outsized allocation.
-const maxPlaylistAllocHint = 1000
+// legacyPlaylistBufferHint is the fixed initial capacity for legacy playlist
+// pages. It matches the default pagesize; append handles anything larger.
+const legacyPlaylistBufferHint = 500
 
 func (c *Client) fetchLegacyPlaylistSongs(ctx context.Context, params map[string]string, secret, userAgent string) ([]model.Song, error) {
 	page := 1
@@ -1470,12 +1470,10 @@ func (c *Client) fetchLegacyPlaylistSongs(ctx context.Context, params map[string
 			pageSize = parsed
 		}
 	}
-	// The request still carries the full pageSize; only the buffer hint is bounded.
-	allocHint := pageSize
-	if allocHint > maxPlaylistAllocHint {
-		allocHint = maxPlaylistAllocHint
-	}
-	allEntries := make([]map[string]any, 0, allocHint)
+	// Buffer hint is a fixed default rather than the caller-supplied pagesize:
+	// append grows the slice as needed, so the initial capacity never has to
+	// track an upstream value.
+	allEntries := make([]map[string]any, 0, legacyPlaylistBufferHint)
 	seenPageKeys := make(map[string]struct{})
 	for {
 		query := url.Values{}
@@ -2562,15 +2560,16 @@ func parseKugouInt64(value any) int64 {
 }
 
 // parseKugouInt narrows an upstream numeric field to int. Values come from a
-// remote JSON payload, so on 32-bit builds an unchecked conversion would wrap;
-// clamp instead of truncating.
+// remote JSON payload, so an unchecked conversion would wrap on 32-bit builds.
+// Clamping to the int32 range is safe on every target and loses nothing: the
+// call sites are durations, bitrates and privilege flags.
 func parseKugouInt(value any) int {
 	parsed := parseKugouInt64(value)
-	if parsed > int64(math.MaxInt) {
-		return math.MaxInt
+	if parsed > math.MaxInt32 {
+		return math.MaxInt32
 	}
-	if parsed < int64(math.MinInt) {
-		return math.MinInt
+	if parsed < math.MinInt32 {
+		return math.MinInt32
 	}
 	return int(parsed)
 }
