@@ -179,7 +179,7 @@ func runInlineMediaFlow(ctx context.Context, b *telego.Bot, deps inlineMediaFlow
 		progress := func(text string) {
 			setInlineText(text, nil)
 		}
-		if cachedSong, _, cacheErr := music.findInlineCachedSong(ctx, userID, platformName, trackID, qualityOverride); cacheErr == nil && cachedSong != nil {
+		if cachedSong, _, cacheErr := music.findInlineCachedSong(ctx, userID, chatID, isGroup, platformName, trackID, qualityOverride); cacheErr == nil && cachedSong != nil {
 			modified, err := editInlineMedia(cachedSong)
 			if err == nil {
 				if modified && music.Repo != nil {
@@ -198,7 +198,7 @@ func runInlineMediaFlow(ctx context.Context, b *telego.Bot, deps inlineMediaFlow
 		onQueued := func() {
 			setInlineText(tr(ctx, "download_queued"), downloadQueueButton(ctx))
 		}
-		songInfo, err := music.prepareInlineSongWithTimeoutFor(ctx, b, userID, chatID, userName, platformName, trackID, qualityOverride, progress, onQueued)
+		songInfo, err := music.prepareInlineSongWithTimeoutFor(ctx, b, userID, chatID, isGroup, userName, platformName, trackID, qualityOverride, progress, onQueued)
 		if err != nil {
 			if music.Logger != nil {
 				music.Logger.Error("failed to prepare inline song", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))

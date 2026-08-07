@@ -84,11 +84,7 @@ func (h *InlineSearchHandler) inlineCollection(ctx context.Context, b *telego.Bo
 		h.inlineEmpty(ctx, b, query)
 		return
 	}
-	qualityValue := h.resolveDefaultQuality(ctx, query.From.ID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = strings.TrimSpace(qualityOverride)
-	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, query.From.ID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	qualityValue, qualityIntent, _ := h.resolveQualityIntent(ctx, query.From.ID, platformName, qualityOverride)
 	plat := h.PlatformManager.Get(platformName)
 	if plat == nil {
 		h.inlineEmpty(ctx, b, query)
@@ -142,7 +138,7 @@ func (h *InlineSearchHandler) inlineCollection(ctx context.Context, b *telego.Bo
 	thumb := buildInlineThumbnailURL(platformName, strings.TrimSpace(playlist.CoverURL), 150)
 	collectionArticle := &telego.InlineQueryResultArticle{
 		Type:                telego.ResultTypeArticle,
-		ID:                  buildInlineCollectionResultID(platformName, collectionID, qualityValue),
+		ID:                  buildInlineCollectionResultID(platformName, collectionID, qualityIntent),
 		Title:               fmt.Sprintf("%s：%s", collectionLabel, title),
 		Description:         desc,
 		InputMessageContent: &telego.InputTextMessageContent{MessageText: fmt.Sprintf("%s：%s\n%s", collectionLabel, title, tr(ctx, "cb_collection_tap_expand"))},
@@ -154,7 +150,7 @@ func (h *InlineSearchHandler) inlineCollection(ctx context.Context, b *telego.Bo
 		state := &inlineCollectionState{
 			platformName:    platformName,
 			collectionID:    collectionID,
-			qualityValue:    qualityValue,
+			qualityValue:    qualityIntent,
 			requesterID:     query.From.ID,
 			tracks:          playlist.Tracks,
 			totalTracks:     playlist.TrackCount,
@@ -200,7 +196,7 @@ func (h *InlineSearchHandler) inlineCollection(ctx context.Context, b *telego.Bo
 			end = len(tracks)
 		}
 		for i := start; i < end; i++ {
-			inlineMsgs = append(inlineMsgs, buildInlineTrackArticle(ctx, h, platformName, tracks[i], qualityValue, query.From.ID))
+			inlineMsgs = append(inlineMsgs, buildInlineTrackArticle(ctx, h, platformName, tracks[i], qualityIntent, query.From.ID))
 		}
 		if pageCount > 1 {
 			footerText := tr(ctx, "cb_page_footer", map[string]any{"Page": page, "Total": pageCount})
@@ -328,7 +324,6 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 	}
 
 	platformName := h.resolveDefaultPlatform(ctx, query.From.ID)
-	qualityValue := h.resolveDefaultQuality(ctx, query.From.ID)
 	fallbackPlatform := h.FallbackPlatform
 	if strings.TrimSpace(fallbackPlatform) == "" {
 		fallbackPlatform = "netease"
@@ -337,10 +332,6 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 		platformName = requestedPlatform
 		fallbackPlatform = ""
 	}
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = qualityOverride
-	}
-
 	var inlineMsgs []telego.InlineQueryResult
 
 	params := &telego.AnswerInlineQueryParams{
@@ -370,7 +361,7 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 
 	tracks, matchedPlatform, err := searchWithFallback(keyWord)
 	platformName = matchedPlatform
-	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, query.From.ID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	qualityValue, qualityIntent, _ := h.resolveQualityIntent(ctx, query.From.ID, platformName, qualityOverride)
 
 	if err != nil || len(tracks) == 0 {
 		inlineMsg := &telego.InlineQueryResultArticle{
@@ -394,7 +385,7 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 			keyWord = fallbackKeyword
 			tracks = fallbackTracks
 			platformName = fallbackMatchedPlatform
-			qualityValue = resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, query.From.ID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+			qualityValue, qualityIntent, _ = h.resolveQualityIntent(ctx, query.From.ID, platformName, qualityOverride)
 			pageCount = (len(tracks)-1)/pageSize + 1
 		}
 	}
@@ -413,7 +404,7 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 	inlineMsgs = make([]telego.InlineQueryResult, 0, pageSize+2)
 	for i := start; i < end; i++ {
 		track := tracks[i]
-		inlineMsg := buildInlineTrackArticle(ctx, h, platformName, track, qualityValue, query.From.ID)
+		inlineMsg := buildInlineTrackArticle(ctx, h, platformName, track, qualityIntent, query.From.ID)
 		inlineMsgs = append(inlineMsgs, inlineMsg)
 	}
 	inlineMsgs = append(inlineMsgs, buildInlineSearchPageFooter(ctx, keyWord, requestedPlatform, qualityOverride, page, pageCount, len(tracks)))
@@ -444,11 +435,7 @@ func (h *InlineSearchHandler) inlineCommand(ctx context.Context, b *telego.Bot, 
 		h.inlineEmpty(ctx, b, query)
 		return
 	}
-	qualityValue := h.resolveDefaultQuality(ctx, query.From.ID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = strings.TrimSpace(qualityOverride)
-	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, query.From.ID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	qualityValue, qualityIntent, _ := h.resolveQualityIntent(ctx, query.From.ID, platformName, qualityOverride)
 	inlineMsgs := make([]telego.InlineQueryResult, 0, 2)
 
 	title := trackID
@@ -476,11 +463,11 @@ func (h *InlineSearchHandler) inlineCommand(ctx context.Context, b *telego.Bot, 
 	thumbnailURL := buildInlineThumbnailURL(platformName, thumbnailSource, 150)
 	inlineMsg := &telego.InlineQueryResultArticle{
 		Type:                telego.ResultTypeArticle,
-		ID:                  buildInlinePendingResultID(platformName, trackID, qualityValue),
+		ID:                  buildInlinePendingResultID(platformName, trackID, qualityIntent),
 		Title:               fallbackString(title, trackID),
 		Description:         inlineSubtitle(ctx, album, artists),
 		InputMessageContent: &telego.InputTextMessageContent{MessageText: tr(ctx, "wait_for_down")},
-		ReplyMarkup:         buildInlineSendKeyboard(ctx, platformName, trackID, qualityValue, query.From.ID),
+		ReplyMarkup:         buildInlineSendKeyboard(ctx, platformName, trackID, qualityIntent, query.From.ID),
 		ThumbnailURL:        thumbnailURL,
 		ThumbnailWidth:      150,
 		ThumbnailHeight:     150,
@@ -501,6 +488,7 @@ func buildInlineSearchHeader(ctx context.Context, h *InlineSearchHandler, platfo
 	if strings.TrimSpace(platformText) == "" {
 		platformText = platformName
 	}
+	qualityValue, _ = qualityIntentValue(qualityValue)
 	if strings.TrimSpace(qualityValue) == "" {
 		qualityValue = "hires"
 	}
@@ -525,7 +513,12 @@ func buildInlineSearchHeader(ctx context.Context, h *InlineSearchHandler, platfo
 func buildInlineSearchPageFooter(ctx context.Context, keyword, platformName, qualityValue string, page, pageCount, total int) telego.InlineQueryResult {
 	keyword = strings.TrimSpace(keyword)
 	platformName = inlinePageHintPlatformToken(strings.TrimSpace(platformName))
-	qualityValue = strings.TrimSpace(qualityValue)
+	qualityValue, explicitQuality := qualityIntentValue(qualityValue)
+	if !explicitQuality {
+		// Paging an implicit request must stay implicit. Omitting the quality
+		// suffix also keeps the internal auto-* marker out of visible hints.
+		qualityValue = ""
+	}
 	if page < 1 {
 		page = 1
 	}
@@ -671,13 +664,14 @@ func buildInlineFavoriteCard(ctx context.Context, fav *botpkg.Favorite, qualityV
 		desc += album
 	}
 	qualityValue = qualityValueForPlatform(fav.Platform, qualityValue)
+	qualityIntent := qualityIntentToken(qualityValue, false)
 	return &telego.InlineQueryResultArticle{
 		Type:                telego.ResultTypeArticle,
-		ID:                  buildInlinePendingResultID(fav.Platform, fav.TrackID, qualityValue),
+		ID:                  buildInlinePendingResultID(fav.Platform, fav.TrackID, qualityIntent),
 		Title:               "⭐ " + title,
 		Description:         desc,
 		InputMessageContent: &telego.InputTextMessageContent{MessageText: tr(ctx, "wait_for_down")},
-		ReplyMarkup:         buildInlineSendKeyboard(ctx, fav.Platform, fav.TrackID, qualityValue, requesterID),
+		ReplyMarkup:         buildInlineSendKeyboard(ctx, fav.Platform, fav.TrackID, qualityIntent, requesterID),
 	}
 }
 
@@ -859,6 +853,7 @@ func fallbackString(value, fallback string) string {
 }
 
 func qualityDisplayName(ctx context.Context, quality string) string {
+	quality, _ = qualityIntentValue(quality)
 	switch strings.TrimSpace(strings.ToLower(quality)) {
 	case "standard":
 		return tr(ctx, "cb_quality_standard")
@@ -879,19 +874,26 @@ func (h *InlineSearchHandler) inlineCachedOrCommand(ctx context.Context, b *tele
 	if strings.TrimSpace(platformName) == "" || strings.TrimSpace(trackID) == "" {
 		return false
 	}
-	qualityValue := h.resolveDefaultQuality(ctx, query.From.ID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = strings.TrimSpace(qualityOverride)
+	qualityValue, qualityIntent, explicitQuality := h.resolveQualityIntent(ctx, query.From.ID, platformName, qualityOverride)
+	if h.tryInlineDirectEpisodes(ctx, b, query, platformName, trackID, qualityIntent, requestedPage, originalQuery) {
+		return true
 	}
-	qualityValue = qualityValueForPlatform(platformName, qualityValue)
-	if h.tryInlineDirectEpisodes(ctx, b, query, platformName, trackID, qualityValue, requestedPage, originalQuery) {
+	if preferAppleMusicAtmosEnabled(ctx, h.Repo, h.PlatformManager, botpkg.PluginScopeUser, query.From.ID, platformName, explicitQuality) {
+		// An implicit Apple Music request may resolve to Atmos only after the
+		// catalog track is inspected. A cached stereo default must not short-cut
+		// that decision; an exact Atmos cache hit is safe to return immediately.
+		if info := h.findCachedSong(ctx, platformName, trackID, platform.QualityAtmos.String()); info != nil {
+			h.inlineCached(ctx, b, query, info, platformName, platform.QualityAtmos.String())
+			return true
+		}
+		h.inlineCommand(ctx, b, query, platformName, trackID, qualityIntent)
 		return true
 	}
 	if info := h.findCachedSong(ctx, platformName, trackID, qualityValue); info != nil {
 		h.inlineCached(ctx, b, query, info, platformName, qualityValue)
 		return true
 	}
-	h.inlineCommand(ctx, b, query, platformName, trackID, qualityOverride)
+	h.inlineCommand(ctx, b, query, platformName, trackID, qualityIntent)
 	return true
 }
 
@@ -1083,6 +1085,24 @@ func (h *InlineSearchHandler) resolveDefaultQuality(ctx context.Context, userID 
 		qualityValue = "hires"
 	}
 	return qualityValue
+}
+
+// resolveQualityIntent returns the platform-adjusted concrete quality used for
+// display/cache lookup and the callback/result-ID token used to preserve
+// whether the requester explicitly selected that quality.
+func (h *InlineSearchHandler) resolveQualityIntent(ctx context.Context, userID int64, platformName, qualityOverride string) (qualityValue, intentToken string, explicit bool) {
+	requestedQuality, explicit := qualityIntentValue(qualityOverride)
+	qualityValue = h.resolveDefaultQuality(ctx, userID)
+	if strings.TrimSpace(requestedQuality) != "" {
+		qualityValue = requestedQuality
+	}
+	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, userID, platformName, qualityValue, explicit)
+	intentToken = qualityIntentToken(qualityValue, explicit)
+	if intentToken == "" {
+		qualityValue = platform.QualityHiRes.String()
+		intentToken = qualityIntentToken(qualityValue, explicit)
+	}
+	return qualityValue, intentToken, explicit
 }
 
 func (h *InlineSearchHandler) resolveDefaultPlatform(ctx context.Context, userID int64) string {

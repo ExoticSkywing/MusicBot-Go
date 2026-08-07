@@ -153,6 +153,24 @@ func TestBuildMusicSendCallbackData_ShortPlainRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildMusicSendCallbackData_PreservesImplicitQualityIntent(t *testing.T) {
+	data := buildMusicSendCallbackData("applemusic", "12345", "auto-lossless", 6789)
+	if data == "" {
+		t.Fatal("callback data should not be empty")
+	}
+	parsed := parseMusicCallbackDataV2(strings.Fields(data))
+	if !parsed.ok || parsed.tokenExpired {
+		t.Fatalf("parse failed: %+v", parsed)
+	}
+	if parsed.qualityOverride != "auto-lossless" {
+		t.Fatalf("qualityOverride = %q, want auto-lossless", parsed.qualityOverride)
+	}
+	qualityValue, explicit := qualityIntentValue(parsed.qualityOverride)
+	if qualityValue != "lossless" || explicit {
+		t.Fatalf("quality intent = (%q, %t), want (lossless, false)", qualityValue, explicit)
+	}
+}
+
 // 含空格的 trackID 不能直接拼接(会被 strings.Split 错位),必须走 token store
 // 完整保留所有字段。这是 #24 的核心:原裸 fmt.Sprintf 会让 requesterID 错位、
 // 鉴权失效并丢 quality。

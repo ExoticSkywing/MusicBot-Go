@@ -2,6 +2,7 @@ package applemusic
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -80,5 +81,32 @@ aac.m3u8
 	_, err := client.GetDownloadInfo(context.Background(), "1", platform.QualityLossless)
 	if err == nil || !strings.Contains(err.Error(), "no suitable enhancedHls variant for quality lossless") {
 		t.Fatalf("GetDownloadInfo(lossless) error=%v, want strict no-suitable-variant error", err)
+	}
+}
+
+func TestGetDownloadInfoAtmosRejectsExplicitCatalogAbsence(t *testing.T) {
+	const songResponse = `{"data":[{"id":"1","attributes":{"audioTraits":["atmos"],"audioVariants":["lossless","dolby-audio"]}}]}`
+	var requests atomic.Int32
+	client := &Client{
+		httpClient: &http.Client{Transport: qualityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			if got := req.URL.Query().Get("extend"); !strings.Contains(got, "audioVariants") {
+				t.Errorf("catalog extend = %q, want audioVariants", got)
+			}
+			return qualityTestResponse(req, songResponse), nil
+		})},
+		developerToken:     "test-token",
+		storefront:         "us",
+		language:           "en-US",
+		storefrontDetected: true,
+		wrapperHost:        "wrapper.test",
+	}
+
+	_, err := client.GetDownloadInfo(context.Background(), "1", platform.QualityAtmos)
+	if !errors.Is(err, platform.ErrInvalidQuality) {
+		t.Fatalf("GetDownloadInfo(atmos) error = %v, want ErrInvalidQuality", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("GetDownloadInfo(atmos) made %d requests, want catalog check only", got)
 	}
 }

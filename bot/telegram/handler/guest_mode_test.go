@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
+	"strings"
 	"sync"
 	"testing"
 
+	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 	"github.com/mymmrac/telego"
 )
@@ -150,12 +153,30 @@ func TestGuestSearchStore_StoreGetDelete(t *testing.T) {
 	}
 }
 
+func TestGuestDefaultQualityForScope_UsesGroupSettings(t *testing.T) {
+	ctx := context.Background()
+	repo := newStubRepo()
+	if err := repo.UpdateUserSettings(ctx, &botpkg.UserSettings{UserID: 12345, DefaultQuality: "lossless"}); err != nil {
+		t.Fatalf("setup user settings: %v", err)
+	}
+	if err := repo.UpdateGroupSettings(ctx, &botpkg.GroupSettings{ChatID: -100123, DefaultQuality: "high"}); err != nil {
+		t.Fatalf("setup group settings: %v", err)
+	}
+	h := &GuestModeHandler{SearchHandler: &SearchHandler{Repo: repo}, DefaultQuality: "standard"}
+	if got := h.guestDefaultQualityForScope(ctx, 12345, -100123, true); got != "high" {
+		t.Fatalf("group quality = %q, want high", got)
+	}
+	if got := h.guestDefaultQualityForScope(ctx, 12345, 0, false); got != "lossless" {
+		t.Fatalf("user quality = %q, want lossless", got)
+	}
+}
+
 func TestRenderGuestSearchPage_SelectButtonsUseInlineFlow(t *testing.T) {
 	h := &GuestModeHandler{PlatformManager: nil, SearchHandler: &SearchHandler{}}
 	state := &searchState{
 		keyword:     "晴天",
 		platform:    "netease",
-		quality:     "hires",
+		quality:     "auto-hires",
 		requesterID: 12345,
 		limit:       48,
 		currentPage: 1,
@@ -178,6 +199,10 @@ func TestRenderGuestSearchPage_SelectButtonsUseInlineFlow(t *testing.T) {
 		for _, btn := range row {
 			if btn.CallbackData != "" && len(btn.CallbackData) >= 7 && btn.CallbackData[:7] == "music i" {
 				found = true
+				parsed, ok := parseInlineSendCallbackArgs(strings.Fields(btn.CallbackData))
+				if !ok || parsed.qualityOverride != "auto-hires" {
+					t.Fatalf("guest callback = %q, parsed=%+v, want implicit hires", btn.CallbackData, parsed)
+				}
 			}
 		}
 	}

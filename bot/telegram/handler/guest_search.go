@@ -386,10 +386,18 @@ func (h *GuestSearchCallbackHandler) Handle(ctx context.Context, b *telego.Bot, 
 			state.searchFilterText = ""
 			state.limit = h.Guest.guestSearchLimit(platformName)
 			state.setUnavailable(platformName, false)
-			if enabled, supported, label := resolveSearchFilterEnabled(ctx, h.Guest.PlatformManager, h.Guest.repo(), platformName, botpkg.PluginScopeUser, requesterID); supported {
+			chatID, isGroup := lookupInlineChat(query.InlineMessageID)
+			scopeType, scopeID := inlineRequestSettingScope(requesterID, chatID, isGroup)
+			if enabled, supported, label := resolveSearchFilterEnabled(ctx, h.Guest.PlatformManager, h.Guest.repo(), platformName, scopeType, scopeID); supported {
 				state.biliFilter = enabled
 				state.searchFilterText = label
 			}
+			qualityValue, explicitQuality := qualityIntentValue(state.quality)
+			if !explicitQuality || strings.TrimSpace(qualityValue) == "" {
+				qualityValue = h.Guest.guestDefaultQualityForScope(ctx, requesterID, chatID, isGroup)
+			}
+			qualityValue = resolvePlatformQualityValue(ctx, h.Guest.repo(), scopeType, scopeID, platformName, qualityValue, explicitQuality)
+			state.quality = qualityIntentToken(qualityValue, explicitQuality)
 			page = 1
 		case "bilifilter":
 			if len(parts) < 5 {

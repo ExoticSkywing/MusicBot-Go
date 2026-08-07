@@ -62,3 +62,5 @@ set_pdef_groupfav_desc = "グループで共有のお気に入りを提供する
 set_pdef_groupfav_admin = "管理者のみ"
 set_pdef_comment_buttons_title = "チャンネルコメント欄にボタンを補充"
 set_pdef_comment_buttons_desc = "チャンネルの曲が連携ディスカッショングループに転送されたとき、コメント欄に歌詞/お気に入りボタンを再投稿する"
+set_pdef_applemusic_prefer_atmos_title = "Apple MusicでDolby Atmosを優先"
+set_pdef_applemusic_prefer_atmos_desc = "音質未指定時、Dolby Atmosがあれば優先し、なければ既定の音質を使用します"

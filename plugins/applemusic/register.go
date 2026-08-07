@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/config"
 	logpkg "github.com/liuran001/MusicBot-Go/bot/logger"
 	platformplugins "github.com/liuran001/MusicBot-Go/bot/platform/plugins"
@@ -68,7 +69,16 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 		return nil, err
 	}
 
-	return &platformplugins.Contribution{Platform: NewPlatform(client)}, nil
+	return contributionForClient(client), nil
+}
+
+func contributionForClient(client *Client) *platformplugins.Contribution {
+	applePlatform := NewPlatform(client)
+	contribution := &platformplugins.Contribution{Platform: applePlatform}
+	if applePlatform.Capabilities().Atmos {
+		contribution.SettingDefinitions = []botpkg.PluginSettingDefinition{PreferAtmosDefinition()}
+	}
+	return contribution
 }
 
 // loadWVDevice loads Widevine L3 device credentials.

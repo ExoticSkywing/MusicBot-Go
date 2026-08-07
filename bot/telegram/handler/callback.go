@@ -93,9 +93,12 @@ func (h *CallbackMusicHandler) Handle(ctx context.Context, b *telego.Bot, update
 	requesterID := parsed.requesterID
 	qualityOverride := parsed.qualityOverride
 	if qualityOverride != "" {
-		quality, err := platform.ParseQuality(qualityOverride)
+		qualityValue, explicitQuality := qualityIntentValue(qualityOverride)
+		quality, err := platform.ParseQuality(qualityValue)
 		if err != nil || quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
 			qualityOverride = ""
+		} else {
+			qualityOverride = qualityIntentToken(qualityValue, explicitQuality)
 		}
 	}
 

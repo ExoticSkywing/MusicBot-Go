@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	appleMusicBaseURL  = "https://amp-api.music.apple.com"
-	appleMusicOrigin   = "https://music.apple.com"
-	appleMusicUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-	defaultArtworkSize = 1200
+	appleMusicBaseURL        = "https://amp-api.music.apple.com"
+	appleMusicOrigin         = "https://music.apple.com"
+	appleMusicUA             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+	appleMusicSongExtensions = "extendedAssetUrls,audioVariants"
+	defaultArtworkSize       = 1200
 )
 
 // Client is the Apple Music API client.
@@ -327,8 +328,8 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]platfor
 // --- Track ---
 
 func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track, error) {
-	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?include=albums,artists&extend=extendedAssetUrls&l=%s",
-		appleMusicBaseURL, c.storefront, trackID, c.language)
+	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?include=albums,artists&extend=%s&l=%s",
+		appleMusicBaseURL, c.storefront, trackID, appleMusicSongExtensions, c.language)
 
 	body, err := c.doRequest(ctx, reqURL)
 	if err != nil {
@@ -482,8 +483,8 @@ func (c *Client) GetLyricsTTML(ctx context.Context, trackID string) (string, err
 
 func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	// Fetch song details to confirm the track exists / is available.
-	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?include=albums,artists&extend=extendedAssetUrls&l=%s",
-		appleMusicBaseURL, c.storefront, trackID, c.language)
+	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?include=albums,artists&extend=%s&l=%s",
+		appleMusicBaseURL, c.storefront, trackID, appleMusicSongExtensions, c.language)
 
 	body, err := c.doRequest(ctx, reqURL)
 	if err != nil {
@@ -496,6 +497,18 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	}
 	if len(resp.Data) == 0 {
 		return nil, platform.NewNotFoundError("applemusic", "track", trackID)
+	}
+	if quality == platform.QualityAtmos {
+		available := appleMusicAtmosAvailability(
+			resp.Data[0].Attributes.AudioTraits,
+			resp.Data[0].Attributes.AudioVariants,
+		)
+		// A nil signal is deliberately not rejected: older storefront/API
+		// responses may omit both fields even though the wrapper manifest still
+		// contains an Atmos stream. Only an explicit catalog "no" is definitive.
+		if available != nil && !*available {
+			return nil, platform.NewInvalidQualityError("applemusic", trackID, quality)
+		}
 	}
 
 	// Routing across the two decrypt paths:
@@ -1007,8 +1020,8 @@ func variantQuality(v enhancedHLSVariant) platform.Quality {
 // enhancedHLSMasterURL fetches the catalog song and returns its enhancedHls
 // master playlist URL (the source of lossless/Hi-Res/Atmos streams).
 func (c *Client) enhancedHLSMasterURL(ctx context.Context, trackID string) (string, error) {
-	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?extend=extendedAssetUrls&l=%s",
-		appleMusicBaseURL, c.storefront, trackID, c.language)
+	reqURL := fmt.Sprintf("%s/v1/catalog/%s/songs/%s?extend=%s&l=%s",
+		appleMusicBaseURL, c.storefront, trackID, appleMusicSongExtensions, c.language)
 	body, err := c.doRequest(ctx, reqURL)
 	if err != nil {
 		return "", err
@@ -1140,6 +1153,8 @@ type appleMusicAttributes struct {
 	URL               string                    `json:"url"`
 	CuratorName       string                    `json:"curatorName"`
 	ExtendedAssetUrls *appleMusicExtendedAssets `json:"extendedAssetUrls,omitempty"`
+	AudioTraits       []string                  `json:"audioTraits,omitempty"`
+	AudioVariants     []string                  `json:"audioVariants,omitempty"`
 	TTML              string                    `json:"ttml"`
 }
 
@@ -1184,6 +1199,7 @@ type appleMusicError struct {
 
 func convertSong(res appleMusicResource) platform.Track {
 	attrs := res.Attributes
+	atmosAvailable := appleMusicAtmosAvailability(attrs.AudioTraits, attrs.AudioVariants)
 
 	var artists []platform.Artist
 	if rel := res.Relationships; rel != nil && rel.Artists != nil {
@@ -1213,19 +1229,43 @@ func convertSong(res appleMusicResource) platform.Track {
 	}
 
 	return platform.Track{
-		ID:          res.ID,
-		Platform:    "applemusic",
-		Title:       attrs.Name,
-		Artists:     artists,
-		Album:       album,
-		Duration:    time.Duration(attrs.DurationInMillis) * time.Millisecond,
-		CoverURL:    formatArtworkURL(attrs.Artwork, defaultArtworkSize),
-		URL:         attrs.URL,
-		ISRC:        attrs.ISRC,
-		Year:        year,
-		TrackNumber: attrs.TrackNumber,
-		DiscNumber:  attrs.DiscNumber,
+		ID:             res.ID,
+		Platform:       "applemusic",
+		Title:          attrs.Name,
+		Artists:        artists,
+		Album:          album,
+		Duration:       time.Duration(attrs.DurationInMillis) * time.Millisecond,
+		CoverURL:       formatArtworkURL(attrs.Artwork, defaultArtworkSize),
+		URL:            attrs.URL,
+		ISRC:           attrs.ISRC,
+		Year:           year,
+		TrackNumber:    attrs.TrackNumber,
+		DiscNumber:     attrs.DiscNumber,
+		AtmosAvailable: atmosAvailable,
 	}
+}
+
+func appleMusicAtmosAvailability(audioTraits, audioVariants []string) *bool {
+	// audioVariants is the current, more precise catalog signal. Its presence
+	// is authoritative even when the list is empty; audioTraits is retained as
+	// a compatibility fallback only for responses that omit audioVariants.
+	values, atmosValue := audioVariants, "dolby-atmos"
+	if audioVariants == nil {
+		values = audioTraits
+		atmosValue = "atmos"
+		if values == nil {
+			return nil
+		}
+	}
+	available := false
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		normalized = strings.NewReplacer("_", "-", " ", "-").Replace(normalized)
+		if normalized == atmosValue {
+			available = true
+		}
+	}
+	return &available
 }
 
 func convertAlbum(res appleMusicResource) platform.Album {

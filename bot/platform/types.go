@@ -47,6 +47,13 @@ type Track struct {
 	// LyricsAvailable reports whether the platform explicitly says this track has
 	// lyrics. Nil means the platform did not provide this metadata.
 	LyricsAvailable *bool `json:"lyrics_available,omitempty"`
+
+	// AtmosAvailable reports whether the catalog explicitly advertises a Dolby
+	// Atmos rendition for this track. Nil means the platform did not provide an
+	// availability signal. The actual download path must still tolerate a stale
+	// catalog signal and fall back when an automatically preferred Atmos stream
+	// cannot be resolved.
+	AtmosAvailable *bool `json:"atmos_available,omitempty"`
 }
 
 // Artist represents a music artist from any platform.

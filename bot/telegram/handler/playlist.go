@@ -153,7 +153,8 @@ func (h *PlaylistHandler) TryHandle(ctx context.Context, b *telego.Bot, update *
 		requesterID = message.From.ID
 	}
 	qualityValue := h.resolveDefaultQuality(ctx, message, requesterID)
-	if strings.TrimSpace(qualityOverride) != "" {
+	explicitQuality := strings.TrimSpace(qualityOverride) != ""
+	if explicitQuality {
 		qualityValue = qualityOverride
 	}
 	scopeType := botpkg.PluginScopeUser
@@ -162,7 +163,8 @@ func (h *PlaylistHandler) TryHandle(ctx context.Context, b *telego.Bot, update *
 		scopeType = botpkg.PluginScopeGroup
 		scopeID = message.Chat.ID
 	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, explicitQuality)
+	qualityValue = qualityIntentToken(qualityValue, explicitQuality)
 	platformEmoji := platformEmoji(h.PlatformManager, platformName)
 	displayName := platformDisplayName(ctx, h.PlatformManager, platformName)
 	textHeader := fmt.Sprintf("%s *%s* %s\n\n", platformEmoji, mdV2Replacer.Replace(displayName), collectionLabel)
@@ -360,6 +362,12 @@ func (h *PlaylistHandler) buildPlaylistPage(ctx context.Context, tracks []platfo
 	if page > pageCount {
 		page = pageCount
 	}
+	callbackQuality, explicitQuality := qualityIntentValue(qualityValue)
+	if strings.TrimSpace(callbackQuality) == "" {
+		callbackQuality = "hires"
+		explicitQuality = false
+	}
+	callbackQuality = qualityIntentToken(callbackQuality, explicitQuality)
 	var textMessage strings.Builder
 	if pageCount > 1 {
 		textMessage.WriteString(tr(ctx, "pl_page_of", map[string]any{"Page": page, "Total": pageCount}) + "\n\n")
@@ -388,7 +396,7 @@ func (h *PlaylistHandler) buildPlaylistPage(ctx context.Context, tracks []platfo
 		songArtists := strings.Join(artistParts, " / ")
 		displayIndex := idx + 1
 		textMessage.WriteString(fmt.Sprintf("%d\\. 「%s」 \\- %s\n", displayIndex, trackLink, songArtists))
-		callbackData := buildMusicSendCallbackData(platformName, track.ID, qualityValue, requesterID)
+		callbackData := buildMusicSendCallbackData(platformName, track.ID, callbackQuality, requesterID)
 		if callbackData == "" {
 			continue
 		}

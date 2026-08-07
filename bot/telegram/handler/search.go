@@ -285,6 +285,24 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 	if message.From != nil {
 		requesterID = message.From.ID
 	}
+	explicitQuality := strings.TrimSpace(qualityOverride) != ""
+	qualityValue := h.resolveDefaultQuality(ctx, message, userID)
+	if explicitQuality {
+		qualityValue = qualityOverride
+	}
+	scopeType = botpkg.PluginScopeUser
+	scopeID = userID
+	if message.Chat.Type != "private" {
+		scopeType = botpkg.PluginScopeGroup
+		scopeID = message.Chat.ID
+	}
+	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, explicitQuality)
+	qualityIntent := qualityIntentToken(qualityValue, explicitQuality)
+	if action != "music" {
+		// Lyric callbacks use this field only as a concrete cache lookup hint.
+		// Never expose the internal implicit-quality marker to that parser.
+		qualityIntent = qualityValue
+	}
 	unavailable := make(map[string]bool)
 	if usedFallback && strings.TrimSpace(primaryPlatform) != "" {
 		unavailable[primaryPlatform] = true
@@ -294,7 +312,7 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 		state := &searchState{
 			keyword:          keyword,
 			platform:         platformName,
-			quality:          qualityOverride,
+			quality:          qualityIntent,
 			requesterID:      requesterID,
 			limit:            searchLimit,
 			currentPage:      1,
@@ -335,20 +353,9 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 
 	textMessage.WriteString(fmt.Sprintf("%s *%s* %s\n\\* %s\n\n", platformEmoji, mdV2Replacer.Replace(displayName), trMd(ctx, "srch_results"), trMd(ctx, "srch_pick_number_hint")))
 
-	qualityValue := h.resolveDefaultQuality(ctx, message, userID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = qualityOverride
-	}
-	scopeType = botpkg.PluginScopeUser
-	scopeID = userID
-	if message.Chat.Type != "private" {
-		scopeType = botpkg.PluginScopeGroup
-		scopeID = message.Chat.ID
-	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
 	initialLimit := h.initialSearchLimit(platformName)
 	hasMore := len(tracks) >= initialLimit && initialLimit < searchLimit
-	pageText, keyboard := h.buildSearchPage(ctx, tracks, platformName, keyword, qualityValue, requesterID, msgResult.MessageID, 1, unavailable, hasMore, searchLimit, biliFilter, filterLabel, action)
+	pageText, keyboard := h.buildSearchPage(ctx, tracks, platformName, keyword, qualityIntent, requesterID, msgResult.MessageID, 1, unavailable, hasMore, searchLimit, biliFilter, filterLabel, action)
 	textMessage.WriteString(pageText)
 	disablePreview := true
 	params := &telego.EditMessageTextParams{
@@ -367,7 +374,7 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 	state := &searchState{
 		keyword:          keyword,
 		platform:         platformName,
-		quality:          qualityValue,
+		quality:          qualityIntent,
 		requesterID:      requesterID,
 		limit:            searchLimit,
 		currentPage:      1,
@@ -458,6 +465,15 @@ func (h *SearchCallbackHandler) Handle(ctx context.Context, b *telego.Bot, updat
 			if enabled, supported, label := resolveSearchFilterEnabled(ctx, h.Search.PlatformManager, h.Search.Repo, state.platform, scopeType, scopeID); supported {
 				state.biliFilter = enabled
 				state.searchFilterText = label
+			}
+			qualityValue, explicitQuality := qualityIntentValue(state.quality)
+			if !explicitQuality || strings.TrimSpace(qualityValue) == "" {
+				qualityValue = h.Search.resolveDefaultQuality(ctx, msg, query.From.ID)
+			}
+			qualityValue = resolvePlatformQualityValue(ctx, h.Search.Repo, scopeType, scopeID, state.platform, qualityValue, explicitQuality)
+			state.quality = qualityIntentToken(qualityValue, explicitQuality)
+			if state.resultAction() != "music" {
+				state.quality = qualityValue
 			}
 		}
 		page = 1
@@ -704,6 +720,14 @@ func (h *SearchHandler) buildSearchPage(ctx context.Context, tracks []platform.T
 	if strings.TrimSpace(action) == "" {
 		action = "music"
 	}
+	callbackQuality, explicitQuality := qualityIntentValue(qualityValue)
+	if strings.TrimSpace(callbackQuality) == "" {
+		callbackQuality = "hires"
+		explicitQuality = false
+	}
+	if action == "music" {
+		callbackQuality = qualityIntentToken(callbackQuality, explicitQuality)
+	}
 	pageSize := h.pageSize()
 	if page < 1 {
 		page = 1
@@ -763,7 +787,13 @@ func (h *SearchHandler) buildSearchPage(ctx context.Context, tracks []platform.T
 		}
 		songArtists := strings.Join(artistParts, " / ")
 		textMessage.WriteString(fmt.Sprintf("%d\\. 「%s」 \\- %s\n", i-start+1, trackLink, songArtists))
-		callbackData := fmt.Sprintf("%s %s %s %s %d", action, platformName, track.ID, qualityValue, requesterID)
+		callbackData := fmt.Sprintf("%s %s %s %s %d", action, platformName, track.ID, callbackQuality, requesterID)
+		if action == "music" {
+			callbackData = buildMusicSendCallbackData(platformName, track.ID, callbackQuality, requesterID)
+		}
+		if callbackData == "" {
+			continue
+		}
 		buttons = append(buttons, telego.InlineKeyboardButton{
 			Text:         fmt.Sprintf("%d", i-start+1),
 			CallbackData: callbackData,

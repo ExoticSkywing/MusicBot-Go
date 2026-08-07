@@ -580,6 +580,18 @@ func TestKuwoInitialEmptyFilteredPageStillBuildsNavigation(t *testing.T) {
 	}
 }
 
+func TestPlaylistPagePreservesImplicitQualityIntent(t *testing.T) {
+	h := &PlaylistHandler{PageSize: 8}
+	_, keyboard := h.buildPlaylistPage(zhCtx(), []platform.Track{{ID: "123", Title: "Song"}}, 1, 0, "applemusic", "auto-lossless", 42, 700, 1)
+	if keyboard == nil || len(keyboard.InlineKeyboard) == 0 || len(keyboard.InlineKeyboard[0]) == 0 {
+		t.Fatal("missing playlist result callback")
+	}
+	parsed := parseMusicCallbackDataV2(strings.Fields(keyboard.InlineKeyboard[0][0].CallbackData))
+	if !parsed.ok || parsed.qualityOverride != "auto-lossless" {
+		t.Fatalf("parsed callback = %+v, want implicit lossless quality", parsed)
+	}
+}
+
 func TestKuwoCallbackEmptyFilteredPageStillBuildsNavigation(t *testing.T) {
 	badPage := make([]int, 8)
 	for index := range badPage {

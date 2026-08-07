@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 	"github.com/mymmrac/telego"
 )
@@ -85,6 +84,8 @@ func (h *GuestModeHandler) handleGuestPlaylist(ctx context.Context, b *telego.Bo
 	if inlineMessageID == "" {
 		return
 	}
+	chatID, isGroup := guestChatContext(message)
+	rememberInlineChat(inlineMessageID, chatID, isGroup)
 	go h.fetchAndRenderGuestPlaylist(detachContext(ctx), b, message, inlineMessageID, platformName, playlistID, userID, qualityOverride)
 }
 
@@ -108,11 +109,15 @@ func (h *GuestModeHandler) fetchAndRenderGuestPlaylist(ctx context.Context, b *t
 		return
 	}
 
-	qualityValue := h.guestDefaultQuality(ctx, userID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = qualityOverride
+	chatID, isGroup := guestChatContext(message)
+	qualityValue := h.guestDefaultQualityForScope(ctx, userID, chatID, isGroup)
+	requestedQuality, explicitQuality := qualityIntentValue(qualityOverride)
+	if strings.TrimSpace(requestedQuality) != "" {
+		qualityValue = requestedQuality
 	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.repo(), botpkg.PluginScopeUser, userID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	scopeType, scopeID := inlineRequestSettingScope(userID, chatID, isGroup)
+	qualityValue = resolvePlatformQualityValue(ctx, h.repo(), scopeType, scopeID, platformName, qualityValue, explicitQuality)
+	qualityValue = qualityIntentToken(qualityValue, explicitQuality)
 
 	title := strings.TrimSpace(playlist.Title)
 	if title == "" {
@@ -186,14 +191,17 @@ func (h *GuestModeHandler) renderGuestSearch(ctx context.Context, b *telego.Bot,
 		fallbackPlatform = ""
 	}
 
-	qualityValue := h.guestDefaultQuality(ctx, userID)
-	if strings.TrimSpace(qualityOverride) != "" {
-		qualityValue = strings.TrimSpace(qualityOverride)
+	chatID, isGroup := guestChatContext(message)
+	qualityValue := h.guestDefaultQualityForScope(ctx, userID, chatID, isGroup)
+	requestedQuality, explicitQuality := qualityIntentValue(qualityOverride)
+	if strings.TrimSpace(requestedQuality) != "" {
+		qualityValue = requestedQuality
 	}
 
 	biliFilter := true
 	filterLabel := ""
-	if enabled, supported, label := resolveSearchFilterEnabled(ctx, h.PlatformManager, h.repo(), platformName, botpkg.PluginScopeUser, userID); supported {
+	scopeType, scopeID := inlineRequestSettingScope(userID, chatID, isGroup)
+	if enabled, supported, label := resolveSearchFilterEnabled(ctx, h.PlatformManager, h.repo(), platformName, scopeType, scopeID); supported {
 		biliFilter = enabled
 		filterLabel = label
 	}
@@ -204,7 +212,8 @@ func (h *GuestModeHandler) renderGuestSearch(ctx context.Context, b *telego.Bot,
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, userVisibleSearchError(ctx, err), nil, "")
 		return
 	}
-	qualityValue = resolvePlatformQualityValue(ctx, h.repo(), botpkg.PluginScopeUser, userID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	qualityValue = resolvePlatformQualityValue(ctx, h.repo(), scopeType, scopeID, platformName, qualityValue, explicitQuality)
+	qualityValue = qualityIntentToken(qualityValue, explicitQuality)
 	limit := h.guestSearchLimit(platformName)
 	unavailable := make(map[string]bool)
 	if usedFallback && strings.TrimSpace(primaryPlatform) != "" {
@@ -436,6 +445,10 @@ func (h *GuestModeHandler) guestDefaultPlatform(ctx context.Context, userID int6
 }
 
 func (h *GuestModeHandler) guestDefaultQuality(ctx context.Context, userID int64) string {
+	return h.guestDefaultQualityForScope(ctx, userID, 0, false)
+}
+
+func (h *GuestModeHandler) guestDefaultQualityForScope(ctx context.Context, userID, chatID int64, isGroup bool) string {
 	qualityValue := strings.TrimSpace(h.DefaultQuality)
 	if qualityValue == "" && h.Music != nil {
 		qualityValue = strings.TrimSpace(h.Music.DefaultQuality)
@@ -443,9 +456,15 @@ func (h *GuestModeHandler) guestDefaultQuality(ctx context.Context, userID int64
 	if qualityValue == "" {
 		qualityValue = "hires"
 	}
-	if repo := h.repo(); repo != nil && userID != 0 {
-		if settings, err := repo.GetUserSettings(ctx, userID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
-			qualityValue = settings.DefaultQuality
+	if repo := h.repo(); repo != nil {
+		if isGroup && chatID != 0 {
+			if settings, err := repo.GetGroupSettings(ctx, chatID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
+				qualityValue = settings.DefaultQuality
+			}
+		} else if userID != 0 {
+			if settings, err := repo.GetUserSettings(ctx, userID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
+				qualityValue = settings.DefaultQuality
+			}
 		}
 	}
 	return qualityValue

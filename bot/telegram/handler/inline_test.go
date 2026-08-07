@@ -85,6 +85,20 @@ func TestParseInlineSearchOptions_PageSuffix(t *testing.T) {
 	}
 }
 
+func TestParseInlineStartParameter_PreservesImplicitQualityIntent(t *testing.T) {
+	platformName, trackID, qualityValue, ok := parseInlineStartParameter("cache_applemusic_12345_auto-lossless")
+	if !ok {
+		t.Fatal("parseInlineStartParameter rejected implicit quality token")
+	}
+	if platformName != "applemusic" || trackID != "12345" || qualityValue != "auto-lossless" {
+		t.Fatalf("parsed = (%q,%q,%q), want (applemusic,12345,auto-lossless)", platformName, trackID, qualityValue)
+	}
+	decodedQuality, explicit := qualityIntentValue(qualityValue)
+	if decodedQuality != "lossless" || explicit {
+		t.Fatalf("quality intent = (%q,%t), want (lossless,false)", decodedQuality, explicit)
+	}
+}
+
 func TestBuildInlineSearchPageFooter_HintQuery(t *testing.T) {
 	result := buildInlineSearchPageFooter(zhCtx(), "jj", "qqmusic", "", 1, 6, 48)
 	article, ok := result.(*telego.InlineQueryResultArticle)
@@ -102,6 +116,20 @@ func TestBuildInlineSearchPageFooter_HintQuery(t *testing.T) {
 	}
 	if strings.Contains(article.Description, "jj qq 1 2") {
 		t.Fatalf("description contains polluted keyword: %q", article.Description)
+	}
+}
+
+func TestBuildInlineSearchPageFooter_HidesImplicitQualityToken(t *testing.T) {
+	result := buildInlineSearchPageFooter(zhCtx(), "jj", "qqmusic", "auto-lossless", 1, 6, 48)
+	article, ok := result.(*telego.InlineQueryResultArticle)
+	if !ok {
+		t.Fatalf("result type = %T, want *telego.InlineQueryResultArticle", result)
+	}
+	if strings.Contains(article.Description, "auto-lossless") || strings.Contains(article.Description, "lossless") {
+		t.Fatalf("description leaked implicit quality intent: %q", article.Description)
+	}
+	if !strings.Contains(article.Description, "jj qq 2") {
+		t.Fatalf("description = %q, want implicit paging hint", article.Description)
 	}
 }
 
@@ -261,6 +289,41 @@ func TestBuildInlinePendingResultID_UsesTokenForUnsafeTrackID(t *testing.T) {
 	}
 	if platformName != "kugou" || trackID != "sharechain:abc123" || qualityValue != "lossless" {
 		t.Fatalf("parsed = (%q,%q,%q), want (%q,%q,%q)", platformName, trackID, qualityValue, "kugou", "sharechain:abc123", "lossless")
+	}
+}
+
+func TestBuildInlinePendingResultID_PreservesImplicitQualityIntent(t *testing.T) {
+	resultID := buildInlinePendingResultID("applemusic", "12345", "auto-hires")
+	platformName, trackID, qualityValue, ok := parseInlinePendingResultID(resultID)
+	if !ok {
+		t.Fatalf("parseInlinePendingResultID(%q) failed", resultID)
+	}
+	if platformName != "applemusic" || trackID != "12345" || qualityValue != "auto-hires" {
+		t.Fatalf("parsed = (%q,%q,%q), want (applemusic,12345,auto-hires)", platformName, trackID, qualityValue)
+	}
+}
+
+func TestInlineSearchHandler_resolveQualityIntent(t *testing.T) {
+	handler := &InlineSearchHandler{DefaultQuality: "lossless"}
+	qualityValue, intentToken, explicit := handler.resolveQualityIntent(context.Background(), 12345, "applemusic", "")
+	if qualityValue != "lossless" || intentToken != "auto-lossless" || explicit {
+		t.Fatalf("implicit = (%q,%q,%t), want (lossless,auto-lossless,false)", qualityValue, intentToken, explicit)
+	}
+	qualityValue, intentToken, explicit = handler.resolveQualityIntent(context.Background(), 12345, "applemusic", "hires")
+	if qualityValue != "hires" || intentToken != "hires" || !explicit {
+		t.Fatalf("explicit = (%q,%q,%t), want (hires,hires,true)", qualityValue, intentToken, explicit)
+	}
+}
+
+func TestBuildInlineFavoriteCard_UsesImplicitQualityIntent(t *testing.T) {
+	result := buildInlineFavoriteCard(zhCtx(), &botpkg.Favorite{Platform: "applemusic", TrackID: "12345", SongName: "Song"}, "lossless", 6789)
+	article, ok := result.(*telego.InlineQueryResultArticle)
+	if !ok {
+		t.Fatalf("result type = %T, want *telego.InlineQueryResultArticle", result)
+	}
+	_, _, qualityValue, ok := parseInlinePendingResultID(article.ID)
+	if !ok || qualityValue != "auto-lossless" {
+		t.Fatalf("favorite quality = %q, ok=%t, want auto-lossless", qualityValue, ok)
 	}
 }
 

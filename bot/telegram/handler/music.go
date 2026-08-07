@@ -857,14 +857,25 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		userID = message.From.ID
 	}
 
-	quality := h.resolveRequestedQuality(ctx, message, userID, platformName, qualityOverride)
-
+	_, explicitQuality := qualityIntentValue(qualityOverride)
+	baselineQuality := h.resolveRequestedQuality(ctx, message, userID, platformName, qualityOverride)
+	quality := baselineQuality
 	qualityStr := quality.String()
-	if handled, err := h.tryPresentDirectEpisodes(ctx, b, message, platformName, trackID, qualityStr); handled {
+	scopeType, scopeID := musicRequestSettingScope(message, userID)
+	preferAtmos := preferAppleMusicAtmosEnabled(ctx, h.Repo, h.PlatformManager, scopeType, scopeID, platformName, explicitQuality) && quality != platform.QualityAtmos
+
+	if handled, err := h.tryPresentDirectEpisodes(ctx, b, message, platformName, trackID, qualityIntentToken(qualityStr, explicitQuality)); handled {
 		return err
 	}
 
-	if cachedInfo, sent, err := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, qualityStr, false, getCached, handleInvalidCachedFileID); err != nil {
+	earlyCacheQuality := qualityStr
+	if preferAtmos {
+		// A stereo cache cannot prove that the track has no Atmos rendition. An
+		// existing verified Atmos cache is conclusive and remains a free hit; on
+		// a miss, load catalog metadata before deciding the effective quality.
+		earlyCacheQuality = platform.QualityAtmos.String()
+	}
+	if cachedInfo, sent, err := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, earlyCacheQuality, false, getCached, handleInvalidCachedFileID); err != nil {
 		songInfo = cachedInfo
 		sendFailed(err)
 		return err
@@ -878,6 +889,15 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 	// it is the heaviest per-user platform op and is rate-limited per user /
 	// platform / global. Cache hits never reach here and stay free.
 	if !h.ResourceLimiter.AllowFor(ActionDownload, userID, message.Chat.ID, platformName) {
+		if preferAtmos {
+			if cachedInfo, sent, cacheErr := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, baselineQuality.String(), false, getCached, handleInvalidCachedFileID); cacheErr != nil {
+				songInfo = cachedInfo
+				sendFailed(cacheErr)
+				return cacheErr
+			} else if sent {
+				return nil
+			}
+		}
 		err := platform.ErrRateLimited
 		sendFailed(err)
 		return err
@@ -885,6 +905,50 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 
 	if !silent {
 		status.Upsert(tr(ctx, "fetch_info"))
+	}
+	if h.PlatformManager == nil {
+		if preferAtmos {
+			if cachedInfo, sent, cacheErr := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, baselineQuality.String(), silent, getCached, handleInvalidCachedFileID); cacheErr != nil {
+				songInfo = cachedInfo
+				sendFailed(cacheErr)
+				return cacheErr
+			} else if sent {
+				return nil
+			}
+		}
+		return errors.New("platform manager not configured")
+	}
+
+	var (
+		track        *platform.Track
+		plat         platform.Platform
+		autoSelected bool
+	)
+	// Auto-Atmos needs a concrete catalog track before the cache/download key
+	// is chosen. Other requests retain the existing ordering and do this work
+	// after acquiring the download slot.
+	if preferAtmos {
+		var resolvedPlatform, resolvedTrackID string
+		var err error
+		track, plat, resolvedPlatform, resolvedTrackID, err = h.loadTrackWithFallback(ctx, message, status, platformName, trackID)
+		if err != nil {
+			if cachedInfo, sent, cacheErr := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, baselineQuality.String(), silent, getCached, handleInvalidCachedFileID); cacheErr != nil {
+				songInfo = cachedInfo
+				sendFailed(cacheErr)
+				return cacheErr
+			} else if sent {
+				return nil
+			}
+			return err
+		}
+		platformName = resolvedPlatform
+		trackID = resolvedTrackID
+		if !isAppleMusicPlatform(platformName) {
+			preferAtmos = false
+			baselineQuality = qualityForResolvedPlatform(platformName, baselineQuality)
+		}
+		quality, autoSelected = preferredAppleMusicQuality(track, baselineQuality, preferAtmos)
+		qualityStr = quality.String()
 	}
 
 	// Show a single static "queued" notice (with a button to check live counts)
@@ -898,6 +962,15 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 	}
 	releaseDownloadSlot, err := h.acquireDownloadSlot(ctx, platformName, trackID, quality, onQueued)
 	if err != nil {
+		if autoSelected {
+			if cachedInfo, sent, cacheErr := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, baselineQuality.String(), silent, getCached, handleInvalidCachedFileID); cacheErr != nil {
+				songInfo = cachedInfo
+				sendFailed(cacheErr)
+				return cacheErr
+			} else if sent {
+				return nil
+			}
+		}
 		sendFailed(err)
 		return err
 	}
@@ -911,19 +984,38 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		return nil
 	}
 
-	if h.PlatformManager == nil {
-		return errors.New("platform manager not configured")
+	if track == nil {
+		var resolvedPlatform, resolvedTrackID string
+		track, plat, resolvedPlatform, resolvedTrackID, err = h.loadTrackWithFallback(ctx, message, status, platformName, trackID)
+		if err != nil {
+			return err
+		}
+		platformName = resolvedPlatform
+		trackID = resolvedTrackID
+		quality = qualityForResolvedPlatform(platformName, quality)
+		qualityStr = quality.String()
 	}
-
-	track, plat, resolvedPlatform, resolvedTrackID, err := h.loadTrackWithFallback(ctx, message, status, platformName, trackID)
-	if err != nil {
-		return err
-	}
-	platformName = resolvedPlatform
-	trackID = resolvedTrackID
 
 	fillSongInfoFromTrack(&songInfo, track, platformName, trackID, message)
 	info, err := h.loadDownloadInfo(ctx, status, platformName, trackID, quality)
+	if err != nil && autoSelected {
+		// The catalog advertisement can be stale or the device master may omit
+		// the rendition. Preference mode falls back to the original default;
+		// an explicit Atmos request never reaches this branch.
+		quality = qualityForResolvedPlatform(platformName, baselineQuality)
+		qualityStr = quality.String()
+		if cachedInfo, sent, cacheErr := h.trySendCachedTrack(ctx, b, status, message, platformName, trackID, qualityStr, silent, getCached, handleInvalidCachedFileID); cacheErr != nil {
+			songInfo = cachedInfo
+			sendFailed(cacheErr)
+			return cacheErr
+		} else if sent {
+			return nil
+		}
+		if !silent {
+			status.Upsert(tr(ctx, "fetch_info"))
+		}
+		info, err = h.loadDownloadInfo(ctx, status, platformName, trackID, quality)
+	}
 	if err != nil {
 		return err
 	}
@@ -1038,8 +1130,7 @@ func (h *MusicHandler) tryPresentDirectEpisodes(ctx context.Context, b *telego.B
 
 func (h *MusicHandler) resolveRequestedQuality(ctx context.Context, message *telego.Message, userID int64, platformName, qualityOverride string) platform.Quality {
 	quality := platform.QualityHigh
-	scopeType := botpkg.PluginScopeUser
-	scopeID := userID
+	scopeType, scopeID := musicRequestSettingScope(message, userID)
 	if h != nil && h.Repo != nil {
 		if message != nil && message.Chat.Type != "private" {
 			scopeType = botpkg.PluginScopeGroup
@@ -1057,10 +1148,13 @@ func (h *MusicHandler) resolveRequestedQuality(ctx context.Context, message *tel
 			}
 		}
 	}
-	if strings.TrimSpace(qualityOverride) != "" {
-		if q, err := platform.ParseQuality(qualityOverride); err == nil {
+	intentQuality, explicit := qualityIntentValue(qualityOverride)
+	if intentQuality != "" {
+		if q, err := platform.ParseQuality(intentQuality); err == nil {
 			quality = q
 		}
+	}
+	if explicit {
 		if quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
 			return platform.QualityHiRes
 		}
@@ -1068,6 +1162,20 @@ func (h *MusicHandler) resolveRequestedQuality(ctx context.Context, message *tel
 	}
 	if q, err := platform.ParseQuality(resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, quality.String(), false)); err == nil {
 		quality = q
+	}
+	return quality
+}
+
+func musicRequestSettingScope(message *telego.Message, userID int64) (string, int64) {
+	if message != nil && message.Chat.Type != "private" {
+		return botpkg.PluginScopeGroup, message.Chat.ID
+	}
+	return botpkg.PluginScopeUser, userID
+}
+
+func qualityForResolvedPlatform(platformName string, quality platform.Quality) platform.Quality {
+	if quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
+		return platform.QualityHiRes
 	}
 	return quality
 }
@@ -2983,9 +3091,12 @@ func parseInlineStartParameter(value string) (platformName, trackID, qualityOver
 			qualityOverride = ""
 		}
 		if qualityOverride != "" {
-			quality, err := platform.ParseQuality(qualityOverride)
+			qualityValue, explicitQuality := qualityIntentValue(qualityOverride)
+			quality, err := platform.ParseQuality(qualityValue)
 			if err != nil || quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
 				qualityOverride = ""
+			} else {
+				qualityOverride = qualityIntentToken(qualityValue, explicitQuality)
 			}
 		}
 	}
@@ -3013,38 +3124,61 @@ func parseInlineSearchStartParameter(value string) (query string, ok bool) {
 }
 
 func (h *MusicHandler) resolveInlineQualityValue(ctx context.Context, userID int64, platformName, qualityOverride string) string {
-	qualityValue := strings.TrimSpace(qualityOverride)
+	return h.resolveInlineQualityValueForScope(ctx, userID, 0, false, platformName, qualityOverride)
+}
+
+func (h *MusicHandler) resolveInlineQualityValueForScope(ctx context.Context, userID, chatID int64, isGroup bool, platformName, qualityOverride string) string {
+	qualityValue, explicit := qualityIntentValue(qualityOverride)
+	loadStoredDefault := !explicit && qualityValue == ""
 	if qualityValue == "" {
 		qualityValue = strings.TrimSpace(h.DefaultQuality)
 	}
 	if qualityValue == "" {
 		qualityValue = "hires"
 	}
-	if h.Repo != nil && userID != 0 && strings.TrimSpace(qualityOverride) == "" {
-		if settings, err := h.Repo.GetUserSettings(ctx, userID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
+	scopeType, scopeID := inlineRequestSettingScope(userID, chatID, isGroup)
+	if h.Repo != nil && scopeID != 0 && loadStoredDefault {
+		if isGroup {
+			if settings, err := h.Repo.GetGroupSettings(ctx, chatID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
+				qualityValue = strings.TrimSpace(settings.DefaultQuality)
+			}
+		} else if settings, err := h.Repo.GetUserSettings(ctx, userID); err == nil && settings != nil && strings.TrimSpace(settings.DefaultQuality) != "" {
 			qualityValue = strings.TrimSpace(settings.DefaultQuality)
 		}
 	}
-	return resolvePlatformQualityValue(ctx, h.Repo, botpkg.PluginScopeUser, userID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
+	return resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, explicit)
 }
 
-func (h *MusicHandler) findInlineCachedSong(ctx context.Context, userID int64, platformName, trackID, qualityOverride string) (*botpkg.SongInfo, string, error) {
+func inlineRequestSettingScope(userID, chatID int64, isGroup bool) (string, int64) {
+	if isGroup {
+		return botpkg.PluginScopeGroup, chatID
+	}
+	return botpkg.PluginScopeUser, userID
+}
+
+func (h *MusicHandler) findInlineCachedSong(ctx context.Context, userID, chatID int64, isGroup bool, platformName, trackID, qualityOverride string) (*botpkg.SongInfo, string, error) {
 	if h == nil || h.Repo == nil {
 		return nil, "", nil
 	}
-	qualityValue := h.resolveInlineQualityValue(ctx, userID, platformName, qualityOverride)
-	cached, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, qualityValue)
+	_, explicit := qualityIntentValue(qualityOverride)
+	qualityValue := h.resolveInlineQualityValueForScope(ctx, userID, chatID, isGroup, platformName, qualityOverride)
+	scopeType, scopeID := inlineRequestSettingScope(userID, chatID, isGroup)
+	cacheQuality := qualityValue
+	if preferAppleMusicAtmosEnabled(ctx, h.Repo, h.PlatformManager, scopeType, scopeID, platformName, explicit) && qualityValue != platform.QualityAtmos.String() {
+		cacheQuality = platform.QualityAtmos.String()
+	}
+	cached, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, cacheQuality)
 	if err != nil {
-		return nil, qualityValue, err
+		return nil, cacheQuality, err
 	}
 	if cached == nil || strings.TrimSpace(cached.FileID) == "" {
-		return nil, qualityValue, nil
+		return nil, cacheQuality, nil
 	}
-	if !isReusableCachedSong(cached, platformName, qualityValue) {
-		return nil, qualityValue, nil
+	if !isReusableCachedSong(cached, platformName, cacheQuality) {
+		return nil, cacheQuality, nil
 	}
 	copy := *cached
-	return &copy, qualityValue, nil
+	return &copy, cacheQuality, nil
 }
 
 func (h *MusicHandler) prepareInlineSong(
@@ -3052,6 +3186,7 @@ func (h *MusicHandler) prepareInlineSong(
 	b *telego.Bot,
 	userID int64,
 	chatID int64,
+	isGroup bool,
 	userName string,
 	platformName, trackID, qualityOverride string,
 	progress func(text string),
@@ -3060,7 +3195,16 @@ func (h *MusicHandler) prepareInlineSong(
 	if h == nil {
 		return nil, errors.New("music handler not configured")
 	}
-	qualityValue := h.resolveInlineQualityValue(ctx, userID, platformName, qualityOverride)
+	_, explicitQuality := qualityIntentValue(qualityOverride)
+	baselineQualityValue := h.resolveInlineQualityValueForScope(ctx, userID, chatID, isGroup, platformName, qualityOverride)
+	baselineQuality := platform.QualityHigh
+	if parsed, err := platform.ParseQuality(baselineQualityValue); err == nil {
+		baselineQuality = parsed
+	}
+	quality := baselineQuality
+	qualityValue := quality.String()
+	scopeType, scopeID := inlineRequestSettingScope(userID, chatID, isGroup)
+	preferAtmos := preferAppleMusicAtmosEnabled(ctx, h.Repo, h.PlatformManager, scopeType, scopeID, platformName, explicitQuality) && quality != platform.QualityAtmos
 
 	findCached := func() (*botpkg.SongInfo, error) {
 		if h.Repo == nil {
@@ -3076,23 +3220,91 @@ func (h *MusicHandler) prepareInlineSong(
 		return cached, nil
 	}
 
+	if preferAtmos {
+		qualityValue = platform.QualityAtmos.String()
+	}
 	if cached, _ := findCached(); cached != nil {
 		copy := *cached
 		return &copy, nil
 	}
+	qualityValue = quality.String()
 
 	if !h.ResourceLimiter.AllowFor(ActionDownload, userID, chatID, platformName) {
+		if preferAtmos {
+			if cached, _ := findCached(); cached != nil {
+				copy := *cached
+				return &copy, nil
+			}
+		}
 		return nil, platform.ErrRateLimited
 	}
 	if !hasDownloadWorkAdmission(ctx) {
 		releaseAdmission, admitted := h.enterDownloadWork(userID, chatID)
 		if !admitted {
+			if preferAtmos {
+				if cached, _ := findCached(); cached != nil {
+					copy := *cached
+					return &copy, nil
+				}
+			}
 			return nil, errDownloadQueueOverloaded
 		}
 		defer releaseAdmission()
 	}
 
-	key := fmt.Sprintf("inline:%s:%s:%s", strings.TrimSpace(platformName), strings.TrimSpace(trackID), strings.TrimSpace(qualityValue))
+	if h.PlatformManager == nil {
+		if preferAtmos {
+			if cached, _ := findCached(); cached != nil {
+				copy := *cached
+				return &copy, nil
+			}
+		}
+		return nil, errors.New("platform manager not configured")
+	}
+
+	if replacementPlatform, replacementTrackID, hijacked, replacementLabel := maybeApplyAprilFoolsTrackHijack(platformName, trackID); hijacked {
+		if h != nil && h.Logger != nil {
+			h.Logger.Info("april fools hijacked inline download request", "from_platform", platformName, "from_track_id", trackID, "to_platform", replacementPlatform, "to_track_id", replacementTrackID, "replacement", replacementLabel)
+		}
+		platformName = replacementPlatform
+		trackID = replacementTrackID
+		baselineQuality = qualityForResolvedPlatform(platformName, baselineQuality)
+		preferAtmos = preferAtmos && isAppleMusicPlatform(platformName)
+	}
+
+	plat := h.PlatformManager.Get(platformName)
+	if plat == nil {
+		if preferAtmos {
+			if cached, _ := findCached(); cached != nil {
+				copy := *cached
+				return &copy, nil
+			}
+		}
+		return nil, fmt.Errorf("platform not found: %s", platformName)
+	}
+	track, err := h.getTrackSingleflight(ctx, platformName, trackID)
+	if err != nil {
+		if preferAtmos {
+			if cached, _ := findCached(); cached != nil {
+				copy := *cached
+				return &copy, nil
+			}
+		}
+		return nil, err
+	}
+	quality, autoSelected := preferredAppleMusicQuality(track, baselineQuality, preferAtmos)
+	qualityValue = quality.String()
+
+	if cached, _ := findCached(); cached != nil {
+		copy := *cached
+		return &copy, nil
+	}
+
+	intentKey := "strict"
+	if autoSelected {
+		intentKey = "auto"
+	}
+	key := fmt.Sprintf("inline:%s:%s:%s:%s:%s", strings.TrimSpace(platformName), strings.TrimSpace(trackID), strings.TrimSpace(qualityValue), intentKey, baselineQuality.String())
 	h.inlineMu.Lock()
 	if h.inlineInFlight == nil {
 		h.inlineInFlight = make(map[string]*inlineProcessCall)
@@ -3123,38 +3335,49 @@ func (h *MusicHandler) prepareInlineSong(
 		return &copy, nil
 	}
 
-	if h.PlatformManager == nil {
-		call.err = errors.New("platform manager not configured")
-		return nil, call.err
-	}
-	plat := h.PlatformManager.Get(platformName)
-	if plat == nil {
-		call.err = fmt.Errorf("platform not found: %s", platformName)
-		return nil, call.err
-	}
-
-	quality := platform.QualityHigh
-	if parsed, err := platform.ParseQuality(qualityValue); err == nil {
-		quality = parsed
-	}
-	if replacementPlatform, replacementTrackID, hijacked, replacementLabel := maybeApplyAprilFoolsTrackHijack(platformName, trackID); hijacked {
-		if h != nil && h.Logger != nil {
-			h.Logger.Info("april fools hijacked inline download request", "from_platform", platformName, "from_track_id", trackID, "to_platform", replacementPlatform, "to_track_id", replacementTrackID, "replacement", replacementLabel)
+	// Acquire Apple's serial wrapper gate before resolving the device master.
+	// GetDownloadInfo performs wrapper work for enhanced qualities.
+	notifyQueued := func() {
+		if onQueued != nil {
+			onQueued()
+			return
 		}
-		platformName = replacementPlatform
-		trackID = replacementTrackID
-		plat = h.PlatformManager.Get(platformName)
-		if plat == nil {
-			call.err = fmt.Errorf("platform not found: %s", platformName)
-			return nil, call.err
+		if progress != nil {
+			progress(tr(ctx, "wait_for_down"))
 		}
 	}
-	track, err := h.getTrackSingleflight(ctx, platformName, trackID)
+	releaseDownloadSlot, err := h.acquireDownloadSlot(ctx, platformName, trackID, quality, notifyQueued)
 	if err != nil {
+		if autoSelected {
+			qualityValue = baselineQuality.String()
+			if cached, _ := findCached(); cached != nil {
+				copy := *cached
+				call.song = &copy
+				return &copy, nil
+			}
+		}
 		call.err = err
 		return nil, err
 	}
+	defer releaseDownloadSlot()
+
+	if cached, _ := findCached(); cached != nil {
+		copy := *cached
+		call.song = &copy
+		return &copy, nil
+	}
+
 	info, err := h.getDownloadInfoSingleflight(ctx, platformName, trackID, quality)
+	if (err != nil || info == nil || strings.TrimSpace(info.URL) == "") && autoSelected {
+		quality = qualityForResolvedPlatform(platformName, baselineQuality)
+		qualityValue = quality.String()
+		if cached, _ := findCached(); cached != nil {
+			copy := *cached
+			call.song = &copy
+			return &copy, nil
+		}
+		info, err = h.getDownloadInfoSingleflight(ctx, platformName, trackID, quality)
+	}
 	if err != nil {
 		call.err = err
 		return nil, err
@@ -3197,31 +3420,6 @@ func (h *MusicHandler) prepareInlineSong(
 	songInfo.FileExt = info.Format
 	songInfo.MusicSize = 0
 	songInfo.BitRate = info.Bitrate * 1000
-
-	// Inline placeholder: when the task has to wait, show the static "queued"
-	// text once. Inline/guest messages can carry the same queue-inspection
-	// callback button as ordinary chat status messages.
-	notifyQueued := func() {
-		if onQueued != nil {
-			onQueued()
-			return
-		}
-		if progress != nil {
-			progress(tr(ctx, "wait_for_down"))
-		}
-	}
-	releaseDownloadSlot, err := h.acquireDownloadSlot(ctx, platformName, trackID, quality, notifyQueued)
-	if err != nil {
-		call.err = err
-		return nil, err
-	}
-	defer releaseDownloadSlot()
-
-	if cached, _ := findCached(); cached != nil {
-		copy := *cached
-		call.song = &copy
-		return &copy, nil
-	}
 
 	if progress != nil {
 		progress(buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), tr(ctx, "downloading")))
@@ -3340,13 +3538,14 @@ func (h *MusicHandler) prepareInlineSongWithTimeout(
 	platformName, trackID, qualityOverride string,
 	progress func(text string),
 ) (*botpkg.SongInfo, error) {
-	return h.prepareInlineSongWithTimeoutFor(ctx, b, userID, 0, userName, platformName, trackID, qualityOverride, progress, nil)
+	return h.prepareInlineSongWithTimeoutFor(ctx, b, userID, 0, false, userName, platformName, trackID, qualityOverride, progress, nil)
 }
 
 func (h *MusicHandler) prepareInlineSongWithTimeoutFor(
 	ctx context.Context,
 	b *telego.Bot,
 	userID, chatID int64,
+	isGroup bool,
 	userName string,
 	platformName, trackID, qualityOverride string,
 	progress func(text string),
@@ -3354,7 +3553,7 @@ func (h *MusicHandler) prepareInlineSongWithTimeoutFor(
 ) (*botpkg.SongInfo, error) {
 	processCtx, cancel := h.processContext(detachContext(ctx))
 	defer cancel()
-	return h.prepareInlineSong(processCtx, b, userID, chatID, userName, platformName, trackID, qualityOverride, progress, onQueued)
+	return h.prepareInlineSong(processCtx, b, userID, chatID, isGroup, userName, platformName, trackID, qualityOverride, progress, onQueued)
 }
 
 // acquireDownloadSlot admits one download into the global concurrency pool.

@@ -413,6 +413,40 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 	}
 }
 
+func TestSearchHandler_buildSearchPage_PreservesImplicitMusicQuality(t *testing.T) {
+	handler := &SearchHandler{}
+	tracks := []platform.Track{{ID: "1", Title: "Song"}}
+	_, keyboard := handler.buildSearchPage(zhCtx(), tracks, "applemusic", "test", "auto-lossless", 12345, 100, 1, nil, false, 48, true, "", "music")
+	if keyboard == nil || len(keyboard.InlineKeyboard) == 0 || len(keyboard.InlineKeyboard[0]) == 0 {
+		t.Fatal("missing result callback")
+	}
+	fields := strings.Fields(keyboard.InlineKeyboard[0][0].CallbackData)
+	if len(fields) != 5 || fields[3] != "auto-lossless" {
+		t.Fatalf("callback fields = %v, want implicit quality token", fields)
+	}
+}
+
+func TestSearchHandler_buildSearchPage_LyricUsesConcreteNonEmptyQuality(t *testing.T) {
+	handler := &SearchHandler{}
+	tracks := []platform.Track{{ID: "1", Title: "Song"}}
+	for _, qualityValue := range []string{"auto-lossless", ""} {
+		_, keyboard := handler.buildSearchPage(zhCtx(), tracks, "applemusic", "test", qualityValue, 12345, 100, 1, nil, false, 48, true, "", "lyric")
+		if keyboard == nil || len(keyboard.InlineKeyboard) == 0 || len(keyboard.InlineKeyboard[0]) == 0 {
+			t.Fatalf("quality %q: missing lyric callback", qualityValue)
+		}
+		fields := strings.Fields(keyboard.InlineKeyboard[0][0].CallbackData)
+		if len(fields) != 5 {
+			t.Fatalf("quality %q: callback fields = %v, want five non-empty fields", qualityValue, fields)
+		}
+		if strings.HasPrefix(fields[3], implicitQualityPrefix) {
+			t.Fatalf("quality %q: lyric callback leaked internal token %q", qualityValue, fields[3])
+		}
+		if fields[3] == "" {
+			t.Fatalf("quality %q: lyric callback quality is empty", qualityValue)
+		}
+	}
+}
+
 func TestSearchHandler_buildSearchPage_Pagination(t *testing.T) {
 	handler := &SearchHandler{}
 
