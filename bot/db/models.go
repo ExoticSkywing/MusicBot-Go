@@ -14,7 +14,11 @@ type SongInfoModel struct {
 	TrackID         string `gorm:"not null;default:'';index:idx_platform_track_quality,unique"`
 	Quality         string `gorm:"not null;default:'hires';index:idx_platform_track_quality,unique"`
 	QualityVerified bool   `gorm:"not null;default:false"`
-	MusicID         int    // Deprecated: Legacy NetEase music ID (kept for backward compatibility)
+	QualityRevision int    `gorm:"not null;default:0"`
+	AudioCodec      string
+	SampleRate      int
+	BitDepth        int
+	MusicID         int // Deprecated: Legacy NetEase music ID (kept for backward compatibility)
 	SongName        string
 	SongArtists     string
 	SongArtistsIDs  string
@@ -63,6 +67,10 @@ func toInternal(model SongInfoModel) *bot.SongInfo {
 		TrackID:         model.TrackID,
 		Quality:         model.Quality,
 		QualityVerified: model.QualityVerified,
+		QualityRevision: model.QualityRevision,
+		AudioCodec:      model.AudioCodec,
+		SampleRate:      model.SampleRate,
+		BitDepth:        model.BitDepth,
 		MusicID:         model.MusicID,
 		SongName:        model.SongName,
 		SongArtists:     model.SongArtists,
@@ -98,6 +106,10 @@ func toModel(info *bot.SongInfo) *SongInfoModel {
 		TrackID:         info.TrackID,
 		Quality:         info.Quality,
 		QualityVerified: info.QualityVerified,
+		QualityRevision: info.QualityRevision,
+		AudioCodec:      info.AudioCodec,
+		SampleRate:      info.SampleRate,
+		BitDepth:        info.BitDepth,
 		MusicID:         info.MusicID,
 		SongName:        info.SongName,
 		SongArtists:     info.SongArtists,

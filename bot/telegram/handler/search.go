@@ -339,15 +339,13 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 	if strings.TrimSpace(qualityOverride) != "" {
 		qualityValue = qualityOverride
 	}
-	if strings.TrimSpace(qualityOverride) == "" {
-		scopeType := botpkg.PluginScopeUser
-		scopeID := userID
-		if message.Chat.Type != "private" {
-			scopeType = botpkg.PluginScopeGroup
-			scopeID = message.Chat.ID
-		}
-		qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, false)
+	scopeType = botpkg.PluginScopeUser
+	scopeID = userID
+	if message.Chat.Type != "private" {
+		scopeType = botpkg.PluginScopeGroup
+		scopeID = message.Chat.ID
 	}
+	qualityValue = resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, qualityValue, strings.TrimSpace(qualityOverride) != "")
 	initialLimit := h.initialSearchLimit(platformName)
 	hasMore := len(tracks) >= initialLimit && initialLimit < searchLimit
 	pageText, keyboard := h.buildSearchPage(ctx, tracks, platformName, keyword, qualityValue, requesterID, msgResult.MessageID, 1, unavailable, hasMore, searchLimit, biliFilter, filterLabel, action)

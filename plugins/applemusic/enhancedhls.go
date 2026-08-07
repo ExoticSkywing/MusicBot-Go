@@ -15,55 +15,69 @@ import (
 type enhancedHLSVariant struct {
 	Codecs    string // e.g. "alac", "ec-3", "mp4a.40.2"
 	AudioCh   string // AUDIO group id, e.g. "audio-alac-stereo-44100-24"
+	Channels  string // CHANNELS attr, e.g. "2" or "16/JOC"
 	Bandwidth int    // BANDWIDTH attr
 	AvgBW     int    // AVERAGE-BANDWIDTH attr
 	URI       string // media playlist URI (relative to master)
 
-	// Parsed from the AUDIO group id where available.
+	// Parsed from the matching EXT-X-MEDIA entry, with the AUDIO group id used
+	// as a compatibility fallback for older manifests.
 	SampleRate int // e.g. 44100, 48000, 96000, 192000
 	BitDepth   int // e.g. 16 or 24
 }
 
 // kind classifies a variant into a coarse audio family.
-func (v enhancedHLSVariant) isALAC() bool  { return v.Codecs == "alac" }
-func (v enhancedHLSVariant) isAtmos() bool { return v.Codecs == "ec-3" }
-func (v enhancedHLSVariant) isAAC() bool   { return strings.HasPrefix(v.Codecs, "mp4a.40") }
+func (v enhancedHLSVariant) isALAC() bool {
+	return strings.EqualFold(strings.TrimSpace(v.Codecs), "alac")
+}
+func (v enhancedHLSVariant) isDolbyAudio() bool {
+	codec := strings.ToLower(strings.TrimSpace(v.Codecs))
+	return codec == "ec-3" || codec == "ec+3" || strings.Contains(codec, "joc")
+}
+func (v enhancedHLSVariant) isAtmos() bool {
+	codec := strings.ToLower(strings.TrimSpace(v.Codecs))
+	channels := strings.ToLower(strings.TrimSpace(v.Channels))
+	group := strings.ToLower(strings.TrimSpace(v.AudioCh))
+	if !v.isDolbyAudio() {
+		return false
+	}
+	return codec == "ec+3" || strings.Contains(codec, "joc") ||
+		strings.Contains(channels, "joc") || strings.Contains(group, "atmos") ||
+		strings.Contains(group, "joc")
+}
+func (v enhancedHLSVariant) isAAC() bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(v.Codecs)), "mp4a.40")
+}
 
 var (
 	reStreamInf = regexp.MustCompile(`^#EXT-X-STREAM-INF:(.*)$`)
-	reAttrAudio = regexp.MustCompile(`AUDIO="([^"]*)"`)
-	reAttrCodec = regexp.MustCompile(`CODECS="([^"]*)"`)
-	reAttrBW    = regexp.MustCompile(`[^-]BANDWIDTH=(\d+)`)
-	reAttrAvgBW = regexp.MustCompile(`AVERAGE-BANDWIDTH=(\d+)`)
 )
+
+type enhancedHLSAudioGroup struct {
+	SampleRate int
+	BitDepth   int
+	Channels   string
+}
 
 // parseEnhancedHLSMaster parses the enhancedHls master playlist and returns all
 // audio stream variants, sorted by average bandwidth descending (best first).
 func parseEnhancedHLSMaster(content string) ([]enhancedHLSVariant, error) {
 	var variants []enhancedHLSVariant
 	lines := strings.Split(content, "\n")
+	audioGroups := parseEnhancedHLSAudioGroups(lines)
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
 		m := reStreamInf.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		attrs := m[1]
-		var v enhancedHLSVariant
-		if cm := reAttrCodec.FindStringSubmatch(attrs); cm != nil {
-			v.Codecs = cm[1]
+		attrs := parseHLSAttributeList(m[1])
+		v := enhancedHLSVariant{
+			Codecs:  attrs["CODECS"],
+			AudioCh: attrs["AUDIO"],
 		}
-		if am := reAttrAudio.FindStringSubmatch(attrs); am != nil {
-			v.AudioCh = am[1]
-		}
-		// BANDWIDTH= but not AVERAGE-BANDWIDTH=; the regex requires a leading
-		// non-dash char so it won't match the tail of AVERAGE-BANDWIDTH.
-		if bm := reAttrBW.FindStringSubmatch("," + attrs); bm != nil {
-			v.Bandwidth, _ = strconv.Atoi(bm[1])
-		}
-		if bm := reAttrAvgBW.FindStringSubmatch(attrs); bm != nil {
-			v.AvgBW, _ = strconv.Atoi(bm[1])
-		}
+		v.Bandwidth, _ = strconv.Atoi(attrs["BANDWIDTH"])
+		v.AvgBW, _ = strconv.Atoi(attrs["AVERAGE-BANDWIDTH"])
 		// The URI is on the next non-comment, non-empty line.
 		for j := i + 1; j < len(lines); j++ {
 			u := strings.TrimSpace(lines[j])
@@ -75,6 +89,18 @@ func parseEnhancedHLSMaster(content string) ([]enhancedHLSVariant, error) {
 			break
 		}
 		v.SampleRate, v.BitDepth = parseALACGroupDetails(v.AudioCh)
+		v.Channels = parseAudioGroupChannels(v.AudioCh)
+		if group, ok := audioGroups[v.AudioCh]; ok {
+			if group.SampleRate > 0 {
+				v.SampleRate = group.SampleRate
+			}
+			if group.BitDepth > 0 {
+				v.BitDepth = group.BitDepth
+			}
+			if group.Channels != "" {
+				v.Channels = group.Channels
+			}
+		}
 		if v.URI != "" {
 			variants = append(variants, v)
 		}
@@ -88,11 +114,80 @@ func parseEnhancedHLSMaster(content string) ([]enhancedHLSVariant, error) {
 	return variants, nil
 }
 
+// parseEnhancedHLSAudioGroups indexes technical attributes declared on
+// EXT-X-MEDIA. These attributes are authoritative; group-id parsing below is
+// retained only for manifests that omit them.
+func parseEnhancedHLSAudioGroups(lines []string) map[string]enhancedHLSAudioGroup {
+	groups := make(map[string]enhancedHLSAudioGroup)
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") {
+			continue
+		}
+		attrs := parseHLSAttributeList(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+		if !strings.EqualFold(attrs["TYPE"], "AUDIO") {
+			continue
+		}
+		groupID := strings.TrimSpace(attrs["GROUP-ID"])
+		if groupID == "" {
+			continue
+		}
+		group := groups[groupID]
+		if sampleRate, err := strconv.Atoi(attrs["SAMPLE-RATE"]); err == nil && sampleRate > 0 {
+			group.SampleRate = sampleRate
+		}
+		if bitDepth, err := strconv.Atoi(attrs["BIT-DEPTH"]); err == nil && bitDepth > 0 {
+			group.BitDepth = bitDepth
+		}
+		if channels := strings.TrimSpace(attrs["CHANNELS"]); channels != "" {
+			group.Channels = channels
+		}
+		groups[groupID] = group
+	}
+	return groups
+}
+
+// parseHLSAttributeList splits an HLS attribute list without breaking commas
+// inside quoted values (notably CODECS). Returned values have surrounding
+// quotes removed.
+func parseHLSAttributeList(raw string) map[string]string {
+	attrs := make(map[string]string)
+	start := 0
+	inQuotes := false
+	add := func(part string) {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			return
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+			value = value[1 : len(value)-1]
+		}
+		if key != "" {
+			attrs[key] = value
+		}
+	}
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if !inQuotes {
+				add(raw[start:i])
+				start = i + 1
+			}
+		}
+	}
+	add(raw[start:])
+	return attrs
+}
+
 // parseALACGroupDetails extracts sample rate and bit depth from an ALAC audio
 // group id like "audio-alac-stereo-44100-24" (rate=44100, depth=24). Returns
 // zeros if the pattern doesn't match.
 func parseALACGroupDetails(group string) (sampleRate, bitDepth int) {
-	if !strings.Contains(group, "alac") {
+	if !strings.Contains(strings.ToLower(group), "alac") {
 		return 0, 0
 	}
 	parts := strings.Split(group, "-")
@@ -108,39 +203,37 @@ func parseALACGroupDetails(group string) (sampleRate, bitDepth int) {
 	return rate, depth
 }
 
-// selectVariantForQuality picks the best stream variant for a requested quality,
-// honoring the track's available audioTraits and falling back downward.
-//
-// Mapping:
-//   - QualityHiRes   -> highest-rate ALAC (24-bit / Hi-Res), else any ALAC
-//   - QualityLossless-> ALAC (any, prefer 16-bit/44100 CD), else fall through
-//   - QualityHigh    -> AAC ~256k
-//   - QualityStandard-> AAC ~128k (or lowest AAC)
-//
-// Atmos (ec-3) is not part of the standard 4-tier ladder; it is only chosen
-// when explicitly requested via wantAtmos.
-func selectVariantForQuality(variants []enhancedHLSVariant, quality platform.Quality, wantAtmos bool) (enhancedHLSVariant, bool) {
-	if wantAtmos {
-		if v, ok := bestAtmos(variants); ok {
-			return v, true
+func parseAudioGroupChannels(group string) string {
+	for _, part := range strings.Split(strings.ToLower(group), "-") {
+		switch part {
+		case "mono":
+			return "1"
+		case "stereo":
+			return "2"
 		}
 	}
-	switch {
-	case quality >= platform.QualityHiRes:
-		if v, ok := bestALAC(variants, true); ok {
-			return v, true
-		}
-		if v, ok := bestALAC(variants, false); ok {
-			return v, true
-		}
-		// fall through to AAC
-		return bestAAC(variants, 256000)
-	case quality == platform.QualityLossless:
-		if v, ok := bestALAC(variants, false); ok {
-			return v, true
-		}
-		return bestAAC(variants, 256000)
-	case quality == platform.QualityHigh:
+	return ""
+}
+
+// selectVariantForQuality picks the best stream variant for a requested quality.
+// Enhanced tiers are strict so a caller never receives a differently labelled
+// format; Standard and High select their matching AAC rendition.
+//
+// Mapping:
+//   - QualityAtmos   -> highest-rate Dolby Atmos (EC-3/JOC), no tier fallback
+//   - QualityHiRes   -> highest-rate ALAC above 48kHz, no tier fallback
+//   - QualityLossless-> highest-rate ALAC at or below 48kHz, no tier fallback
+//   - QualityHigh    -> AAC ~256k
+//   - QualityStandard-> AAC ~128k (or lowest AAC)
+func selectVariantForQuality(variants []enhancedHLSVariant, quality platform.Quality) (enhancedHLSVariant, bool) {
+	switch quality {
+	case platform.QualityAtmos:
+		return bestAtmos(variants)
+	case platform.QualityHiRes:
+		return bestALAC(variants, true)
+	case platform.QualityLossless:
+		return bestALAC(variants, false)
+	case platform.QualityHigh:
 		return bestAAC(variants, 256000)
 	default: // QualityStandard
 		return bestAAC(variants, 128000)
@@ -154,11 +247,19 @@ func bestALAC(variants []enhancedHLSVariant, hiResOnly bool) (enhancedHLSVariant
 		if !v.isALAC() {
 			continue
 		}
-		if hiResOnly && v.BitDepth < 24 && v.SampleRate <= 44100 {
+		if v.SampleRate <= 0 {
 			continue
 		}
-		// variants are sorted by bandwidth desc; prefer higher sample rate.
-		if !found || v.SampleRate > best.SampleRate {
+		if hiResOnly && v.SampleRate <= 48000 {
+			continue
+		}
+		if !hiResOnly && v.SampleRate > 48000 {
+			continue
+		}
+		// Prefer resolution first; AvgBW breaks ties deterministically.
+		if !found || v.SampleRate > best.SampleRate ||
+			(v.SampleRate == best.SampleRate && v.BitDepth > best.BitDepth) ||
+			(v.SampleRate == best.SampleRate && v.BitDepth == best.BitDepth && v.AvgBW > best.AvgBW) {
 			best = v
 			found = true
 		}
@@ -167,7 +268,7 @@ func bestALAC(variants []enhancedHLSVariant, hiResOnly bool) (enhancedHLSVariant
 }
 
 func bestAtmos(variants []enhancedHLSVariant) (enhancedHLSVariant, bool) {
-	for _, v := range variants { // sorted desc -> first ec-3 is highest bitrate
+	for _, v := range variants { // sorted desc -> first declared Atmos stream is highest bitrate
 		if v.isAtmos() {
 			return v, true
 		}

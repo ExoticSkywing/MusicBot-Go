@@ -565,7 +565,8 @@ func (m *stubPlatformManager) AddTextRule(text, platformName, trackID string) {
 
 // stubPlatform is a minimal platform.Platform implementation for testing.
 type stubPlatform struct {
-	name string
+	name         string
+	capabilities platform.Capabilities
 }
 
 func newStubPlatform(name string) *stubPlatform {
@@ -593,7 +594,7 @@ func (p *stubPlatform) SupportsRecognition() bool {
 }
 
 func (p *stubPlatform) Capabilities() platform.Capabilities {
-	return platform.Capabilities{}
+	return p.capabilities
 }
 
 func (p *stubPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {

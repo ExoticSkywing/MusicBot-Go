@@ -41,10 +41,13 @@ func extractPlatformTrack(ctx context.Context, message *telego.Message, manager 
 		}
 		fields := strings.Fields(args)
 		if len(fields) >= 3 {
-			if _, err := platform.ParseQuality(fields[2]); err == nil {
+			if parsedQuality, err := platform.ParseQuality(fields[2]); err == nil {
 				platformName := fields[0]
 				if resolved, ok := resolvePlatformAlias(manager, fields[0]); ok {
 					platformName = resolved
+				}
+				if parsedQuality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
+					return "", "", false
 				}
 				if trackID, matched := matchPlatformTrack(ctx, manager, platformName, fields[1]); matched {
 					return platformName, trackID, true
@@ -159,6 +162,14 @@ func commandName(text, botName string) string {
 }
 
 func parseTrailingOptions(text string, manager platform.Manager) (baseText, platformName, quality string) {
+	return parseTrailingOptionsForPlatform(text, manager, "")
+}
+
+// parseTrailingOptionsForPlatform parses the conventional trailing
+// "[platform] [quality]" options. platformHint is used by provider-specific
+// commands such as /applemusic, where the platform is encoded in the command
+// name rather than in the argument string.
+func parseTrailingOptionsForPlatform(text string, manager platform.Manager, platformHint string) (baseText, platformName, quality string) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return "", "", ""
@@ -171,8 +182,11 @@ func parseTrailingOptions(text string, manager platform.Manager) (baseText, plat
 	qualityToken := normalizeQualityToken(strings.ToLower(fields[lastIdx]))
 	if qualityToken != "" {
 		if _, err := platform.ParseQuality(qualityToken); err == nil {
-			quality = qualityToken
-			fields = fields[:lastIdx]
+			candidateFields := fields[:lastIdx]
+			if qualityToken != platform.QualityAtmos.String() || atmosOptionTargetsAppleMusic(candidateFields, manager, platformHint) {
+				quality = qualityToken
+				fields = candidateFields
+			}
 		}
 	}
 	if len(fields) > 0 {
@@ -184,6 +198,47 @@ func parseTrailingOptions(text string, manager platform.Manager) (baseText, plat
 	}
 	baseText = strings.TrimSpace(strings.Join(fields, " "))
 	return baseText, platformName, quality
+}
+
+func atmosOptionTargetsAppleMusic(fields []string, manager platform.Manager, platformHint string) bool {
+	if isAppleMusicPlatform(platformHint) {
+		return true
+	}
+	if resolved, ok := resolvePlatformAlias(manager, platformHint); ok && isAppleMusicPlatform(resolved) {
+		return true
+	}
+	if len(fields) == 0 {
+		return false
+	}
+
+	indexes := []int{0}
+	if len(fields) > 1 {
+		indexes = append(indexes, len(fields)-1)
+	}
+	for _, index := range indexes {
+		token := normalizePlatformToken(fields[index])
+		if isAppleMusicPlatform(token) {
+			return true
+		}
+		if resolved, ok := resolvePlatformAlias(manager, token); ok && isAppleMusicPlatform(resolved) {
+			return true
+		}
+	}
+
+	if manager == nil {
+		return false
+	}
+	candidate := strings.TrimSpace(strings.Join(fields, " "))
+	if candidate == "" {
+		return false
+	}
+	if platformName, _, matched := manager.MatchURL(candidate); matched && isAppleMusicPlatform(platformName) {
+		return true
+	}
+	if platformName, _, matched := manager.MatchText(candidate); matched && isAppleMusicPlatform(platformName) {
+		return true
+	}
+	return false
 }
 
 type searchLimitFunc func(platformName string) int
@@ -501,6 +556,8 @@ func normalizeQualityToken(token string) string {
 		return "standard"
 	case "standard", "high", "lossless", "hires":
 		return strings.ToLower(strings.TrimSpace(token))
+	case "atmos", "dolby-atmos", "dolbyatmos":
+		return platform.QualityAtmos.String()
 	default:
 		return ""
 	}
@@ -1485,6 +1542,8 @@ func qualityTag(ctx context.Context, quality string) string {
 		return tr(ctx, "quality_tag_lossless")
 	case "hires":
 		return "HiRes"
+	case "atmos":
+		return "DolbyAtmos"
 	default:
 		return ""
 	}

@@ -229,4 +229,5 @@ type Capabilities struct {
 	Lyrics      bool `json:"lyrics"`
 	Recognition bool `json:"recognition"`
 	HiRes       bool `json:"hi_res"`
+	Atmos       bool `json:"atmos"`
 }

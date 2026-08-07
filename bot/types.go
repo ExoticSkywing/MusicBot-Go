@@ -4,6 +4,11 @@ import (
 	"time"
 )
 
+// AppleMusicQualityRevision identifies the current Apple Music classifier and
+// cache layout. Bump it whenever the Lossless/Hi-Res/Atmos mapping changes in a
+// way that makes previously cached enhanced renditions unsafe to reuse.
+const AppleMusicQualityRevision = 1
+
 // SongInfo represents cached song metadata.
 // It supports multi-platform architecture with Platform and TrackID fields.
 type SongInfo struct {
@@ -15,6 +20,10 @@ type SongInfo struct {
 	TrackID         string // Platform-specific track identifier
 	Quality         string // Quality level (e.g., "standard", "high", "lossless")
 	QualityVerified bool   // true if Quality has been verified against the platform API
+	QualityRevision int    // classifier revision used when the cached quality was verified
+	AudioCodec      string // verified audio codec when available (e.g. alac, eac3)
+	SampleRate      int    // verified audio sample rate in Hz when available
+	BitDepth        int    // verified audio bit depth when available
 	MusicID         int    // Deprecated: Legacy NetEase music ID (kept for backward compatibility)
 	SongName        string
 	SongArtists     string

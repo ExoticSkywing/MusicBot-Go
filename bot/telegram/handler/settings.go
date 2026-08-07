@@ -103,6 +103,7 @@ func (h *SettingsHandler) buildSettingsText(ctx context.Context, chatType string
 		platformName = settings.DefaultPlatform
 		qualityValue = settings.DefaultQuality
 	}
+	qualityValue = h.effectiveQualityValue(platformName, qualityValue)
 	platformEmoji := h.getPlatformEmoji(platformName)
 	sb.WriteString(fmt.Sprintf("🎵 %s：%s %s\n", tr(ctx, "set_platform_label"), platformEmoji, h.getPlatformDisplayName(ctx, platformName)))
 
@@ -183,6 +184,7 @@ func (h *SettingsHandler) buildSettingsKeyboard(ctx context.Context, chatType st
 		platformValue = settings.DefaultPlatform
 		qualityValue = settings.DefaultQuality
 	}
+	qualityValue = h.effectiveQualityValue(platformValue, qualityValue)
 
 	if len(platforms) > 1 {
 		var platformButtons []telego.InlineKeyboardButton
@@ -232,6 +234,12 @@ func (h *SettingsHandler) buildSettingsKeyboard(ctx context.Context, chatType st
 		},
 	}
 	rows = append(rows, qualityButtons)
+	if platformSupportsAtmosSelection(h.PlatformManager, platformValue) {
+		rows = append(rows, []telego.InlineKeyboardButton{{
+			Text:         h.formatQualityButton(ctx, "atmos", qualityValue == "atmos"),
+			CallbackData: "settings quality atmos",
+		}})
+	}
 
 	autoDeleteEnabled := h.resolveAutoDeleteList(chatType, settings, groupSettings)
 	autoLinkDetectEnabled := h.resolveAutoLinkDetect(chatType, settings, groupSettings)
@@ -517,6 +525,14 @@ func (h *SettingsHandler) formatQualityButton(ctx context.Context, quality strin
 	return name
 }
 
+func (h *SettingsHandler) effectiveQualityValue(platformName, qualityValue string) string {
+	qualityValue = qualityValueForPlatform(platformName, qualityValue)
+	if qualityValue == platform.QualityAtmos.String() && !platformSupportsAtmosSelection(h.PlatformManager, platformName) {
+		return platform.QualityHiRes.String()
+	}
+	return qualityValue
+}
+
 func (h *SettingsHandler) getPlatformEmoji(platform string) string {
 	return platformEmoji(h.PlatformManager, platform)
 }
@@ -535,6 +551,8 @@ func (h *SettingsHandler) getQualityEmoji(quality string) string {
 		return "💎"
 	case "hires":
 		return "👑"
+	case "atmos":
+		return "🌌"
 	default:
 		return "🔊"
 	}
@@ -550,6 +568,8 @@ func (h *SettingsHandler) getQualityDisplayName(ctx context.Context, quality str
 		return tr(ctx, "set_quality_lossless")
 	case "hires":
 		return tr(ctx, "set_quality_hires")
+	case "atmos":
+		return tr(ctx, "set_quality_atmos")
 	default:
 		return quality
 	}
@@ -721,27 +741,36 @@ func (h *SettingsCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 			if msg != nil && msg.Chat.Type != "private" {
 				if groupSettings != nil && groupSettings.DefaultPlatform != settingValue {
 					groupSettings.DefaultPlatform = settingValue
+					if groupSettings.DefaultQuality == platform.QualityAtmos.String() && !platformSupportsAtmosSelection(h.PlatformManager, settingValue) {
+						groupSettings.DefaultQuality = platform.QualityHiRes.String()
+					}
 					changed = true
 					responseText = "✅ " + tr(ctx, "set_resp_platform_switched", map[string]any{"Name": h.SettingsHandler.getPlatformDisplayName(ctx, settingValue)})
 				}
 			} else if settings != nil && settings.DefaultPlatform != settingValue {
 				settings.DefaultPlatform = settingValue
+				if settings.DefaultQuality == platform.QualityAtmos.String() && !platformSupportsAtmosSelection(h.PlatformManager, settingValue) {
+					settings.DefaultQuality = platform.QualityHiRes.String()
+				}
 				changed = true
 				responseText = "✅ " + tr(ctx, "set_resp_platform_switched", map[string]any{"Name": h.SettingsHandler.getPlatformDisplayName(ctx, settingValue)})
 			}
 		}
 
 	case "quality":
-		validQualities := []string{"standard", "high", "lossless", "hires"}
-		validQuality := false
-		for _, q := range validQualities {
-			if q == settingValue {
-				validQuality = true
-				break
+		currentPlatform := h.SettingsHandler.DefaultPlatform
+		if strings.TrimSpace(currentPlatform) == "" {
+			currentPlatform = "netease"
+		}
+		if msg != nil && msg.Chat.Type != "private" {
+			if groupSettings != nil && strings.TrimSpace(groupSettings.DefaultPlatform) != "" {
+				currentPlatform = groupSettings.DefaultPlatform
 			}
+		} else if settings != nil && strings.TrimSpace(settings.DefaultPlatform) != "" {
+			currentPlatform = settings.DefaultPlatform
 		}
 
-		if validQuality {
+		if qualitySelectableForPlatform(h.PlatformManager, currentPlatform, settingValue) {
 			if msg != nil && msg.Chat.Type != "private" {
 				if groupSettings != nil && groupSettings.DefaultQuality != settingValue {
 					groupSettings.DefaultQuality = settingValue

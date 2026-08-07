@@ -54,6 +54,7 @@ cb_quality_standard = "Стандартное"
 cb_quality_high = "Высокое"
 cb_quality_lossless = "Без потерь"
 cb_quality_hires = "Hi-Res"
+cb_quality_atmos = "Dolby Atmos"
 
 # --- выбор эпизода ---
 cb_tap_episode_below = "Нажмите на эпизод ниже, чтобы отправить"

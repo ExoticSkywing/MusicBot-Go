@@ -499,7 +499,7 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	}
 
 	// Routing across the two decrypt paths:
-	//   - lossless / Hi-Res: ONLY obtainable via the external FairPlay wrapper
+	//   - lossless / Hi-Res / Atmos: ONLY obtainable via the external FairPlay wrapper
 	//     (Apple refuses Widevine for enhancedHls, returns -1002). Built-in
 	//     native decrypt tops out at AAC 256k.
 	//   - standard: prefer the wrapper's 128k AAC stream when a wrapper is
@@ -507,23 +507,31 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	//     256k (better than nothing, zero-config).
 	//   - high: native AAC 256k is exactly this tier, so use it directly.
 	hasWrapper := strings.TrimSpace(c.wrapperHost) != ""
-	wantsLossless := quality >= platform.QualityLossless
-	preferWrapper := wantsLossless || quality == platform.QualityStandard
+	wantsAtmos := quality == platform.QualityAtmos
+	wantsEnhanced := quality == platform.QualityLossless || quality == platform.QualityHiRes || wantsAtmos
+	preferWrapper := wantsEnhanced || quality == platform.QualityStandard
 
-	// Priority 1: external wrapper via enhancedHls (lossless/Hi-Res, or the
+	// Priority 1: external wrapper via enhancedHls (lossless/Hi-Res/Atmos, or the
 	// 128k AAC stream for standard).
 	if preferWrapper && hasWrapper {
-		info, err := c.fetchViaWrapper(ctx, trackID, quality, false)
+		info, err := c.fetchViaWrapper(ctx, trackID, quality)
 		if err == nil && info != nil {
 			return info, nil
+		}
+		// Enhanced qualities are explicit formats/tiers. Never satisfy one with
+		// ALAC from another tier or AAC when the requested stream is unavailable.
+		if wantsEnhanced {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("no suitable enhancedHls variant for quality %s", quality)
 		}
 		if c.logger != nil {
 			c.logger.Warn("applemusic: wrapper fetch failed, falling back to native AAC",
 				"track_id", trackID, "quality", quality.String(), "error", err)
 		}
-	} else if wantsLossless && !hasWrapper && c.logger != nil {
-		c.logger.Info("applemusic: lossless requested but no wrapper configured; serving AAC 256k",
-			"track_id", trackID, "quality", quality.String())
+	} else if wantsEnhanced && !hasWrapper {
+		return nil, fmt.Errorf("applemusic: %s requested but wrapper host not configured", quality)
 	}
 
 	// Priority 2: Native Widevine decryption (built-in, AAC 256k, zero-config).
@@ -540,7 +548,7 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	// Priority 3: External wrapper for any remaining case (e.g. high, or when
 	// native decrypt was unavailable).
 	if !preferWrapper && hasWrapper {
-		info, err := c.fetchViaWrapper(ctx, trackID, quality, false)
+		info, err := c.fetchViaWrapper(ctx, trackID, quality)
 		if err == nil && info != nil {
 			return info, nil
 		}
@@ -819,7 +827,7 @@ func (c *Client) resolveHLSToMP4(ctx context.Context, m3u8URL string) (mp4URL st
 //  5. Stream each cbcs sample through wrapper port 10020 to decrypt in place,
 //     remux to a progressive MP4, then (ALAC) run alacfix on the progressive
 //     file — alacfix needs the progressive sample table to locate packets.
-func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality platform.Quality, wantAtmos bool) (*platform.DownloadInfo, error) {
+func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	host := strings.TrimSpace(c.wrapperHost)
 	if host == "" {
 		return nil, fmt.Errorf("wrapper host not configured")
@@ -832,7 +840,7 @@ func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality pl
 	// (96/192kHz) and no Atmos. The wrapper's device m3u8 port (20020) returns
 	// the full "_default" master with those streams. For Hi-Res/Atmos requests
 	// we must use the device m3u8; for AAC/standard the catalog is enough.
-	wantBest := wantAtmos || quality >= platform.QualityHiRes
+	wantBest := quality == platform.QualityHiRes || quality == platform.QualityAtmos
 	var masterURL string
 	if wantBest {
 		if devURL, err := wrapper.GetM3U8URL(ctx, trackID); err == nil && strings.HasSuffix(devURL, ".m3u8") {
@@ -858,7 +866,7 @@ func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality pl
 	if err != nil {
 		return nil, err
 	}
-	variant, ok := selectVariantForQuality(variants, quality, wantAtmos)
+	variant, ok := selectVariantForQuality(variants, quality)
 	if !ok {
 		return nil, fmt.Errorf("no suitable enhancedHls variant for quality %s", quality)
 	}
@@ -980,12 +988,12 @@ func (c *Client) fetchViaWrapper(ctx context.Context, trackID string, quality pl
 func variantQuality(v enhancedHLSVariant) platform.Quality {
 	switch {
 	case v.isALAC():
-		if v.BitDepth >= 24 || v.SampleRate > 44100 {
+		if v.SampleRate > 48000 {
 			return platform.QualityHiRes
 		}
 		return platform.QualityLossless
 	case v.isAtmos():
-		return platform.QualityHiRes
+		return platform.QualityAtmos
 	case v.isAAC():
 		if v.AvgBW >= 200000 {
 			return platform.QualityHigh

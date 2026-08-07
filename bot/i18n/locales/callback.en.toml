@@ -54,6 +54,7 @@ cb_quality_standard = "Standard"
 cb_quality_high = "High"
 cb_quality_lossless = "Lossless"
 cb_quality_hires = "Hi-Res"
+cb_quality_atmos = "Dolby Atmos"
 
 # --- episode picker ---
 cb_tap_episode_below = "Tap an episode below to send"

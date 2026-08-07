@@ -578,6 +578,86 @@ func TestVerifyAndUpdateQuality(t *testing.T) {
 	})
 }
 
+func TestCreateUpsertRefreshesVerifiedAudioProfile(t *testing.T) {
+	repo := newTempRepo(t)
+	ctx := context.Background()
+
+	legacy := &bot.SongInfo{
+		Platform:        "applemusic",
+		TrackID:         "1857845142",
+		Quality:         "lossless",
+		QualityVerified: false,
+		SongName:        "Legacy",
+		FileID:          "old-file",
+	}
+	if err := repo.Create(ctx, legacy); err != nil {
+		t.Fatalf("create legacy: %v", err)
+	}
+
+	refreshed := &bot.SongInfo{
+		Platform:        legacy.Platform,
+		TrackID:         legacy.TrackID,
+		Quality:         legacy.Quality,
+		QualityVerified: true,
+		QualityRevision: 1,
+		AudioCodec:      "alac",
+		SampleRate:      48000,
+		BitDepth:        24,
+		SongName:        "Refreshed",
+		FileID:          "new-file",
+	}
+	if err := repo.Create(ctx, refreshed); err != nil {
+		t.Fatalf("upsert refreshed: %v", err)
+	}
+
+	loaded, err := repo.FindByPlatformTrackID(ctx, legacy.Platform, legacy.TrackID, legacy.Quality)
+	if err != nil {
+		t.Fatalf("find refreshed: %v", err)
+	}
+	if loaded == nil || !loaded.QualityVerified || loaded.QualityRevision != 1 || loaded.AudioCodec != "alac" || loaded.SampleRate != 48000 || loaded.BitDepth != 24 || loaded.FileID != "new-file" {
+		t.Fatalf("verified audio profile was not refreshed: %+v", loaded)
+	}
+}
+
+func TestFindRandomCachedSongSkipsLegacyAppleEnhancedCache(t *testing.T) {
+	repo := newTempRepo(t)
+	ctx := context.Background()
+
+	legacy := &bot.SongInfo{
+		Platform:        "applemusic",
+		TrackID:         "legacy-hires",
+		Quality:         "hires",
+		QualityVerified: true,
+		QualityRevision: 0,
+		SongName:        "Legacy mislabelled cache",
+		FileID:          "legacy-file",
+	}
+	if err := repo.Create(ctx, legacy); err != nil {
+		t.Fatalf("create legacy cache: %v", err)
+	}
+
+	current := &bot.SongInfo{
+		Platform:        "applemusic",
+		TrackID:         "current-lossless",
+		Quality:         "lossless",
+		QualityVerified: true,
+		QualityRevision: bot.AppleMusicQualityRevision,
+		SongName:        "Current verified cache",
+		FileID:          "current-file",
+	}
+	if err := repo.Create(ctx, current); err != nil {
+		t.Fatalf("create current cache: %v", err)
+	}
+
+	got, err := repo.FindRandomCachedSong(ctx)
+	if err != nil {
+		t.Fatalf("find random cache: %v", err)
+	}
+	if got == nil || got.TrackID != current.TrackID {
+		t.Fatalf("random cache returned legacy Apple enhanced row: %+v", got)
+	}
+}
+
 func TestRepositoryFavorites(t *testing.T) {
 	file, err := os.CreateTemp("", "music163bot-*.db")
 	if err != nil {

@@ -132,6 +132,11 @@ func TestQualityFallbacks(t *testing.T) {
 			want:    []string{"standard", "hires", "lossless", "high"},
 		},
 		{
+			name:    "Atmos stays isolated from stereo cache tiers",
+			primary: "atmos",
+			want:    []string{"atmos"},
+		},
+		{
 			name:    "empty primary",
 			primary: "",
 			want:    []string{"hires", "lossless", "high", "standard"},
@@ -353,6 +358,33 @@ func TestInlineSearchHandler_findCachedSong_QualityFallback(t *testing.T) {
 	}
 	if got.Quality != "lossless" {
 		t.Errorf("findCachedSong: Quality = %q, want %q", got.Quality, "lossless")
+	}
+}
+
+func TestInlineSearchHandler_findCachedSong_AppleMusicDoesNotCrossQuality(t *testing.T) {
+	repo := newStubRepo()
+	ctx := context.Background()
+
+	song := &botpkg.SongInfo{
+		Platform:        "applemusic",
+		TrackID:         "1509778223",
+		Quality:         "lossless",
+		QualityVerified: true,
+		QualityRevision: botpkg.AppleMusicQualityRevision,
+		FileID:          "lossless-file",
+		SongName:        "Apple Lossless Song",
+	}
+	if err := repo.Create(ctx, song); err != nil {
+		t.Fatalf("failed to create song: %v", err)
+	}
+
+	handler := &InlineSearchHandler{Repo: repo}
+	if got := handler.findCachedSong(ctx, "applemusic", song.TrackID, "hires"); got != nil {
+		t.Fatalf("findCachedSong returned %q cache for explicit hires request", got.Quality)
+	}
+	got := handler.findCachedSong(ctx, "applemusic", song.TrackID, "lossless")
+	if got == nil || got.FileID != song.FileID {
+		t.Fatal("findCachedSong did not return exact Apple Music lossless cache")
 	}
 }
 

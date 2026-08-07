@@ -17,6 +17,7 @@ func TestNeedsSerialDownloadCoversEveryQuality(t *testing.T) {
 		platform.QualityHigh,
 		platform.QualityHiRes,
 		platform.QualityLossless,
+		platform.QualityAtmos,
 	}
 
 	for _, wrapperHost := range []string{"", "127.0.0.1"} {
@@ -47,5 +48,17 @@ func TestAppleMusicSatisfiesSerialDownloadGate(t *testing.T) {
 	var plat any = NewPlatform(&Client{})
 	if _, ok := plat.(platform.SerialDownloadGate); !ok {
 		t.Fatal("AppleMusicPlatform must implement platform.SerialDownloadGate")
+	}
+}
+
+func TestCapabilitiesAdvertiseEnhancedTiersWithWrapper(t *testing.T) {
+	withoutWrapper := NewPlatform(&Client{}).Capabilities()
+	if withoutWrapper.HiRes || withoutWrapper.Atmos {
+		t.Fatalf("enhanced capabilities without wrapper: %+v", withoutWrapper)
+	}
+
+	withWrapper := NewPlatform(&Client{wrapperHost: "127.0.0.1"}).Capabilities()
+	if !withWrapper.HiRes || !withWrapper.Atmos {
+		t.Fatalf("enhanced capabilities with wrapper: %+v", withWrapper)
 	}
 }

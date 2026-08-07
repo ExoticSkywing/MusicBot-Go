@@ -43,10 +43,18 @@ const defaultMusicProcessTimeout = 15 * time.Minute
 
 var (
 	probeExtractedAudioCodec = detectExtractedAudioCodec
+	probePreparedAudioStream = detectPreparedAudioStream
 	extractEmbeddedFLAC      = extractEmbeddedFLACFromContainer
 	remuxExtractedAudioM4A   = remuxExtractedAudioToM4A
 	downloadURLPattern       = regexp.MustCompile(`(?i)https?://[^\s]+`)
 )
+
+type preparedAudioStreamProbe struct {
+	Codec         string
+	SampleRate    int
+	BitsPerRaw    int
+	BitsPerSample int
+}
 
 func downloadURLForLog(rawURL string) string {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
@@ -307,12 +315,17 @@ type preparedArtifact struct {
 }
 
 type preparedSongInfo struct {
-	FileExt    string
-	MusicSize  int
-	BitRate    int
-	Quality    string
-	PicSize    int
-	EmbPicSize int
+	FileExt         string
+	MusicSize       int
+	BitRate         int
+	Quality         string
+	QualityVerified bool
+	QualityRevision int
+	AudioCodec      string
+	SampleRate      int
+	BitDepth        int
+	PicSize         int
+	EmbPicSize      int
 }
 
 // StartWorker initializes and starts the upload worker.
@@ -521,7 +534,7 @@ func (h *MusicHandler) Handle(ctx context.Context, b *telego.Bot, update *telego
 				}
 				return
 			}
-			baseText, _, qualityOverride := parseTrailingOptions(args, h.PlatformManager)
+			baseText, _, qualityOverride := parseTrailingOptionsForPlatform(args, h.PlatformManager, platformName)
 			baseText = strings.TrimSpace(baseText)
 			if baseText == "" {
 				return
@@ -806,7 +819,12 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 			return nil, errors.New("repo not configured")
 		}
 		cached, err := h.Repo.FindByPlatformTrackID(ctx, platform, trackID, quality)
-		if err == nil && cached != nil {
+		// Do not memoize legacy Apple enhanced records that the current quality
+		// classifier intentionally invalidates. A request waiting on Apple's
+		// serial download gate must query the DB again after the first waiter has
+		// refreshed that row, instead of repeatedly decrypting the same track from
+		// its request-local stale pointer.
+		if err == nil && cached != nil && isReusableCachedSong(cached, platform, quality) {
 			cacheMap[key] = cached
 		}
 		return cached, err
@@ -916,7 +934,7 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 	}
 	if songInfo.Quality == "" {
 		songInfo.Quality = actualQuality
-		songInfo.QualityVerified = true
+		songInfo.QualityVerified = !needsPreparedAudioQualityVerification(platformName, actualQuality)
 	}
 	songInfo.FileExt = info.Format
 	songInfo.MusicSize = 0
@@ -1043,12 +1061,38 @@ func (h *MusicHandler) resolveRequestedQuality(ctx context.Context, message *tel
 		if q, err := platform.ParseQuality(qualityOverride); err == nil {
 			quality = q
 		}
+		if quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
+			return platform.QualityHiRes
+		}
 		return quality
 	}
 	if q, err := platform.ParseQuality(resolvePlatformQualityValue(ctx, h.Repo, scopeType, scopeID, platformName, quality.String(), false)); err == nil {
 		quality = q
 	}
 	return quality
+}
+
+func isAppleMusicEnhancedQuality(quality string) bool {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "lossless", "hires", "atmos":
+		return true
+	default:
+		return false
+	}
+}
+
+func needsPreparedAudioQualityVerification(platformName, quality string) bool {
+	return strings.EqualFold(strings.TrimSpace(platformName), "applemusic") && isAppleMusicEnhancedQuality(quality)
+}
+
+func isReusableCachedSong(cached *botpkg.SongInfo, platformName, quality string) bool {
+	if cached == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(platformName), "applemusic") || !isAppleMusicEnhancedQuality(quality) {
+		return true
+	}
+	return cached.QualityVerified && cached.QualityRevision >= botpkg.AppleMusicQualityRevision
 }
 
 func (h *MusicHandler) trySendCachedTrack(
@@ -1071,6 +1115,13 @@ func (h *MusicHandler) trySendCachedTrack(
 
 	cached, err := getCached(platformName, trackID, cacheQuality)
 	if err != nil || cached == nil {
+		return botpkg.SongInfo{}, false, nil
+	}
+	if !isReusableCachedSong(cached, platformName, cacheQuality) {
+		if h.Logger != nil {
+			h.Logger.Info("applemusic: bypassing cache from an older quality classifier",
+				"trackID", trackID, "quality", cacheQuality, "revision", cached.QualityRevision)
+		}
 		return botpkg.SongInfo{}, false, nil
 	}
 	if cached.FileID == "" {
@@ -1277,12 +1328,17 @@ func capturePreparedSongInfo(songInfo *botpkg.SongInfo) preparedSongInfo {
 		return preparedSongInfo{}
 	}
 	return preparedSongInfo{
-		FileExt:    songInfo.FileExt,
-		MusicSize:  songInfo.MusicSize,
-		BitRate:    songInfo.BitRate,
-		Quality:    songInfo.Quality,
-		PicSize:    songInfo.PicSize,
-		EmbPicSize: songInfo.EmbPicSize,
+		FileExt:         songInfo.FileExt,
+		MusicSize:       songInfo.MusicSize,
+		BitRate:         songInfo.BitRate,
+		Quality:         songInfo.Quality,
+		QualityVerified: songInfo.QualityVerified,
+		QualityRevision: songInfo.QualityRevision,
+		AudioCodec:      songInfo.AudioCodec,
+		SampleRate:      songInfo.SampleRate,
+		BitDepth:        songInfo.BitDepth,
+		PicSize:         songInfo.PicSize,
+		EmbPicSize:      songInfo.EmbPicSize,
 	}
 }
 
@@ -1293,9 +1349,13 @@ func applyPreparedSongInfo(songInfo *botpkg.SongInfo, prepared preparedSongInfo)
 	songInfo.FileExt = prepared.FileExt
 	songInfo.MusicSize = prepared.MusicSize
 	songInfo.BitRate = prepared.BitRate
-	if strings.TrimSpace(songInfo.Quality) == "" {
+	if strings.TrimSpace(prepared.Quality) != "" {
 		songInfo.Quality = prepared.Quality
-		songInfo.QualityVerified = true
+		songInfo.QualityVerified = prepared.QualityVerified
+		songInfo.QualityRevision = prepared.QualityRevision
+		songInfo.AudioCodec = prepared.AudioCodec
+		songInfo.SampleRate = prepared.SampleRate
+		songInfo.BitDepth = prepared.BitDepth
 	}
 	songInfo.PicSize = prepared.PicSize
 	songInfo.EmbPicSize = prepared.EmbPicSize
@@ -1793,7 +1853,7 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	songInfo.BitRate = info.Bitrate * 1000
 	if songInfo.Quality == "" {
 		songInfo.Quality = info.Quality.String()
-		songInfo.QualityVerified = true
+		songInfo.QualityVerified = plat == nil || !needsPreparedAudioQualityVerification(plat.Name(), songInfo.Quality)
 	}
 
 	stamp := time.Now().UnixMicro()
@@ -1879,6 +1939,7 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 
 	// Derive bitrate from actual file size + duration (from track or FLAC streaminfo)
 	deriveBitrateFromFile(filePath, songInfo)
+	h.verifyPreparedAppleMusicQuality(plat, filePath, songInfo, trackID)
 
 	picPath, resizePicPath := h.prepareCoverFiles(ctx, track, trackID, stamp, songInfo, &cleanupList)
 
@@ -2922,7 +2983,8 @@ func parseInlineStartParameter(value string) (platformName, trackID, qualityOver
 			qualityOverride = ""
 		}
 		if qualityOverride != "" {
-			if _, err := platform.ParseQuality(qualityOverride); err != nil {
+			quality, err := platform.ParseQuality(qualityOverride)
+			if err != nil || quality == platform.QualityAtmos && !isAppleMusicPlatform(platformName) {
 				qualityOverride = ""
 			}
 		}
@@ -2978,6 +3040,9 @@ func (h *MusicHandler) findInlineCachedSong(ctx context.Context, userID int64, p
 	if cached == nil || strings.TrimSpace(cached.FileID) == "" {
 		return nil, qualityValue, nil
 	}
+	if !isReusableCachedSong(cached, platformName, qualityValue) {
+		return nil, qualityValue, nil
+	}
 	copy := *cached
 	return &copy, qualityValue, nil
 }
@@ -3004,6 +3069,9 @@ func (h *MusicHandler) prepareInlineSong(
 		cached, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, qualityValue)
 		if err != nil || cached == nil || strings.TrimSpace(cached.FileID) == "" {
 			return nil, err
+		}
+		if !isReusableCachedSong(cached, platformName, qualityValue) {
+			return nil, nil
 		}
 		return cached, nil
 	}
@@ -3125,7 +3193,7 @@ func (h *MusicHandler) prepareInlineSong(
 		songInfo.FromUserName = strings.TrimSpace(userName)
 	}
 	songInfo.Quality = actualQuality
-	songInfo.QualityVerified = true
+	songInfo.QualityVerified = !needsPreparedAudioQualityVerification(platformName, actualQuality)
 	songInfo.FileExt = info.Format
 	songInfo.MusicSize = 0
 	songInfo.BitRate = info.Bitrate * 1000
@@ -3819,6 +3887,110 @@ func getFFprobeBitrate(filePath string) int {
 	}
 
 	return int(bitrateFloat)
+}
+
+func detectPreparedAudioStream(filePath string) (preparedAudioStreamProbe, error) {
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return preparedAudioStreamProbe{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffprobePath,
+		"-v", "error",
+		"-select_streams", "a:0",
+		"-show_entries", "stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample",
+		"-of", "default=noprint_wrappers=1",
+		filePath,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return preparedAudioStreamProbe{}, err
+	}
+
+	var probe preparedAudioStreamProbe
+	for _, rawLine := range strings.Split(string(output), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(rawLine), "=")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "codec_name":
+			probe.Codec = strings.ToLower(value)
+		case "sample_rate":
+			probe.SampleRate, _ = strconv.Atoi(value)
+		case "bits_per_raw_sample":
+			probe.BitsPerRaw, _ = strconv.Atoi(value)
+		case "bits_per_sample":
+			probe.BitsPerSample, _ = strconv.Atoi(value)
+		}
+	}
+	if probe.Codec == "" {
+		return preparedAudioStreamProbe{}, errors.New("ffprobe returned no audio codec")
+	}
+	return probe, nil
+}
+
+func classifyPreparedAppleMusicQuality(probe preparedAudioStreamProbe, current string) (string, bool) {
+	codec := strings.ToLower(strings.TrimSpace(probe.Codec))
+	switch codec {
+	case "alac":
+		if probe.SampleRate <= 0 {
+			return "", false
+		}
+		if probe.SampleRate > 48000 {
+			return "hires", true
+		}
+		return "lossless", true
+	case "eac3", "ec-3", "ec+3":
+		// ffprobe exposes the 5.1 E-AC-3 core but does not reliably surface the
+		// JOC object metadata. Only verify Atmos when the selected HLS rendition
+		// was already identified as Atmos by its group/CHANNELS attributes.
+		if strings.EqualFold(strings.TrimSpace(current), "atmos") {
+			return "atmos", true
+		}
+	}
+	return "", false
+}
+
+func (h *MusicHandler) verifyPreparedAppleMusicQuality(plat platform.Platform, filePath string, songInfo *botpkg.SongInfo, trackID string) {
+	if plat == nil || plat.Name() != "applemusic" || songInfo == nil || strings.TrimSpace(filePath) == "" {
+		return
+	}
+	probe, err := probePreparedAudioStream(filePath)
+	if err != nil {
+		if h != nil && h.Logger != nil {
+			h.Logger.Warn("applemusic: failed to verify prepared audio quality", "trackID", trackID, "error", err)
+		}
+		return
+	}
+	actualQuality, ok := classifyPreparedAppleMusicQuality(probe, songInfo.Quality)
+	if !ok {
+		return
+	}
+	previousQuality := songInfo.Quality
+	songInfo.Quality = actualQuality
+	songInfo.QualityVerified = true
+	songInfo.QualityRevision = botpkg.AppleMusicQualityRevision
+	songInfo.AudioCodec = probe.Codec
+	songInfo.SampleRate = probe.SampleRate
+	songInfo.BitDepth = probe.BitsPerRaw
+	if songInfo.BitDepth <= 0 {
+		songInfo.BitDepth = probe.BitsPerSample
+	}
+	if h != nil && h.Logger != nil && previousQuality != actualQuality {
+		h.Logger.Warn("applemusic: corrected prepared audio quality",
+			"trackID", trackID,
+			"old_quality", previousQuality,
+			"quality", actualQuality,
+			"codec", probe.Codec,
+			"sample_rate", probe.SampleRate,
+			"bits_per_raw_sample", probe.BitsPerRaw,
+			"bits_per_sample", probe.BitsPerSample)
+	}
 }
 
 func normalizeExtractedAudioPath(filePath, currentExt string) (string, string) {

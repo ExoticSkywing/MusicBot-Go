@@ -489,10 +489,10 @@ func (r *Repository) FindRandomCachedSong(ctx context.Context) (*bot.SongInfo, e
 	if r == nil || r.cacheDB == nil {
 		return nil, errors.New("repository not configured")
 	}
-	query := r.cacheDB.WithContext(ctx).
+	query := reusableRandomCacheQuery(r.cacheDB.WithContext(ctx).
 		Model(&SongInfoModel{}).
 		Where("file_id <> ''").
-		Where("song_name <> ''")
+		Where("song_name <> ''"))
 
 	var count int64
 	if err := query.Count(&count).Error; err != nil {
@@ -504,10 +504,10 @@ func (r *Repository) FindRandomCachedSong(ctx context.Context) (*bot.SongInfo, e
 	offset := rand.Int63n(count)
 
 	var model SongInfoModel
-	err := r.cacheDB.WithContext(ctx).
+	err := reusableRandomCacheQuery(r.cacheDB.WithContext(ctx).
 		Model(&SongInfoModel{}).
 		Where("file_id <> ''").
-		Where("song_name <> ''").
+		Where("song_name <> ''")).
 		Offset(int(offset)).
 		Limit(1).
 		Take(&model).Error
@@ -518,6 +518,19 @@ func (r *Repository) FindRandomCachedSong(ctx context.Context) (*bot.SongInfo, e
 		return nil, err
 	}
 	return toInternal(model), nil
+}
+
+func reusableRandomCacheQuery(query *gorm.DB) *gorm.DB {
+	if query == nil {
+		return query
+	}
+	return query.Where(
+		"NOT (platform = ? AND quality IN ? AND (quality_verified = ? OR quality_revision < ?))",
+		"applemusic",
+		[]string{"lossless", "hires", "atmos"},
+		false,
+		bot.AppleMusicQualityRevision,
+	)
 }
 
 // FindByFileID returns a cached song by FileID.
@@ -546,6 +559,11 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 			DoUpdates: clause.AssignmentColumns([]string{
 				"deleted_at",
 				"updated_at",
+				"quality_verified",
+				"quality_revision",
+				"audio_codec",
+				"sample_rate",
+				"bit_depth",
 				"music_id",
 				"song_name",
 				"song_artists",

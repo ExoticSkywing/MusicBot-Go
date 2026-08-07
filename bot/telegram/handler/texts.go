@@ -26,6 +26,11 @@ func buildHelpText(ctx context.Context, manager platform.Manager, isAdmin bool, 
 	argTrack := esc("help_arg_track")
 	argKeyword := esc("help_arg_keyword")
 	platformBlock := buildPlatformBlock(ctx, manager)
+	qualityOptions := "`low` / `high` / `lossless` / `hires`"
+	if platformSupportsAtmosSelection(manager, appleMusicPlatformName) {
+		appleMusicName := mdV2Replacer.Replace(platformDisplayName(ctx, manager, appleMusicPlatformName))
+		qualityOptions += " / `atmos` \\(" + appleMusicName + "\\)"
+	}
 
 	text := "*🎵 MusicBot\\-Go*\n\n" + esc("help_intro") + "\n"
 	if isPrivateChat {
@@ -43,7 +48,7 @@ func buildHelpText(ctx context.Context, manager platform.Manager, isAdmin bool, 
 		"`/queue` \\- " + esc("help_cmd_queue") + "\n" +
 		"`/about` \\- " + esc("help_cmd_about") + "\n" +
 		"\n*" + esc("help_section_params") + "*\n" +
-		esc("help_quality_label") + "：`low` / `high` / `lossless` / `hires`\n" +
+		esc("help_quality_label") + "：" + qualityOptions + "\n" +
 		platformBlock +
 		"\n*" + esc("help_section_examples") + "*\n" +
 		"`/music " + tr(ctx, "help_example_music") + "`\n" +

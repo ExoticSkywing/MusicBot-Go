@@ -359,6 +359,16 @@ func TestExtractQualityOverride(t *testing.T) {
 			want: "standard",
 		},
 		{
+			name: "valid Apple Music Atmos",
+			text: "/music applemusic 12345 atmos",
+			want: "atmos",
+		},
+		{
+			name: "Atmos rejected for non Apple platform",
+			text: "/music netease 12345 atmos",
+			want: "",
+		},
+		{
 			name: "invalid quality",
 			text: "/music netease 12345 invalid",
 			want: "",
@@ -414,7 +424,7 @@ func TestExtractQualityOverride_NilMessage(t *testing.T) {
 }
 
 func TestParseQuality_Integration(t *testing.T) {
-	validQualities := []string{"hires", "lossless", "high", "standard"}
+	validQualities := []string{"atmos", "hires", "lossless", "high", "standard"}
 	for _, q := range validQualities {
 		t.Run(q, func(t *testing.T) {
 			_, err := platform.ParseQuality(q)
@@ -430,6 +440,65 @@ func TestParseQuality_Integration(t *testing.T) {
 			_, err := platform.ParseQuality(q)
 			if err == nil {
 				t.Errorf("ParseQuality(%q) should return error", q)
+			}
+		})
+	}
+}
+
+func TestParseTrailingOptions_AtmosRequiresExplicitAppleMusic(t *testing.T) {
+	manager := newStubManager()
+	manager.Register(newStubPlatform("applemusic"))
+	manager.Register(newStubPlatform("netease"))
+	manager.aliases["am"] = "applemusic"
+	manager.AddURLRule("https://music.apple.com/us/song/example/123", "applemusic", "123")
+
+	tests := []struct {
+		name         string
+		input        string
+		platformHint string
+		wantBase     string
+		wantPlatform string
+		wantQuality  string
+	}{
+		{
+			name:         "trailing Apple alias",
+			input:        "bad guy am atmos",
+			wantBase:     "bad guy",
+			wantPlatform: "applemusic",
+			wantQuality:  "atmos",
+		},
+		{
+			name:        "Apple URL",
+			input:       "https://music.apple.com/us/song/example/123 atmos",
+			wantBase:    "https://music.apple.com/us/song/example/123",
+			wantQuality: "atmos",
+		},
+		{
+			name:         "provider command hint",
+			input:        "123 dolby-atmos",
+			platformHint: "applemusic",
+			wantBase:     "123",
+			wantQuality:  "atmos",
+		},
+		{
+			name:     "non Apple platform is not consumed",
+			input:    "bad guy netease atmos",
+			wantBase: "bad guy netease atmos",
+		},
+		{
+			name:     "bare Atmos is not a global quality option",
+			input:    "bad guy atmos",
+			wantBase: "bad guy atmos",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			base, platformName, quality := parseTrailingOptionsForPlatform(testCase.input, manager, testCase.platformHint)
+			if base != testCase.wantBase || platformName != testCase.wantPlatform || quality != testCase.wantQuality {
+				t.Fatalf("parseTrailingOptionsForPlatform(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					testCase.input, base, platformName, quality,
+					testCase.wantBase, testCase.wantPlatform, testCase.wantQuality)
 			}
 		})
 	}

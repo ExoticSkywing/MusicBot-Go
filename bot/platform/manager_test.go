@@ -970,6 +970,7 @@ func TestCompositePlatform_Capabilities(t *testing.T) {
 		capabilities: Capabilities{
 			Download: true,
 			HiRes:    true,
+			Atmos:    true,
 		},
 	}
 
@@ -997,6 +998,9 @@ func TestCompositePlatform_Capabilities(t *testing.T) {
 	}
 	if !caps.HiRes {
 		t.Error("Expected HiRes capability")
+	}
+	if !caps.Atmos {
+		t.Error("Expected Atmos capability")
 	}
 }
 

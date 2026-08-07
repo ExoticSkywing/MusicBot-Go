@@ -351,6 +351,16 @@ func TestResolvePlatformQualityValue_KugouExplicitHiResNotDowngraded(t *testing.
 	}
 }
 
+func TestResolvePlatformQualityValue_AtmosOnlyPassesToAppleMusic(t *testing.T) {
+	repo := newStubRepo()
+	if got := resolvePlatformQualityValue(context.Background(), repo, botpkg.PluginScopeUser, 12345, "applemusic", "atmos", true); got != "atmos" {
+		t.Fatalf("Apple Music Atmos = %q, want atmos", got)
+	}
+	if got := resolvePlatformQualityValue(context.Background(), repo, botpkg.PluginScopeUser, 12345, "netease", "atmos", true); got != "hires" {
+		t.Fatalf("non-Apple Atmos = %q, want hires", got)
+	}
+}
+
 func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 	handler := &SearchHandler{}
 

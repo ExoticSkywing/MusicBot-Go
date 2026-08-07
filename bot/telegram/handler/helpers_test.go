@@ -111,6 +111,7 @@ func TestQualityTag(t *testing.T) {
 		{"lossless", "无损"},
 		{"hires", "HiRes"},
 		{"HiRes", "HiRes"},
+		{"atmos", "DolbyAtmos"},
 		{"", ""},
 		{"unknown", ""},
 	}

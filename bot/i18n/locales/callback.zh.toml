@@ -55,6 +55,7 @@ cb_quality_standard = "标准"
 cb_quality_high = "高品质"
 cb_quality_lossless = "无损"
 cb_quality_hires = "Hi-Res"
+cb_quality_atmos = "Dolby Atmos"
 
 # --- episode picker ---
 cb_tap_episode_below = "点击下方分P发送"

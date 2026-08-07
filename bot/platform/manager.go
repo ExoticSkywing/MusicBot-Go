@@ -216,6 +216,7 @@ func (c *compositePlatform) Capabilities() Capabilities {
 		combined.Lyrics = combined.Lyrics || caps.Lyrics
 		combined.Recognition = combined.Recognition || caps.Recognition
 		combined.HiRes = combined.HiRes || caps.HiRes
+		combined.Atmos = combined.Atmos || caps.Atmos
 	}
 	return combined
 }

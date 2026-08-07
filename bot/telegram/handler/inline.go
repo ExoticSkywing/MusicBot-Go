@@ -243,6 +243,7 @@ func (h *InlineSearchHandler) inlineEmpty(ctx context.Context, b *telego.Bot, qu
 func (h *InlineSearchHandler) inlineHelp(ctx context.Context, b *telego.Bot, query *telego.InlineQuery) {
 	platformName := h.resolveDefaultPlatform(ctx, query.From.ID)
 	qualityValue := h.resolveDefaultQuality(ctx, query.From.ID)
+	qualityValue = qualityValueForPlatform(platformName, qualityValue)
 	settingTitle := tr(ctx, "cb_setting_title", map[string]any{"Platform": platformDisplayName(ctx, h.PlatformManager, platformName), "Quality": qualityDisplayName(ctx, qualityValue)})
 	settingCard := &telego.InlineQueryResultArticle{
 		Type:                telego.ResultTypeArticle,
@@ -669,6 +670,7 @@ func buildInlineFavoriteCard(ctx context.Context, fav *botpkg.Favorite, qualityV
 		}
 		desc += album
 	}
+	qualityValue = qualityValueForPlatform(fav.Platform, qualityValue)
 	return &telego.InlineQueryResultArticle{
 		Type:                telego.ResultTypeArticle,
 		ID:                  buildInlinePendingResultID(fav.Platform, fav.TrackID, qualityValue),
@@ -866,6 +868,8 @@ func qualityDisplayName(ctx context.Context, quality string) string {
 		return tr(ctx, "cb_quality_lossless")
 	case "hires":
 		return tr(ctx, "cb_quality_hires")
+	case "atmos":
+		return tr(ctx, "cb_quality_atmos")
 	default:
 		return quality
 	}
@@ -879,6 +883,7 @@ func (h *InlineSearchHandler) inlineCachedOrCommand(ctx context.Context, b *tele
 	if strings.TrimSpace(qualityOverride) != "" {
 		qualityValue = strings.TrimSpace(qualityOverride)
 	}
+	qualityValue = qualityValueForPlatform(platformName, qualityValue)
 	if h.tryInlineDirectEpisodes(ctx, b, query, platformName, trackID, qualityValue, requestedPage, originalQuery) {
 		return true
 	}
@@ -1154,9 +1159,21 @@ func (h *InlineSearchHandler) findCachedSong(ctx context.Context, platformName, 
 	if platformName == "" || trackID == "" {
 		return nil
 	}
-	for _, q := range qualityFallbacks(quality) {
+	qualityCandidates := qualityFallbacks(quality)
+	// Apple Music's Lossless, Hi-Res Lossless and Atmos renditions are distinct
+	// files. Cross-tier cache fallback can therefore return a materially
+	// different stream than the user requested. Keep Apple cache lookup exact;
+	// the download resolver will report an unavailable rendition instead of
+	// silently substituting another tier.
+	if platformName == "applemusic" && strings.TrimSpace(quality) != "" {
+		qualityCandidates = []string{strings.TrimSpace(quality)}
+	}
+	for _, q := range qualityCandidates {
 		info, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, q)
 		if err == nil && info != nil && info.FileID != "" && info.SongName != "" {
+			if !isReusableCachedSong(info, platformName, q) {
+				continue
+			}
 			verifyCachedNeteaseQuality(ctx, h.PlatformManager, h.Repo, nil, info, platformName, trackID, info.Quality)
 			return info
 		}
@@ -1174,9 +1191,14 @@ func (h *InlineSearchHandler) findCachedSong(ctx context.Context, platformName, 
 }
 
 func qualityFallbacks(primary string) []string {
+	primary = strings.TrimSpace(primary)
+	if primary == platform.QualityAtmos.String() {
+		// Atmos is an independent EC-3/JOC asset. Serving a cached stereo ALAC,
+		// FLAC, or AAC entry here would silently change the requested resource.
+		return []string{platform.QualityAtmos.String()}
+	}
 	order := []string{"hires", "lossless", "high", "standard"}
 	result := make([]string, 0, len(order)+1)
-	primary = strings.TrimSpace(primary)
 	if primary != "" {
 		result = append(result, primary)
 	}

@@ -127,7 +127,9 @@ func TestNoUntranslatedValues(t *testing.T) {
 var intentionallyEnglish = map[string]bool{
 	"about_title":                       true,
 	"cb_quality_hires":                  true,
+	"cb_quality_atmos":                  true,
 	"set_quality_hires":                 true,
+	"set_quality_atmos":                 true,
 	"platform_name_amazonmusic":         true,
 	"platform_name_applemusic":          true,
 	"platform_name_bilibili":            true,
