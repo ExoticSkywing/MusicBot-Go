@@ -531,8 +531,10 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 		if err == nil && info != nil {
 			return info, nil
 		}
-		// Enhanced qualities are explicit formats/tiers. Never satisfy one with
-		// ALAC from another tier or AAC when the requested stream is unavailable.
+		// Lossless and Atmos remain strict formats. Hi-Res selection may resolve
+		// to a lossless ALAC rendition when the track has no >48kHz master; the
+		// returned DownloadInfo carries that resolved quality instead of
+		// mislabelling it as Hi-Res.
 		if wantsEnhanced {
 			if err != nil {
 				return nil, err

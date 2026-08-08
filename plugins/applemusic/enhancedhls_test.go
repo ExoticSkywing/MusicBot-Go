@@ -107,7 +107,7 @@ func TestSelectVariantForQuality(t *testing.T) {
 		wantURIsub  string
 		wantQuality platform.Quality
 	}{
-		{"hires rejects lossless-only master", platform.QualityHiRes, false, "", "", platform.QualityStandard},
+		{"hires falls back on lossless-only master", platform.QualityHiRes, true, "alac", "alac", platform.QualityLossless},
 		{"lossless->alac", platform.QualityLossless, true, "alac", "alac", platform.QualityLossless},
 		{"high->aac256", platform.QualityHigh, true, "mp4a.40.2", "gr256", platform.QualityHigh},
 		{"standard->aac128", platform.QualityStandard, true, "mp4a.40.2", "gr128", platform.QualityStandard},
@@ -154,14 +154,22 @@ func TestSelectVariantALACBoundaries(t *testing.T) {
 	}
 }
 
-func TestSelectVariantEnhancedTiersDoNotFallback(t *testing.T) {
-	t.Run("hires rejects lossless and AAC", func(t *testing.T) {
+func TestSelectVariantEnhancedTierFallbacks(t *testing.T) {
+	t.Run("hires falls back to lossless but not AAC", func(t *testing.T) {
 		variants := []enhancedHLSVariant{
 			{Codecs: "alac", SampleRate: 48000, BitDepth: 24, AvgBW: 1600000, URI: "lossless.m3u8"},
 			{Codecs: "mp4a.40.2", AvgBW: 256000, URI: "aac.m3u8"},
 		}
-		if got, ok := selectVariantForQuality(variants, platform.QualityHiRes); ok {
-			t.Fatalf("unexpected Hi-Res fallback: %+v", got)
+		got, ok := selectVariantForQuality(variants, platform.QualityHiRes)
+		if !ok || got.URI != "lossless.m3u8" {
+			t.Fatalf("Hi-Res fallback = %+v, %v; want lossless ALAC", got, ok)
+		}
+
+		aacOnly := []enhancedHLSVariant{
+			{Codecs: "mp4a.40.2", AvgBW: 256000, URI: "aac.m3u8"},
+		}
+		if got, ok := selectVariantForQuality(aacOnly, platform.QualityHiRes); ok {
+			t.Fatalf("unexpected Hi-Res AAC fallback: %+v", got)
 		}
 	})
 

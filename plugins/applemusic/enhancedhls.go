@@ -216,12 +216,15 @@ func parseAudioGroupChannels(group string) string {
 }
 
 // selectVariantForQuality picks the best stream variant for a requested quality.
-// Enhanced tiers are strict so a caller never receives a differently labelled
-// format; Standard and High select their matching AAC rendition.
+// Lossless and Atmos are strict so a caller never receives a differently
+// labelled format. Hi-Res prefers ALAC above 48kHz, but falls back to the best
+// lossless ALAC rendition when a track has no Hi-Res master. This keeps the
+// shared default "hires" setting usable for the much larger lossless-only
+// Apple Music catalog while reporting the resolved tier accurately.
 //
 // Mapping:
 //   - QualityAtmos   -> highest-rate Dolby Atmos (EC-3/JOC), no tier fallback
-//   - QualityHiRes   -> highest-rate ALAC above 48kHz, no tier fallback
+//   - QualityHiRes   -> highest-rate ALAC above 48kHz, else best lossless ALAC
 //   - QualityLossless-> highest-rate ALAC at or below 48kHz, no tier fallback
 //   - QualityHigh    -> AAC ~256k
 //   - QualityStandard-> AAC ~128k (or lowest AAC)
@@ -230,7 +233,10 @@ func selectVariantForQuality(variants []enhancedHLSVariant, quality platform.Qua
 	case platform.QualityAtmos:
 		return bestAtmos(variants)
 	case platform.QualityHiRes:
-		return bestALAC(variants, true)
+		if v, ok := bestALAC(variants, true); ok {
+			return v, true
+		}
+		return bestALAC(variants, false)
 	case platform.QualityLossless:
 		return bestALAC(variants, false)
 	case platform.QualityHigh:
