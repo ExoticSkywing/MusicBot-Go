@@ -596,6 +596,8 @@ func (a *App) Start(ctx context.Context) error {
 		Pool:                     a.Pool,
 	}
 
+	a.dropStaleBacklog(ctx)
+
 	updates, err := a.Telegram.Client().UpdatesViaLongPolling(ctx, telegram.LongPollingParams())
 	if err != nil {
 		return fmt.Errorf("init telegram: %w", err)
@@ -616,6 +618,58 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+// dropStaleBacklog discards the update backlog Telegram accumulated while the
+// bot was down, when that backlog is large enough to be a hazard rather than a
+// handful of requests worth serving.
+//
+// Telegram holds undelivered updates for 24h and replays the whole queue on the
+// first poll after a restart. Every update becomes its own handler goroutine, so
+// a backlog built up over an outage arrives as a burst far denser than live
+// traffic and can exhaust a memory-capped instance before it serves anything —
+// which then kills it, leaves the backlog untouched, and repeats on the next
+// start. Requests queued during an outage are also long stale by the time they
+// would run: the user has moved on, so replaying them costs the very resources
+// the recovering bot needs.
+//
+// A small backlog is normal (a routine restart, a redeploy) and is kept, so
+// nothing is lost in the common case. StartupBacklogLimit sets the cutoff; 0
+// disables dropping entirely and always replays the queue.
+func (a *App) dropStaleBacklog(ctx context.Context) {
+	limit := a.Config.GetInt("StartupBacklogLimit")
+	if limit <= 0 {
+		return
+	}
+
+	client := a.Telegram.Client()
+	pending, err := telegram.PendingUpdateCount(ctx, client)
+	if err != nil {
+		// Non-fatal: a probe failure must not keep the bot from starting. The
+		// worst case is the pre-existing behaviour of replaying the backlog.
+		if a.Logger != nil {
+			a.Logger.Warn("could not measure pending update backlog", "error", err)
+		}
+		return
+	}
+	if pending <= limit {
+		if pending > 0 && a.Logger != nil {
+			a.Logger.Info("replaying pending updates", "pending", pending, "limit", limit)
+		}
+		return
+	}
+
+	dropped, err := telegram.DropPendingUpdates(ctx, client)
+	if err != nil {
+		if a.Logger != nil {
+			a.Logger.Warn("could not drop pending update backlog", "pending", pending, "error", err)
+		}
+		return
+	}
+	if a.Logger != nil {
+		a.Logger.Warn("dropped stale update backlog accumulated while offline",
+			"dropped", dropped, "limit", limit)
+	}
 }
 
 // localizedCommandSpec describes one bot command whose description is resolved

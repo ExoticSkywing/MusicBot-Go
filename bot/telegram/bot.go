@@ -22,6 +22,14 @@ var allowedUpdates = []string{
 
 const longPollingTimeoutSeconds = 60
 
+// updateFetchLimit caps how many updates one getUpdates call may return.
+// Telegram defaults to 100, and the handler starts a goroutine per update, so a
+// replayed backlog would otherwise land as a single burst of a hundred
+// concurrent requests. A smaller window spreads the same backlog over
+// consecutive polls, letting the worker pool apply backpressure before peak
+// memory runs away.
+const updateFetchLimit = 20
+
 // AllowedUpdates returns the update types required by the bot.
 func AllowedUpdates() []string {
 	return append([]string(nil), allowedUpdates...)
@@ -29,7 +37,11 @@ func AllowedUpdates() []string {
 
 // LongPollingParams returns long polling parameters with explicit allowed updates.
 func LongPollingParams() *telego.GetUpdatesParams {
-	return &telego.GetUpdatesParams{Timeout: longPollingTimeoutSeconds, AllowedUpdates: AllowedUpdates()}
+	return &telego.GetUpdatesParams{
+		Timeout:        longPollingTimeoutSeconds,
+		Limit:          updateFetchLimit,
+		AllowedUpdates: AllowedUpdates(),
+	}
 }
 
 // WebhookParams builds webhook params with explicit allowed updates.

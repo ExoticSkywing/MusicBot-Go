@@ -563,6 +563,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ListPageSize", 8)
 	v.SetDefault("InlineListPageSize", 30)
 	v.SetDefault("WorkerPoolSize", 4)
+	v.SetDefault("StartupBacklogLimit", 50)
 	v.SetDefault("EnableRecognize", true)
 	v.SetDefault("EnableWhitelist", false)
 	v.SetDefault("WhitelistChatIDs", "")
