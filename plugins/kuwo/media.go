@@ -185,7 +185,7 @@ func parseMobileMediaPseudoQuery(rawQuery string) (string, bool) {
 		}
 		switch name {
 		case "bitrate":
-			if value != "128" && value != "320" && value != "2000" {
+			if value != "128" && value != "320" && !isKuwoFLACBitrateToken(value) {
 				return "", false
 			}
 		case "format":
@@ -218,11 +218,20 @@ func parseMobileMediaPseudoQuery(rawQuery string) (string, bool) {
 	if !hasBitrate || !hasFormat || !hasSource || !hasType || !hasUser || !hasLoginUID {
 		return "", false
 	}
-	if (queryFormat == "flac" && bitrate != "2000") ||
+	if (queryFormat == "flac" && !isKuwoFLACBitrateToken(bitrate)) ||
 		(queryFormat == "mp3" && bitrate != "128" && bitrate != "320") {
 		return "", false
 	}
 	return queryFormat, true
+}
+
+// isKuwoFLACBitrateToken reports whether a bitrate token in a media URL names
+// one of kuwo's two FLAC tiers. The URLs carry their own tier, and accepting
+// only 2000 rejected every Hi-Res stream at the URL-safety gate -- even after
+// the resolver was willing to take it.
+func isKuwoFLACBitrateToken(value string) bool {
+	return value == strconv.FormatInt(directLosslessBitrate, 10) ||
+		value == strconv.FormatInt(directHiResBitrate, 10)
 }
 
 func isSafeMediaQueryToken(value string, maximumLength int) bool {

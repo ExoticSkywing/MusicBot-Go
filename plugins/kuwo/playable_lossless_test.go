@@ -222,8 +222,10 @@ func TestResolvePlayableLosslessRejectsResponseIdentityAndPreviewSignals(t *test
 			body: "url=https://kw-er.kuwo.cn/a.flac\nformat=flac\nrid=41378936\nduration=213\ntype=0\n",
 		},
 		{
-			name: "wrong lossless selector",
-			body: "url=https://kw-er.kuwo.cn/a.flac\nformat=flac\nbitrate=4000\nrid=41378936\nduration=213\ntype=0\n",
+			// 2000 and 4000 are kuwo's two FLAC tiers and are both accepted now;
+			// anything else is not a tier this resolver knows how to validate.
+			name: "unknown selector",
+			body: "url=https://kw-er.kuwo.cn/a.flac\nformat=flac\nbitrate=3000\nrid=41378936\nduration=213\ntype=0\n",
 		},
 		{
 			name:     "preview bitrate",

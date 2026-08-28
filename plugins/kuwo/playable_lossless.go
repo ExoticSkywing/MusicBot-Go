@@ -93,6 +93,27 @@ func isLegacyPlayKey(value string) bool {
 	return true
 }
 
+// legacyLosslessProfileFor maps a bitrate the legacy play endpoint declared onto
+// the resolver profile that validates it. Only kuwo's two FLAC tiers qualify.
+func legacyLosslessProfileFor(bitrate int64) (directQualityResolverProfile, bool) {
+	switch bitrate {
+	case directLosslessBitrate:
+		return directQualityResolverProfile{
+			level:   directLosslessSelectorLevel,
+			bitrate: directLosslessBitrate,
+			format:  "flac",
+		}, true
+	case directHiResBitrate:
+		return directQualityResolverProfile{
+			level:   directHiResSelectorLevel,
+			bitrate: directHiResBitrate,
+			format:  "flac",
+		}, true
+	default:
+		return directQualityResolverProfile{}, false
+	}
+}
+
 func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetail) (*platform.DownloadInfo, error) {
 	if c == nil || c.mediaHTTPClient == nil || detail == nil {
 		return nil, platform.NewUnavailableError("kuwo", "media", "")
@@ -169,7 +190,13 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 	if bitrate <= 1 {
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
-	if bitrate != 2000 {
+	// Kuwo answers this endpoint with whichever FLAC tier it is willing to
+	// serve, which for some tracks is the 4000 Hi-Res tier rather than the 2000
+	// lossless one. Accepting only 2000 rejected those outright, so a track kuwo
+	// would happily serve at 24-bit/96kHz failed with a bitrate mismatch and,
+	// once every resolver had failed, surfaced as "paid track".
+	selector, ok := legacyLosslessProfileFor(bitrate)
+	if !ok {
 		return nil, errors.New("kuwo: legacy lossless selector bitrate mismatch")
 	}
 	if !strings.EqualFold(data.format, "flac") {
@@ -190,11 +217,10 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 		}
 		return nil, err
 	}
-	supportedQuality := (probe.bitsPerSample == 16 && probe.quality == platform.QualityLossless) ||
-		(probe.bitsPerSample == 24 && probe.quality == platform.QualityHiRes)
-	if !supportedQuality ||
-		(probe.sampleRate != 44100 && probe.sampleRate != 48000) ||
-		probe.channels != 2 {
+	// Verify the stream against the tier kuwo actually declared, reusing the
+	// same profile rules the external resolver path applies. The checks stay as
+	// strict as before for a given tier; only the set of accepted tiers grew.
+	if !selector.acceptsProbe(probe) {
 		return nil, errors.New("kuwo: legacy lossless STREAMINFO mismatch")
 	}
 	rawSize := probe.size
