@@ -37,9 +37,8 @@ func TestPaidTrackErrorCarriesResolverCause(t *testing.T) {
 	})
 
 	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
-		home:            kuwoHomeURL,
-		detail:          kuwoDetailURL,
-		qualityResolver: "https://resolver.example/api",
+		home:   kuwoHomeURL,
+		detail: kuwoDetailURL,
 	})
 	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport

@@ -39,18 +39,17 @@ const (
 )
 
 type kuwoEndpoints struct {
-	home            string
-	search          string
-	detail          string
-	playlist        string
-	album           string
-	artist          string
-	mobile          string
-	legacy          string
-	qualityResolver string
-	play            string
-	wordLyric       string
-	mobileLyric     string
+	home        string
+	search      string
+	detail      string
+	playlist    string
+	album       string
+	artist      string
+	mobile      string
+	legacy      string
+	play        string
+	wordLyric   string
+	mobileLyric string
 }
 
 type Client struct {
@@ -71,15 +70,14 @@ type Client struct {
 
 func NewClient(timeout time.Duration, logger bot.Logger) *Client {
 	return newClientWithEndpoints(timeout, logger, kuwoEndpoints{
-		home:            kuwoHomeURL,
-		search:          kuwoSearchURL,
-		detail:          kuwoDetailURL,
-		playlist:        kuwoPlaylistURL,
-		album:           kuwoAlbumURL,
-		artist:          kuwoArtistURL,
-		qualityResolver: kuwoDirectHiResResolveURL,
-		wordLyric:       kuwoWordLyricURL,
-		mobileLyric:     kuwoMobileLyricURL,
+		home:        kuwoHomeURL,
+		search:      kuwoSearchURL,
+		detail:      kuwoDetailURL,
+		playlist:    kuwoPlaylistURL,
+		album:       kuwoAlbumURL,
+		artist:      kuwoArtistURL,
+		wordLyric:   kuwoWordLyricURL,
+		mobileLyric: kuwoMobileLyricURL,
 	})
 }
 

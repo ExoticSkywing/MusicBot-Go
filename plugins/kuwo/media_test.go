@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,16 +24,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
-}
-
-func withExternalHighUnavailable(next http.RoundTripper) http.RoundTripper {
-	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host == "kw-api.cenguigui.cn" &&
-			req.URL.Query().Get("level") == directHighSelectorLevel {
-			return response(http.StatusServiceUnavailable, nil, nil), nil
-		}
-		return next.RoundTrip(req)
-	})
 }
 
 func response(status int, headers map[string]string, body []byte) *http.Response {
@@ -76,25 +64,24 @@ func TestMobileQualityCandidates(t *testing.T) {
 	}
 }
 
-func TestLosslessResolverPlanUsesSeparateDirectFLACStreams(t *testing.T) {
+func TestLosslessResolverPlanUsesOfficialEndpoint(t *testing.T) {
 	cases := []struct {
 		name    string
 		quality platform.Quality
 		want    []losslessResolver
 	}{
 		{
-			name:    "lossless uses official 2000 then external lossless",
+			// Kuwo's own endpoint reports which FLAC tier it served, so one
+			// resolver covers both. The third-party resolver that used to front
+			// this is gone.
+			name:    "lossless uses the official endpoint",
 			quality: platform.QualityLossless,
-			want:    []losslessResolver{resolvePlayableFLAC, resolvePlayableExternalLossless},
+			want:    []losslessResolver{resolvePlayableFLAC},
 		},
 		{
-			name:    "hires uses external 4000 then official 2000 then external lossless",
+			name:    "hires uses the same official endpoint",
 			quality: platform.QualityHiRes,
-			want: []losslessResolver{
-				resolvePlayableHiRes,
-				resolvePlayableFLAC,
-				resolvePlayableExternalLossless,
-			},
+			want:    []losslessResolver{resolvePlayableFLAC},
 		},
 		{
 			name:    "high has no lossless resolver",
@@ -476,7 +463,7 @@ func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 	client.downloadHTTPClient = &http.Client{Transport: transport}
 	now := time.Unix(1700000000, 0)
@@ -527,7 +514,7 @@ func TestResolveDownloadRejectsFalse320AndFallsBack(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
 	if err != nil {
@@ -611,7 +598,7 @@ func TestResolveDownloadUntrustedMobileHostIsTerminal(t *testing.T) {
 					}
 				})
 				client := NewClient(time.Second, nil)
-				client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+				client.apiHTTPClient.Transport = transport
 				client.mediaHTTPClient.Transport = transport
 
 				_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -692,7 +679,7 @@ func TestResolveDownloadTrailingEmptyFragmentIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", tt.quality)
@@ -757,7 +744,7 @@ func TestResolveDownloadQualityMetadataFallbackPrecedesURLNormalization(t *testi
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -814,7 +801,7 @@ func TestResolveDownloadPreviewBitratePrecedesSafeSuffixMismatchFallback(t *test
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 
 	_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -874,7 +861,7 @@ func TestResolveDownloadOverflowingMobileDurationIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -934,7 +921,7 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 				return response(http.StatusOK, nil, []byte(tt.detail)), nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
 			if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, tt.want) {
@@ -947,399 +934,6 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 				t.Fatalf("web calls = %d", webCalls)
 			}
 		})
-	}
-}
-
-func TestPaidMetadataAllowsOnlyStrictlyVerifiedDirectHiRes(t *testing.T) {
-	const (
-		trackID = "7149583"
-		rawSize = 1 << 20
-	)
-	fullStream := makeTestFLAC(t, rawSize, 96000, 24, 2, time.Second)
-	streamInfo := fullStream[:42]
-	var resolverCalls atomic.Int32
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.Host {
-		case "www.kuwo.cn":
-			if req.URL.Path == "/" {
-				return response(
-					http.StatusOK,
-					map[string]string{
-						"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
-					},
-					nil,
-				), nil
-			}
-			return response(http.StatusOK, nil, []byte(
-				`{"data":{"rid":7149583,"duration":1,"isListenFee":true}}`,
-			)), nil
-		case "resolver.example":
-			resolverCalls.Add(1)
-			if req.URL.Query().Get("level") != "hires" {
-				t.Fatalf("resolver level = %q, want hires", req.URL.Query().Get("level"))
-			}
-			return response(http.StatusOK, nil, []byte(
-				`{"code":200,"data":{"rid":"7149583","bitrate":4000,"duration":1,`+
-					`"size":"1.00 MB","url":"https://kw-lw.kuwo.cn/audio/hires.flac",`+
-					`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[`+
-					`{"br":"4000","format":"flac","level":"hires"}]}}}`,
-			)), nil
-		case "kw-lw.kuwo.cn":
-			switch req.Header.Get("Range") {
-			case "bytes=0-41":
-				return response(
-					http.StatusPartialContent,
-					map[string]string{"Content-Range": "bytes 0-41/1048576"},
-					streamInfo,
-				), nil
-			default:
-				return directFLACTestTailResponse(t, req, fullStream), nil
-			}
-		case "mobi.kuwo.cn":
-			t.Fatal("paid Hi-Res request fell through to MP3")
-			return nil, nil
-		default:
-			t.Fatalf("unexpected request host %q", req.URL.Host)
-			return nil, nil
-		}
-	})
-	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
-		home:            kuwoHomeURL,
-		detail:          kuwoDetailURL,
-		qualityResolver: "https://resolver.example/api",
-	})
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
-	client.mediaHTTPClient.Transport = transport
-	client.downloadHTTPClient = &http.Client{Transport: transport}
-
-	info, err := client.GetDownloadInfo(
-		context.Background(),
-		trackID,
-		platform.QualityHiRes,
-	)
-	if err != nil {
-		t.Fatalf("GetDownloadInfo() = %v", err)
-	}
-	if resolverCalls.Load() != 1 ||
-		info == nil ||
-		info.Quality != platform.QualityHiRes ||
-		info.Downloader == nil {
-		t.Fatalf("resolverCalls=%d info=%#v", resolverCalls.Load(), info)
-	}
-}
-
-func TestHiResResolverRIDMismatchFallsBackToDirect2000(t *testing.T) {
-	const (
-		trackID = "41378936"
-		rawSize = 1 << 20
-	)
-	cleartext := makeTestFLAC(
-		t,
-		rawSize-len(knownDirectFLACTrailer),
-		48000,
-		24,
-		2,
-		213*time.Second,
-	)
-	raw := append(append([]byte(nil), cleartext...), knownDirectFLACTrailer...)
-	var resolverCalls atomic.Int32
-	var legacyCalls atomic.Int32
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.Host {
-		case "www.kuwo.cn":
-			if req.URL.Path == "/" {
-				return response(
-					http.StatusOK,
-					map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"},
-					nil,
-				), nil
-			}
-			return response(http.StatusOK, nil, []byte(
-				`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`,
-			)), nil
-		case "resolver.example":
-			resolverCalls.Add(1)
-			return response(http.StatusOK, nil, []byte(
-				`{"code":200,"data":{"rid":"99999999","bitrate":4000,"duration":213,`+
-					`"size":"1.00 MB","url":"https://kw-lw.kuwo.cn/audio/wrong.flac",`+
-					`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[`+
-					`{"br":"4000","format":"flac","level":"hires"}]}}}`,
-			)), nil
-		case "kw-lw.kuwo.cn":
-			t.Fatal("mismatched-RID Hi-Res candidate was probed")
-			return nil, nil
-		case "mobi.kuwo.cn":
-			if req.URL.Query().Get("q") == "" || req.URL.Query().Get("br") != "" {
-				t.Fatal("RID mismatch did not fall through to the direct 2000 resolver")
-			}
-			legacyCalls.Add(1)
-			return response(http.StatusOK, nil, []byte(
-				"format=flac\n"+
-					"bitrate=2000\n"+
-					"rid=41378936\n"+
-					"duration=213\n"+
-					"type=0\n"+
-					"url=https://kw-er.kuwo.cn/audio/lossless.flac\n",
-			)), nil
-		case "kw-er.kuwo.cn":
-			switch req.Header.Get("Range") {
-			case "bytes=0-41":
-				return response(
-					http.StatusPartialContent,
-					map[string]string{"Content-Range": "bytes 0-41/1048576"},
-					raw[:42],
-				), nil
-			default:
-				return directFLACTestTailResponse(t, req, raw), nil
-			}
-		default:
-			t.Fatalf("unexpected request host %q", req.URL.Host)
-			return nil, nil
-		}
-	})
-	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
-		home:            kuwoHomeURL,
-		detail:          kuwoDetailURL,
-		qualityResolver: "https://resolver.example/api",
-	})
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
-	client.mediaHTTPClient.Transport = transport
-	client.downloadHTTPClient = &http.Client{Transport: transport}
-
-	info, err := client.GetDownloadInfo(
-		context.Background(),
-		trackID,
-		platform.QualityHiRes,
-	)
-	if err != nil {
-		t.Fatalf("GetDownloadInfo() = %v", err)
-	}
-	if resolverCalls.Load() != 1 ||
-		legacyCalls.Load() != 1 ||
-		info == nil ||
-		info.Quality != platform.QualityHiRes ||
-		info.Downloader == nil {
-		t.Fatalf(
-			"resolverCalls=%d legacyCalls=%d info=%#v",
-			resolverCalls.Load(),
-			legacyCalls.Load(),
-			info,
-		)
-	}
-}
-
-func TestHiResResolverMalformedRIDIsTerminalWithoutFallback(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		ridField string
-	}{
-		{name: "missing"},
-		{name: "empty", ridField: `"rid":"",`},
-		{name: "null", ridField: `"rid":null,`},
-		{name: "boolean", ridField: `"rid":true,`},
-		{name: "object", ridField: `"rid":{},`},
-		{name: "array", ridField: `"rid":[],`},
-		{name: "invalid", ridField: `"rid":"not-a-rid",`},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var fallbackCalls atomic.Int32
-			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				switch req.URL.Host {
-				case "www.kuwo.cn":
-					switch {
-					case req.URL.Path == "/":
-						return response(
-							http.StatusOK,
-							map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"},
-							nil,
-						), nil
-					case strings.Contains(req.URL.Path, "musicInfo"):
-						return response(http.StatusOK, nil, []byte(
-							`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`,
-						)), nil
-					case strings.Contains(req.URL.Path, "playUrl"):
-						fallbackCalls.Add(1)
-						return response(http.StatusInternalServerError, nil, nil), nil
-					}
-				case "resolver.example":
-					body := `{"code":200,"data":{` + tt.ridField +
-						`"bitrate":4000,"duration":213,"size":"1.00 MB",` +
-						`"url":"https://kw-lw.kuwo.cn/audio/invalid.flac",` +
-						`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[` +
-						`{"br":"4000","format":"flac","level":"hires"}]}}}`
-					return response(http.StatusOK, nil, []byte(body)), nil
-				case "mobi.kuwo.cn":
-					fallbackCalls.Add(1)
-					return response(http.StatusInternalServerError, nil, nil), nil
-				default:
-					t.Fatalf("unexpected request host %q", req.URL.Host)
-					return nil, nil
-				}
-				t.Fatalf("unexpected request %s", req.URL)
-				return nil, nil
-			})
-			client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
-				home:            kuwoHomeURL,
-				detail:          kuwoDetailURL,
-				qualityResolver: "https://resolver.example/api",
-			})
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
-			client.mediaHTTPClient.Transport = transport
-
-			_, err := client.GetDownloadInfo(
-				context.Background(),
-				"41378936",
-				platform.QualityHiRes,
-			)
-			if !errors.Is(err, platform.ErrUnavailable) ||
-				!errors.Is(err, errTrackIdentityMismatch) {
-				t.Fatalf("GetDownloadInfo() error = %v, want terminal identity mismatch", err)
-			}
-			if got := fallbackCalls.Load(); got != 0 {
-				t.Fatalf("fallback calls = %d, want 0", got)
-			}
-		})
-	}
-}
-
-func TestHiResFalseLabelFallsBackToDirect2000WithoutMaster(t *testing.T) {
-	const (
-		trackID = "41378936"
-		rawSize = 1 << 20
-	)
-	falseHiResHeader := makeTestFLAC(t, 42, 44100, 16, 2, 213*time.Second)
-	losslessCleartext := makeTestFLAC(
-		t,
-		rawSize-len(knownDirectFLACTrailer),
-		44100,
-		16,
-		2,
-		213*time.Second,
-	)
-	losslessRaw := append(
-		append([]byte(nil), losslessCleartext...),
-		knownDirectFLACTrailer...,
-	)
-	var resolverCalls atomic.Int32
-	var legacyCalls atomic.Int32
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if strings.EqualFold(req.URL.Query().Get("level"), "jymaster") ||
-			strings.EqualFold(path.Ext(req.URL.Path), ".mflac") {
-			t.Fatal("runtime requested a master stream")
-		}
-		switch req.URL.Host {
-		case "www.kuwo.cn":
-			if req.URL.Path == "/" {
-				return response(
-					http.StatusOK,
-					map[string]string{
-						"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/",
-					},
-					nil,
-				), nil
-			}
-			return response(http.StatusOK, nil, []byte(
-				`{"data":{"rid":41378936,"duration":213,"isListenFee":false}}`,
-			)), nil
-		case "resolver.example":
-			resolverCalls.Add(1)
-			if req.URL.Query().Get("level") != "hires" {
-				t.Fatalf("resolver level = %q, want hires", req.URL.Query().Get("level"))
-			}
-			return response(http.StatusOK, nil, []byte(
-				`{"code":200,"data":{"rid":"41378936","bitrate":4000,"duration":213,`+
-					`"size":"1.00 MB","url":"https://kw-lw.kuwo.cn/audio/false-hires.flac",`+
-					`"level":{"requested":"hires","actual":"hires","ekey":"","quality":[`+
-					`{"br":"4000","format":"flac","level":"hires"}]}}}`,
-			)), nil
-		case "kw-lw.kuwo.cn":
-			if req.Header.Get("Range") != "bytes=0-41" {
-				t.Fatalf("unexpected false Hi-Res Range %q", req.Header.Get("Range"))
-			}
-			return response(
-				http.StatusPartialContent,
-				map[string]string{"Content-Range": "bytes 0-41/1048576"},
-				falseHiResHeader,
-			), nil
-		case "mobi.kuwo.cn":
-			if req.URL.Query().Get("q") == "" || req.URL.Query().Get("br") != "" {
-				t.Fatal("Hi-Res fallback skipped the direct 2000 resolver")
-			}
-			legacyCalls.Add(1)
-			return response(http.StatusOK, nil, []byte(
-				"format=flac\n"+
-					"bitrate=2000\n"+
-					"rid=41378936\n"+
-					"duration=213\n"+
-					"type=0\n"+
-					"url=https://kw-er.kuwo.cn/audio/lossless.flac\n",
-			)), nil
-		case "kw-er.kuwo.cn":
-			switch req.Header.Get("Range") {
-			case "bytes=0-41":
-				return response(
-					http.StatusPartialContent,
-					map[string]string{"Content-Range": "bytes 0-41/1048576"},
-					losslessRaw[:42],
-				), nil
-			case "":
-				return directFLACResponse(losslessRaw), nil
-			default:
-				return directFLACTestTailResponse(t, req, losslessRaw), nil
-			}
-		default:
-			t.Fatalf("unexpected request host %q", req.URL.Host)
-			return nil, nil
-		}
-	})
-	client := newClientWithEndpoints(time.Second, nil, kuwoEndpoints{
-		home:            kuwoHomeURL,
-		detail:          kuwoDetailURL,
-		qualityResolver: "https://resolver.example/api",
-	})
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
-	client.mediaHTTPClient.Transport = transport
-	client.downloadHTTPClient = &http.Client{Transport: transport}
-
-	info, err := client.GetDownloadInfo(
-		context.Background(),
-		trackID,
-		platform.QualityHiRes,
-	)
-	if err != nil {
-		t.Fatalf("GetDownloadInfo() = %v", err)
-	}
-	if resolverCalls.Load() != 1 ||
-		legacyCalls.Load() != 1 ||
-		info == nil ||
-		info.Quality != platform.QualityLossless ||
-		info.Downloader == nil {
-		t.Fatalf(
-			"resolverCalls=%d legacyCalls=%d info=%#v",
-			resolverCalls.Load(),
-			legacyCalls.Load(),
-			info,
-		)
-	}
-	destination := filepath.Join(t.TempDir(), "fallback.flac")
-	written, err := info.Downloader(
-		context.Background(),
-		info,
-		destination,
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("fallback downloader = %v", err)
-	}
-	if written != int64(len(losslessCleartext)) {
-		t.Fatalf("fallback written = %d, want %d", written, len(losslessCleartext))
-	}
-	downloaded, err := os.ReadFile(destination)
-	if err != nil {
-		t.Fatalf("read fallback download: %v", err)
-	}
-	if !bytes.Equal(downloaded, losslessCleartext) {
-		t.Fatal("fallback downloader did not publish the verified 2000k stream")
 	}
 }
 
@@ -1374,7 +968,7 @@ func TestResolveWebDownloadEmptyURLIsTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
@@ -1427,7 +1021,7 @@ func TestResolveDownloadMobileRIDMismatchFallsBackFromOriginalTrack(t *testing.T
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 
 	info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -1499,7 +1093,7 @@ func TestResolveDownloadProductionMobileFailuresReachVerifiedWebMP3(t *testing.T
 		return nil, nil
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 
 	info, err := client.GetDownloadInfo(
@@ -1554,7 +1148,7 @@ func TestResolveDownloadTerminalTypeAndDurationErrorsDoNotFallback(t *testing.T)
 				}
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
 			if !errors.Is(err, platform.ErrUnavailable) {
@@ -1655,7 +1249,7 @@ func TestResolveDownloadMalformedCriticalMobileFieldsAreTerminal(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityStandard)
@@ -1721,7 +1315,7 @@ func TestResolveDownloadMalformedQualityMetadataCanDowngrade(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityHigh)
@@ -1779,7 +1373,7 @@ func TestResolveDownloadMobileTransportFailureUsesVerifiedWebMP3(t *testing.T) {
 				return nil, nil
 			})
 			client := NewClient(time.Second, nil)
-			client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+			client.apiHTTPClient.Transport = transport
 			client.mediaHTTPClient.Transport = transport
 			info, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
 			if err != nil {
@@ -1814,7 +1408,7 @@ func TestResolveDownloadRateLimitIsTerminal(t *testing.T) {
 		}
 	})
 	client := NewClient(time.Second, nil)
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(transport)
+	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 	_, err := client.GetDownloadInfo(context.Background(), "41378936", platform.QualityLossless)
 	if !errors.Is(err, platform.ErrRateLimited) {

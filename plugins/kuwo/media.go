@@ -49,8 +49,6 @@ type losslessResolver uint8
 
 const (
 	resolvePlayableFLAC losslessResolver = iota + 1
-	resolvePlayableHiRes
-	resolvePlayableExternalLossless
 )
 
 type mediaProbe struct {
@@ -95,18 +93,13 @@ func mobileQualityCandidates(quality platform.Quality) []mobileQuality {
 
 func losslessResolverPlan(quality platform.Quality) []losslessResolver {
 	switch quality {
-	case platform.QualityLossless:
-		return []losslessResolver{resolvePlayableFLAC, resolvePlayableExternalLossless}
-	case platform.QualityHiRes:
-		// The external resolver stays first on purpose: for paid metadata it is
-		// the only path allowed to serve Hi-Res, because its result is strictly
-		// verified before use. Reordering it behind the mobile endpoint would
-		// let a paid track reach that endpoint, which this tier must not do.
-		return []losslessResolver{
-			resolvePlayableHiRes,
-			resolvePlayableFLAC,
-			resolvePlayableExternalLossless,
-		}
+	case platform.QualityLossless, platform.QualityHiRes:
+		// Kuwo's own play endpoint serves both FLAC tiers and reports which one
+		// it gave, so a single resolver covers lossless and Hi-Res alike. The
+		// third-party resolver that used to front this is gone: its host has
+		// served an expired certificate since April 2026 and now answers every
+		// request with an empty body.
+		return []losslessResolver{resolvePlayableFLAC}
 	default:
 		return nil
 	}
@@ -592,16 +585,6 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 		return nil, accessErr
 	}
 	var lastErr error
-	if quality == platform.QualityHigh {
-		info, candidateErr := c.resolvePlayableExternalHigh(ctx, detail)
-		if candidateErr == nil {
-			return info, nil
-		}
-		if isTerminalMediaError(candidateErr) {
-			return nil, candidateErr
-		}
-		lastErr = candidateErr
-	}
 	for _, resolver := range resolverPlan {
 		var (
 			info         *platform.DownloadInfo
@@ -610,10 +593,6 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 		switch resolver {
 		case resolvePlayableFLAC:
 			info, candidateErr = c.resolvePlayableLossless(ctx, detail)
-		case resolvePlayableHiRes:
-			info, candidateErr = c.resolvePlayableHiRes(ctx, detail)
-		case resolvePlayableExternalLossless:
-			info, candidateErr = c.resolvePlayableExternalLossless(ctx, detail)
 		default:
 			continue
 		}

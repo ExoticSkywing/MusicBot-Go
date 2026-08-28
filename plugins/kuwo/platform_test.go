@@ -160,7 +160,7 @@ func TestPlatformDownloadQualityDelegatesToClient(t *testing.T) {
 	probeClient := mp3ProbeTransport(t, totalSize, nil)
 	probeTransport := probeClient.Transport
 	apiOriginTransport := apiServer.Client().Transport
-	client.apiHTTPClient.Transport = withExternalHighUnavailable(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client.apiHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "mobile.test" {
 			if request.URL.Query().Get("br") != "320kmp3" || request.URL.Query().Get("format") != "mp3" {
 				t.Fatalf("mobile query = %v, want 320kmp3/mp3", request.URL.Query())
@@ -170,7 +170,7 @@ func TestPlatformDownloadQualityDelegatesToClient(t *testing.T) {
 			)), nil
 		}
 		return apiOriginTransport.RoundTrip(request)
-	}))
+	})
 	client.mediaHTTPClient = &http.Client{
 		Timeout: time.Second,
 		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
