@@ -47,6 +47,7 @@ type App struct {
 	Build                    BuildInfo
 	botHandler               *th.BotHandler
 	musicHandler             *handler.MusicHandler
+	debug                    *debugServer
 }
 
 func registerContribution(
@@ -323,6 +324,18 @@ func (a *App) Start(ctx context.Context) error {
 	// so the bot still starts rather than crashing on a missing locale asset.
 	if _, err := i18n.Init(); err != nil && a.Logger != nil {
 		a.Logger.Warn("failed to init i18n catalogs", "error", err)
+	}
+
+	// Profiling endpoint, off unless configured. A failure to bind is not worth
+	// refusing to start the bot over.
+	if a.Config != nil {
+		if debug, err := startDebugServer(a.Config.GetString("DebugListenAddr"), a.Logger); err != nil {
+			if a.Logger != nil {
+				a.Logger.Warn("failed to start pprof listener", "error", err)
+			}
+		} else {
+			a.debug = debug
+		}
 	}
 
 	// Start recognition service first
@@ -995,6 +1008,11 @@ func splitAdminIDs(raw string) []string {
 // Shutdown releases resources.
 func (a *App) Shutdown(ctx context.Context) error {
 	var firstErr error
+
+	if err := a.debug.Shutdown(ctx); err != nil && a.Logger != nil {
+		a.Logger.Warn("failed to stop pprof listener", "error", err)
+	}
+	a.debug = nil
 
 	if a.botHandler != nil {
 		if err := a.botHandler.StopWithContext(ctx); err != nil {

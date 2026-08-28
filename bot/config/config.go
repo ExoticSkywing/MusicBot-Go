@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -516,6 +517,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// DebugListenAddr is optional; when set it must be a usable listen address.
+	if addr := strings.TrimSpace(c.GetString("DebugListenAddr")); addr != "" {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("debuglistenaddr must be host:port, got %q: %w", addr, err)
+		}
+	}
+
 	if c.GetBool("EnableMultipartDownload") && c.GetInt("MultipartConcurrency") <= 0 {
 		return fmt.Errorf("multipart concurrency must be greater than 0 when multipart download is enabled")
 	}
@@ -552,6 +560,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DBMaxIdleConns", 1)
 	v.SetDefault("DBConnMaxLifetimeSec", 3600)
 	v.SetDefault("DBCacheSizeMB", db.DefaultCacheSizeMB)
+	// Empty disables the pprof listener. Bind it to loopback when enabling it:
+	// the profiles it serves are unauthenticated.
+	v.SetDefault("DebugListenAddr", "")
 	v.SetDefault("LogLevel", "info")
 	v.SetDefault("LogFormat", "text")
 	v.SetDefault("LogSource", false)
