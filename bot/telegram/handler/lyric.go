@@ -992,12 +992,24 @@ func lyricFileExt(fileName string) string {
 	return ".lrc"
 }
 
+// lyricBaseNameCache memoises the "artist - title" stem used for lyric file
+// names. Resolving it costs a full GetTrack round trip, and the format-switch
+// keyboard re-resolves the same track on every button press -- for a composite
+// platform that is several upstream calls per tap, purely to rebuild a string
+// that cannot have changed. Only resolved names are cached; the localized
+// fallback stays per-request so it follows the caller's language.
+var lyricBaseNameCache = newTTLStore[string](30 * time.Minute)
+
 // buildLyricBaseName resolves the "artist - title" stem (without extension) for
 // the lyric file, falling back to "歌词".
 func (h *LyricHandler) buildLyricBaseName(ctx context.Context, plat platform.Platform, trackID string) string {
 	defaultName := tr(ctx, "lyr_default_name")
 	if plat == nil || strings.TrimSpace(trackID) == "" {
 		return defaultName
+	}
+	cacheKey := lyricCacheKey(plat.Name(), trackID)
+	if cached, ok := lyricBaseNameCache.Load(cacheKey); ok {
+		return cached
 	}
 	track, err := plat.GetTrack(ctx, trackID)
 	if err != nil || track == nil {
@@ -1012,16 +1024,19 @@ func (h *LyricHandler) buildLyricBaseName(ctx context.Context, plat platform.Pla
 	}
 	artistJoined := strings.ReplaceAll(strings.Join(artists, "/"), "/", ",")
 	title := strings.TrimSpace(track.Title)
+	var resolved string
 	switch {
 	case artistJoined == "" && title == "":
 		return defaultName
 	case artistJoined == "":
-		return title
+		resolved = title
 	case title == "":
-		return artistJoined
+		resolved = artistJoined
 	default:
-		return fmt.Sprintf("%s - %s", artistJoined, title)
+		resolved = artistJoined + " - " + title
 	}
+	lyricBaseNameCache.Store(cacheKey, resolved)
+	return resolved
 }
 
 func buildLyricFileNameForFormat(baseName, format string) string {
