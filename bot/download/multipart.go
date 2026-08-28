@@ -1,7 +1,6 @@
 package download
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -528,13 +527,6 @@ func (md *MultipartDownloader) mergeParts(parts []*partDownload, destPath string
 		}
 	}()
 
-	bw := bufio.NewWriterSize(outFile, 256*1024)
-	defer func() {
-		if flushErr := bw.Flush(); flushErr != nil && retErr == nil {
-			retErr = flushErr
-		}
-	}()
-
 	for _, part := range parts {
 		if part.err != nil {
 			return totalWritten, part.err
@@ -545,7 +537,11 @@ func (md *MultipartDownloader) mergeParts(parts []*partDownload, destPath string
 			return totalWritten, err
 		}
 
-		written, err := io.Copy(bw, partFile)
+		// Copy straight into the *os.File. Wrapping it in a bufio.Writer would
+		// route io.Copy through bufio.ReadFrom and bypass the os.File.ReadFrom
+		// fast path, which uses copy_file_range to move the data inside the
+		// kernel instead of bouncing every byte through user space.
+		written, err := io.Copy(outFile, partFile)
 		closeErr := partFile.Close()
 		if err != nil {
 			return totalWritten, err
