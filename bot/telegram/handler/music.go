@@ -417,7 +417,7 @@ func (h *MusicHandler) Handle(ctx context.Context, b *telego.Bot, update *telego
 				if message.From != nil {
 					requesterID = message.From.ID
 				}
-				h.LyricHandler.SendTrackLyrics(ctx, b, message.Chat.ID, message.MessageID, platformName, trackID, requesterID)
+				h.LyricHandler.SendTrackLyrics(ctx, b, string(message.Chat.Type), message.Chat.ID, message.MessageID, platformName, trackID, requesterID)
 			}
 			return
 		}

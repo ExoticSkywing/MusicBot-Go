@@ -299,10 +299,8 @@ func (h *GuestModeHandler) fetchAndEditGuestLyric(ctx context.Context, b *telego
 	}
 
 	baseName := lh.buildLyricBaseName(ctx, plat, trackID)
-	// Resolve the lyric-format default from the requester's OWN settings: model
-	// the synthetic message as a private chat so resolveDefaultLyricFormat reads
-	// user settings (From.ID) rather than group settings for chat 0.
-	defaultFormat := lh.resolveDefaultLyricFormat(ctx, &telego.Message{Chat: telego.Chat{ID: requesterID, Type: telego.ChatTypePrivate}, From: &telego.User{ID: requesterID}})
+	// An inline message carries no chat, so the requester's own settings apply.
+	defaultFormat := lh.resolveDefaultLyricFormat(ctx, privateLyricScope(requesterID))
 	state := lyricRenderState{
 		format:             defaultFormat,
 		defaultFormat:      defaultFormat,

@@ -173,7 +173,7 @@ func (h *LyricHandler) Handle(ctx context.Context, b *telego.Bot, update *telego
 	}
 	// The per-scope default lyric format drives the initial render (when no
 	// explicit trailing format was given) and the "保存为默认" comparison.
-	defaultFormat := h.resolveDefaultLyricFormat(ctx, message)
+	defaultFormat := h.resolveDefaultLyricFormat(ctx, lyricScopeFromMessage(message))
 	if !explicitFormat {
 		format = defaultFormat
 	}
@@ -389,7 +389,7 @@ func getLyricsLimitedFor(ctx context.Context, limiter *ResourceRateLimiter, user
 // to the bot's private chat (?start=lyric_<platform>_<trackID>) because those
 // contexts cannot post a new message to the originating chat. It is also the
 // handler for the lyric_ /start deep link.
-func (h *LyricHandler) SendTrackLyrics(ctx context.Context, b *telego.Bot, chatID int64, replyToMessageID int, platformName, trackID string, requesterID int64) {
+func (h *LyricHandler) SendTrackLyrics(ctx context.Context, b *telego.Bot, chatType string, chatID int64, replyToMessageID int, platformName, trackID string, requesterID int64) {
 	if h == nil || b == nil || h.PlatformManager == nil {
 		return
 	}
@@ -404,7 +404,7 @@ func (h *LyricHandler) SendTrackLyrics(ctx context.Context, b *telego.Bot, chatI
 		return
 	}
 	baseName := h.buildLyricBaseName(ctx, plat, trackID)
-	defaultFormat := h.resolveDefaultLyricFormat(ctx, &telego.Message{Chat: telego.Chat{ID: chatID}, From: &telego.User{ID: requesterID}})
+	defaultFormat := h.resolveDefaultLyricFormat(ctx, lyricScopeFor(chatType, chatID, requesterID))
 	state := lyricRenderState{
 		format:             defaultFormat,
 		defaultFormat:      defaultFormat,
@@ -465,27 +465,75 @@ func (h *LyricHandler) resolveDefaultLyricFlags(ctx context.Context, message *te
 
 // resolveDefaultLyricFormat resolves the per-scope default lyric format: group
 // settings in groups, user settings in private chats, falling back to "lrc".
-func (h *LyricHandler) resolveDefaultLyricFormat(ctx context.Context, message *telego.Message) string {
+func (h *LyricHandler) resolveDefaultLyricFormat(ctx context.Context, scope lyricScope) string {
 	format := "lrc"
-	if h.Repo == nil || message == nil {
+	if h.Repo == nil {
 		return format
 	}
-	if message.Chat.Type != "private" {
-		if settings, err := h.Repo.GetGroupSettings(ctx, message.Chat.ID); err == nil && settings != nil {
-			if f := strings.TrimSpace(settings.DefaultLyricFormat); f != "" {
-				format = f
+	if scope.isPrivate {
+		if scope.userID != 0 {
+			if settings, err := h.Repo.GetUserSettings(ctx, scope.userID); err == nil && settings != nil {
+				if f := strings.TrimSpace(settings.DefaultLyricFormat); f != "" {
+					format = f
+				}
 			}
 		}
 		return lyricpkg.NormalizeFormat(format)
 	}
-	if message.From != nil {
-		if settings, err := h.Repo.GetUserSettings(ctx, message.From.ID); err == nil && settings != nil {
+	if scope.chatID != 0 {
+		if settings, err := h.Repo.GetGroupSettings(ctx, scope.chatID); err == nil && settings != nil {
 			if f := strings.TrimSpace(settings.DefaultLyricFormat); f != "" {
 				format = f
 			}
 		}
 	}
 	return lyricpkg.NormalizeFormat(format)
+}
+
+// lyricScope says whose persisted lyric defaults apply: a user's own settings
+// in a private chat, the group's settings anywhere else.
+//
+// This used to be inferred from a telego.Message, which invited callers with no
+// real message to hand-roll a synthetic one -- and a synthetic message leaves
+// Chat.Type empty, which read as "not private" and sent private-chat lookups to
+// GetGroupSettings keyed by the user's own id. That row never exists, so
+// FirstOrCreate minted a fresh one defaulting to "lrc" and the user's saved
+// format was silently ignored. Making the scope explicit removes the trap.
+type lyricScope struct {
+	isPrivate bool
+	chatID    int64
+	userID    int64
+}
+
+// lyricScopeFromMessage derives the scope from a real incoming message.
+func lyricScopeFromMessage(message *telego.Message) lyricScope {
+	if message == nil {
+		return lyricScope{}
+	}
+	scope := lyricScope{
+		isPrivate: message.Chat.Type == telego.ChatTypePrivate,
+		chatID:    message.Chat.ID,
+	}
+	if message.From != nil {
+		scope.userID = message.From.ID
+	}
+	return scope
+}
+
+// lyricScopeFor builds a scope from a chat type string plus ids, for callbacks
+// and other entry points that carry them separately.
+func lyricScopeFor(chatType string, chatID, userID int64) lyricScope {
+	return lyricScope{
+		isPrivate: chatType == telego.ChatTypePrivate,
+		chatID:    chatID,
+		userID:    userID,
+	}
+}
+
+// privateLyricScope is the scope for flows that have no chat context at all,
+// such as inline (guest) mode, where the requester's own settings apply.
+func privateLyricScope(userID int64) lyricScope {
+	return lyricScope{isPrivate: true, chatID: userID, userID: userID}
 }
 
 // lyricRenderedDoc holds the rendered artifacts for a lyric document: the temp

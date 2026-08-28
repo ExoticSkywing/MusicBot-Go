@@ -344,7 +344,7 @@ func (h *LyricCallbackHandler) handleSearchResultCallback(ctx context.Context, b
 
 	lh := h.newLyricHandler()
 	baseName := lh.buildLyricBaseName(ctx, plat, trackID)
-	defaultFormat := lh.resolveDefaultLyricFormat(ctx, &telego.Message{Chat: telego.Chat{ID: chatID}, From: &telego.User{ID: requesterID}})
+	defaultFormat := lh.resolveDefaultLyricFormat(ctx, lyricScopeFromCallback(query, chatID, requesterID))
 	format := defaultFormat
 	state := lyricRenderState{
 		format:             format,
@@ -472,10 +472,13 @@ func (h *LyricCallbackHandler) handleFormatCallback(ctx context.Context, b *tele
 		return
 	}
 
-	defaultFormat := lyricpkg.NormalizeFormat(payload.defaultFormat)
+	// NormalizeFormat maps "" to "lrc", so an unset payload default would be
+	// indistinguishable from a genuine "lrc". Check before normalising.
+	defaultFormat := strings.TrimSpace(payload.defaultFormat)
 	if defaultFormat == "" {
 		defaultFormat = h.resolveDefaultLyricFormat(ctx, query)
 	}
+	defaultFormat = lyricpkg.NormalizeFormat(defaultFormat)
 
 	state := lyricRenderState{
 		format:             format,
@@ -689,6 +692,24 @@ func (h *LyricCallbackHandler) resolveDefaultLyricFormat(ctx context.Context, qu
 		}
 	}
 	return lyricpkg.NormalizeFormat(format)
+}
+
+// lyricScopeFromCallback resolves whose lyric defaults apply to a callback. An
+// inline message has no chat of its own, so it falls back to the requester's
+// personal settings.
+func lyricScopeFromCallback(query *telego.CallbackQuery, chatID, requesterID int64) lyricScope {
+	if requesterID == 0 && query != nil {
+		requesterID = query.From.ID
+	}
+	if query != nil {
+		if msg := query.Message.Message(); msg != nil {
+			return lyricScopeFor(string(msg.Chat.Type), msg.Chat.ID, requesterID)
+		}
+	}
+	if chatID == 0 || chatID == requesterID {
+		return privateLyricScope(requesterID)
+	}
+	return lyricScopeFor("", chatID, requesterID)
 }
 
 // lyricCallbackMessageTarget resolves where to update the lyric document. For a
