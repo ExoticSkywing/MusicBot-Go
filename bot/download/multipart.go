@@ -225,6 +225,15 @@ func (md *MultipartDownloader) downloadSingle(ctx context.Context, rawURL string
 		return 0, fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
+	// Fall back to the served length when the platform declared no size. Some
+	// sources cannot supply one -- bilibili reports Size 0 and its CDN answers
+	// HEAD with 404, so SupportsRange yields nothing either -- which left the
+	// transfer with no length contract at all: a body that ended early was
+	// accepted as a complete download.
+	if expectedTotal <= 0 && resp.ContentLength > 0 {
+		expectedTotal = resp.ContentLength
+	}
+
 	file, err := os.Create(destPath)
 	if err != nil {
 		return 0, err
