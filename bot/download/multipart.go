@@ -48,7 +48,6 @@ type partDownload struct {
 	index   int
 	start   int64
 	end     int64
-	path    string
 	err     error
 	written int64
 }
@@ -312,12 +311,29 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 		numParts++
 	}
 
-	// Create temporary directory for parts
-	tempDir := destPath + ".parts"
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return 0, fmt.Errorf("failed to create temp directory: %w", err)
+	// Preallocate the destination and let every worker pwrite into its own
+	// slice of it. Staging each part as its own file meant writing the whole
+	// track twice -- once as parts, once again while merging -- and holding two
+	// full copies on disk at the peak, which is a hard limit on a small VPS.
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create destination: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
+	if err := outFile.Truncate(totalSize); err != nil {
+		outFile.Close()
+		os.Remove(destPath)
+		return 0, fmt.Errorf("failed to preallocate destination: %w", err)
+	}
+	// A failed multipart download must not leave a sparse carcass behind: the
+	// caller either retries or falls back to a single unranged GET, and both
+	// expect to start from nothing.
+	committed := false
+	defer func() {
+		if !committed {
+			outFile.Close()
+			os.Remove(destPath)
+		}
+	}()
 
 	// Setup progress tracking
 	tracker := newProgressTracker(totalSize, progress)
@@ -339,7 +355,7 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 					return
 				}
 				part := parts[partIndex]
-				err := md.downloadPart(ctx, rawURL, info, part, tracker)
+				err := md.downloadPart(ctx, rawURL, info, part, outFile, tracker)
 				if err != nil {
 					part.err = err
 					errOnce.Do(func() {
@@ -364,7 +380,6 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 			index: i,
 			start: start,
 			end:   end,
-			path:  fmt.Sprintf("%s/part.%d", tempDir, i),
 		}
 		partCh <- i
 	}
@@ -381,10 +396,17 @@ func (md *MultipartDownloader) downloadMultipartWithPartSize(ctx context.Context
 
 	tracker.final()
 
-	written, err := md.mergeParts(parts, destPath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to merge parts: %w", err)
+	var written int64
+	for _, part := range parts {
+		written += part.written
 	}
+	if written != totalSize {
+		return 0, fmt.Errorf("%w: assembled size mismatch: got %d, expected %d", errDownloadIntegrity, written, totalSize)
+	}
+	if err := outFile.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close destination: %w", err)
+	}
+	committed = true
 
 	return written, nil
 }
@@ -399,7 +421,7 @@ func preferredMultipartError(parts []*partDownload, firstErr error) error {
 }
 
 // downloadPart downloads a single part of the file
-func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, info *platform.DownloadInfo, part *partDownload, tracker *progressTracker) (retErr error) {
+func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, info *platform.DownloadInfo, part *partDownload, out *os.File, tracker *progressTracker) (retErr error) {
 	ctx = withDownloadOwnedHeader(ctx, "Range")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -440,17 +462,6 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 		return fmt.Errorf("%w: range body size mismatch: got %d bytes, expected %d", errDownloadIntegrity, resp.ContentLength, expectedSize)
 	}
 
-	// Create part file
-	file, err := os.Create(part.path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := file.Close(); closeErr != nil && retErr == nil {
-			retErr = closeErr
-		}
-	}()
-
 	// Download part with progress tracking
 	bufp := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufp)
@@ -474,7 +485,10 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 		}
 		nr, err := resp.Body.Read(readBuf)
 		if nr > 0 {
-			nw, ew := file.Write(buf[0:nr])
+			// WriteAt issues a pwrite, which carries its own offset and does
+			// not touch the shared file descriptor's position -- so concurrent
+			// parts can write into one file without locking.
+			nw, ew := out.WriteAt(buf[0:nr], part.start+written)
 			if nw > 0 {
 				written += int64(nw)
 				tracker.update(part.index, written)
@@ -513,45 +527,4 @@ func (md *MultipartDownloader) downloadPart(ctx context.Context, rawURL string, 
 
 	part.written = written
 	return nil
-}
-
-// mergeParts combines all downloaded parts into the final file
-func (md *MultipartDownloader) mergeParts(parts []*partDownload, destPath string) (totalWritten int64, retErr error) {
-	outFile, err := os.Create(destPath)
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil && retErr == nil {
-			retErr = closeErr
-		}
-	}()
-
-	for _, part := range parts {
-		if part.err != nil {
-			return totalWritten, part.err
-		}
-
-		partFile, err := os.Open(part.path)
-		if err != nil {
-			return totalWritten, err
-		}
-
-		// Copy straight into the *os.File. Wrapping it in a bufio.Writer would
-		// route io.Copy through bufio.ReadFrom and bypass the os.File.ReadFrom
-		// fast path, which uses copy_file_range to move the data inside the
-		// kernel instead of bouncing every byte through user space.
-		written, err := io.Copy(outFile, partFile)
-		closeErr := partFile.Close()
-		if err != nil {
-			return totalWritten, err
-		}
-		if closeErr != nil {
-			return totalWritten, closeErr
-		}
-
-		totalWritten += written
-	}
-
-	return totalWritten, nil
 }
