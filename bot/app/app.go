@@ -168,7 +168,8 @@ func initRepository(conf *config.Config, log *logpkg.Logger) (*db.Repository, er
 		dataDatabasePath = "data.db"
 	}
 
-	repo, err := db.NewSQLiteRepository(databasePath, dataDatabasePath, gormLogger)
+	repo, err := db.NewSQLiteRepository(databasePath, dataDatabasePath, gormLogger,
+		db.WithCacheSizeMB(conf.GetInt("DBCacheSizeMB")))
 	if err != nil {
 		return nil, fmt.Errorf("init db: %w", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/liuran001/MusicBot-Go/bot/db"
 	"github.com/liuran001/MusicBot-Go/bot/httpproxy"
 	"github.com/spf13/viper"
 	"gopkg.in/ini.v1"
@@ -495,6 +496,7 @@ func (c *Config) Validate() error {
 		"DBMaxOpenConns":            c.GetInt("DBMaxOpenConns"),
 		"DBMaxIdleConns":            c.GetInt("DBMaxIdleConns"),
 		"DBConnMaxLifetimeSec":      c.GetInt("DBConnMaxLifetimeSec"),
+		"DBCacheSizeMB":             c.GetInt("DBCacheSizeMB"),
 		"MultipartMinSizeMB":        c.GetInt("MultipartMinSizeMB"),
 		"GlobalRateLimitBurst":      c.GetInt("GlobalRateLimitBurst"),
 		"TelegramSendWorkerCount":   c.GetInt("TelegramSendWorkerCount"),
@@ -549,6 +551,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("DBMaxOpenConns", 1)
 	v.SetDefault("DBMaxIdleConns", 1)
 	v.SetDefault("DBConnMaxLifetimeSec", 3600)
+	v.SetDefault("DBCacheSizeMB", db.DefaultCacheSizeMB)
 	v.SetDefault("LogLevel", "info")
 	v.SetDefault("LogFormat", "text")
 	v.SetDefault("LogSource", false)

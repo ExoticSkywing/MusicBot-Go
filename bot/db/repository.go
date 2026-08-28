@@ -28,10 +28,44 @@ type Repository struct {
 	defaultLyricFormat string
 }
 
+// DefaultCacheSizeMB is the per-connection SQLite page cache. It is deliberately
+// modest: the cache is charged to every pooled connection of both databases, and
+// the bot is routinely deployed in containers capped at a few hundred megabytes.
+// A full scan of a ~43MB cache database costs about 4MB of RSS at 2MB of page
+// cache, 31MB at 16MB, and 86MB at 64MB, so the top of that range buys little
+// beyond what the hot pages already give and can be the difference between
+// fitting in the container and being OOM-killed. Raise DBCacheSizeMB when the
+// host has memory to spare.
+const DefaultCacheSizeMB = 16
+
+type repositoryOptions struct {
+	cacheSizeMB int
+}
+
+// Option customises repository construction.
+type Option func(*repositoryOptions)
+
+// WithCacheSizeMB sets the per-connection SQLite page cache in MiB. Values of
+// zero or less select DefaultCacheSizeMB.
+func WithCacheSizeMB(mb int) Option {
+	return func(o *repositoryOptions) {
+		if mb > 0 {
+			o.cacheSizeMB = mb
+		}
+	}
+}
+
 // NewSQLiteRepository creates a repository backed by SQLite.
-func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) (*Repository, error) {
+func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface, opts ...Option) (*Repository, error) {
 	if cacheDSN == "" || dataDSN == "" {
 		return nil, fmt.Errorf("dsns required")
+	}
+
+	options := repositoryOptions{cacheSizeMB: DefaultCacheSizeMB}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
 	}
 
 	if gormLogger == nil {
@@ -47,7 +81,7 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) 
 		}
 	}
 
-	cacheDB, err := gorm.Open(sqlite.Open(sqliteDSN(cacheDSN)), &gorm.Config{
+	cacheDB, err := gorm.Open(sqlite.Open(sqliteDSN(cacheDSN, options.cacheSizeMB)), &gorm.Config{
 		PrepareStmt:            true,
 		SkipDefaultTransaction: true,
 		Logger:                 gormLogger,
@@ -55,11 +89,11 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) 
 	if err != nil {
 		return nil, err
 	}
-	if err := applySQLitePragmas(cacheDB); err != nil {
+	if err := applySQLitePragmas(cacheDB, options.cacheSizeMB); err != nil {
 		return nil, err
 	}
 
-	dataDB, err := gorm.Open(sqlite.Open(sqliteDSN(dataDSN)), &gorm.Config{
+	dataDB, err := gorm.Open(sqlite.Open(sqliteDSN(dataDSN, options.cacheSizeMB)), &gorm.Config{
 		PrepareStmt:            true,
 		SkipDefaultTransaction: true,
 		Logger:                 gormLogger,
@@ -67,7 +101,7 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) 
 	if err != nil {
 		return nil, err
 	}
-	if err := applySQLitePragmas(dataDB); err != nil {
+	if err := applySQLitePragmas(dataDB, options.cacheSizeMB); err != nil {
 		return nil, err
 	}
 
@@ -777,17 +811,23 @@ func (r *Repository) Last(ctx context.Context) (*bot.SongInfo, error) {
 	return toInternal(model), nil
 }
 
-// sqlitePragmas is the connection configuration both databases run with.
+// sqlitePragmas returns the connection configuration both databases run with.
 // journal_mode is persisted in the database header; every other entry is
 // per-connection state that has to be re-established each time the pool opens
-// one.
-var sqlitePragmas = []string{
-	"journal_mode(WAL)",
-	"busy_timeout(5000)",
-	"synchronous(NORMAL)",
-	"cache_size(-64000)",
-	"temp_store(MEMORY)",
-	"foreign_keys(ON)",
+// one. cache_size is expressed as a negative value, which SQLite reads as a
+// KiB budget rather than a page count.
+func sqlitePragmas(cacheSizeMB int) []string {
+	if cacheSizeMB <= 0 {
+		cacheSizeMB = DefaultCacheSizeMB
+	}
+	return []string{
+		"journal_mode(WAL)",
+		"busy_timeout(5000)",
+		"synchronous(NORMAL)",
+		"cache_size(" + strconv.Itoa(-cacheSizeMB*1024) + ")",
+		"temp_store(MEMORY)",
+		"foreign_keys(ON)",
+	}
 }
 
 // sqliteDSN turns a database path into a DSN that carries the pragmas.
@@ -798,9 +838,9 @@ var sqlitePragmas = []string{
 // with driver defaults, silently dropping synchronous, cache_size, temp_store
 // and foreign_keys. Carrying them in the DSN makes the driver apply them to
 // every connection it opens.
-func sqliteDSN(path string) string {
+func sqliteDSN(path string, cacheSizeMB int) string {
 	query := url.Values{}
-	for _, pragma := range sqlitePragmas {
+	for _, pragma := range sqlitePragmas(cacheSizeMB) {
 		query.Add("_pragma", pragma)
 	}
 	separator := "?"
@@ -810,8 +850,8 @@ func sqliteDSN(path string) string {
 	return path + separator + query.Encode()
 }
 
-func applySQLitePragmas(db *gorm.DB) error {
-	for _, pragma := range sqlitePragmas {
+func applySQLitePragmas(db *gorm.DB, cacheSizeMB int) error {
+	for _, pragma := range sqlitePragmas(cacheSizeMB) {
 		name, value, ok := strings.Cut(strings.TrimSuffix(pragma, ")"), "(")
 		if !ok {
 			continue

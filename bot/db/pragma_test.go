@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func newPragmaTestRepo(t *testing.T) *Repository {
+func newPragmaTestRepo(t *testing.T, opts ...Option) *Repository {
 	t.Helper()
 
 	cacheFile, err := os.CreateTemp("", "musicbot-pragma-cache-*.db")
@@ -34,7 +35,7 @@ func newPragmaTestRepo(t *testing.T) *Repository {
 	t.Cleanup(func() { os.Remove(dataPath) })
 
 	base := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
-	repo, err := NewSQLiteRepository(cachePath, dataPath, logpkg.NewGormLogger(base, logger.Silent))
+	repo, err := NewSQLiteRepository(cachePath, dataPath, logpkg.NewGormLogger(base, logger.Silent), opts...)
 	if err != nil {
 		t.Fatalf("new repo: %v", err)
 	}
@@ -51,7 +52,7 @@ func readPragma(t *testing.T, db *gorm.DB, name string) string {
 }
 
 func TestSQLiteDSNCarriesPragmas(t *testing.T) {
-	dsn := sqliteDSN("cache.db")
+	dsn := sqliteDSN("cache.db", DefaultCacheSizeMB)
 	if !strings.HasPrefix(dsn, "cache.db?") {
 		t.Fatalf("sqliteDSN(%q) = %q, want the path preserved with a query", "cache.db", dsn)
 	}
@@ -60,14 +61,14 @@ func TestSQLiteDSNCarriesPragmas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DSN query %q does not parse: %v", query, err)
 	}
-	for _, pragma := range sqlitePragmas {
+	for _, pragma := range sqlitePragmas(DefaultCacheSizeMB) {
 		if !slices.Contains(values["_pragma"], pragma) {
 			t.Errorf("DSN %q is missing pragma %q", dsn, pragma)
 		}
 	}
 
 	// A path that already carries a query must keep it.
-	withQuery := sqliteDSN("cache.db?mode=rw")
+	withQuery := sqliteDSN("cache.db?mode=rw", DefaultCacheSizeMB)
 	if !strings.HasPrefix(withQuery, "cache.db?mode=rw&") {
 		t.Fatalf("sqliteDSN dropped an existing query: %q", withQuery)
 	}
@@ -84,7 +85,7 @@ func TestPragmasSurviveConnectionRecycling(t *testing.T) {
 	want := map[string]string{
 		"journal_mode": "wal",
 		"synchronous":  "1", // NORMAL
-		"cache_size":   "-64000",
+		"cache_size":   strconv.Itoa(-DefaultCacheSizeMB * 1024),
 		"temp_store":   "2", // MEMORY
 		"foreign_keys": "1", // ON
 		"busy_timeout": "5000",
@@ -117,6 +118,35 @@ func TestPragmasSurviveConnectionRecycling(t *testing.T) {
 						target.name, label, pragma, got, expected)
 				}
 			}
+		}
+	}
+}
+
+func TestSQLitePragmasCacheSizeIsConfigurable(t *testing.T) {
+	// SQLite reads a negative cache_size as a KiB budget.
+	for _, tt := range []struct{ mb, want int }{
+		{mb: 16, want: -16384},
+		{mb: 64, want: -65536},
+		{mb: 0, want: -DefaultCacheSizeMB * 1024},  // zero selects the default
+		{mb: -5, want: -DefaultCacheSizeMB * 1024}, // as does a negative value
+	} {
+		want := "cache_size(" + strconv.Itoa(tt.want) + ")"
+		if got := sqlitePragmas(tt.mb); !slices.Contains(got, want) {
+			t.Errorf("sqlitePragmas(%d) = %v, want it to contain %q", tt.mb, got, want)
+		}
+	}
+}
+
+// TestWithCacheSizeMBReachesTheConnection proves the option survives all the way
+// to a live connection, not just into the DSN string.
+func TestWithCacheSizeMBReachesTheConnection(t *testing.T) {
+	repo := newPragmaTestRepo(t, WithCacheSizeMB(8))
+	for _, target := range []struct {
+		name string
+		db   *gorm.DB
+	}{{"cache", repo.cacheDB}, {"data", repo.dataDB}} {
+		if got := readPragma(t, target.db, "cache_size"); got != "-8192" {
+			t.Errorf("%s db: PRAGMA cache_size = %q, want %q", target.name, got, "-8192")
 		}
 	}
 }
