@@ -21,6 +21,7 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/httpproxy"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
+	"github.com/liuran001/MusicBot-Go/bot/util"
 )
 
 const (
@@ -56,7 +57,25 @@ type Client struct {
 	apiHTTPClient     *http.Client
 	searchHTTPClient  *http.Client
 	defaultHTTPClient *http.Client
+
+	// The gateway song payload never carries singer_ids, so enrichment used to
+	// fall through to a full search request on every GetTrack -- twice per
+	// download, since the track and download-info lookups are separate
+	// singleflight keys. Misses are cached too: a track the search cannot match
+	// would otherwise re-search forever.
+	enrichCache *util.TTLCache[kugouEnrichedMeta]
 }
+
+// kugouEnrichedMeta holds the two fields enrichment recovers from search. Both
+// may be empty, which is itself a result worth caching.
+type kugouEnrichedMeta struct {
+	singerIDs  string
+	shareChain string
+}
+
+// kugouEnrichCacheTTL covers a browsing session; singer ids and share chains do
+// not change for a given track hash.
+const kugouEnrichCacheTTL = 30 * time.Minute
 
 func (c *Client) HasCookie() bool {
 	return c != nil && (strings.TrimSpace(c.baseCookie()) != "" || strings.TrimSpace(c.conceptCookie()) != "")
@@ -73,6 +92,7 @@ func (c *Client) HasVIPDownloadCookie() bool {
 func NewClient(cookie string, logger bot.Logger) *Client {
 	trimmed := strings.TrimSpace(cookie)
 	return &Client{
+		enrichCache:       util.NewTTLCache[kugouEnrichedMeta](kugouEnrichCacheTTL, 4096),
 		api:               kugoulib.New(trimmed),
 		cookie:            trimmed,
 		logger:            logger,
@@ -1087,25 +1107,50 @@ func (c *Client) enrichGatewaySongMeta(ctx context.Context, song *model.Song) *m
 	if query == "" {
 		return song
 	}
-	results, err := c.searchSongs(ctx, query, 10)
-	if err != nil || len(results) == 0 {
-		return song
-	}
 	primaryHash := normalizeHash(firstNonEmpty(extra["hash"], song.ID))
-	best := findMatchingSearchSong(results, primaryHash, strings.TrimSpace(song.AlbumID), strings.TrimSpace(song.Name), strings.TrimSpace(song.Artist))
-	if best == nil || best.Extra == nil {
+
+	meta, err := c.lookupEnrichedMeta(ctx, primaryHash, query, song)
+	if err != nil {
 		return song
 	}
-	if singerIDs := strings.TrimSpace(best.Extra["singer_ids"]); singerIDs != "" {
-		extra["singer_ids"] = singerIDs
+	if meta.singerIDs != "" {
+		extra["singer_ids"] = meta.singerIDs
 	}
-	if strings.TrimSpace(extra["share_chain"]) == "" {
-		if shareChain := strings.TrimSpace(best.Extra["share_chain"]); shareChain != "" {
-			extra["share_chain"] = shareChain
-			song.Link = buildShareTrackLink(shareChain, song.ID, song.AlbumID, extra["album_audio_id"])
-		}
+	if strings.TrimSpace(extra["share_chain"]) == "" && meta.shareChain != "" {
+		extra["share_chain"] = meta.shareChain
+		song.Link = buildShareTrackLink(meta.shareChain, song.ID, song.AlbumID, extra["album_audio_id"])
 	}
 	return song
+}
+
+// lookupEnrichedMeta resolves singer ids and share chain for a track, memoised
+// by track hash so the backing search runs at most once per TTL.
+func (c *Client) lookupEnrichedMeta(ctx context.Context, primaryHash, query string, song *model.Song) (kugouEnrichedMeta, error) {
+	fetch := func() (kugouEnrichedMeta, error) {
+		results, err := c.searchSongs(ctx, query, 10)
+		if err != nil {
+			return kugouEnrichedMeta{}, err
+		}
+		if len(results) == 0 {
+			return kugouEnrichedMeta{}, nil
+		}
+		best := findMatchingSearchSong(results, primaryHash, strings.TrimSpace(song.AlbumID), strings.TrimSpace(song.Name), strings.TrimSpace(song.Artist))
+		if best == nil || best.Extra == nil {
+			return kugouEnrichedMeta{}, nil
+		}
+		return kugouEnrichedMeta{
+			singerIDs:  strings.TrimSpace(best.Extra["singer_ids"]),
+			shareChain: strings.TrimSpace(best.Extra["share_chain"]),
+		}, nil
+	}
+	if c.enrichCache == nil {
+		return fetch()
+	}
+	key := primaryHash
+	if key == "" {
+		key = "q:" + query
+	}
+	return c.enrichCache.Do(key, fetch)
 }
 
 func (c *Client) fetchGlobalCollectionPlaylist(ctx context.Context, identity kugouPlaylistIdentity) (*model.Playlist, []model.Song, error) {
