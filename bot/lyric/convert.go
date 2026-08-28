@@ -139,7 +139,22 @@ func FileExtension(format string) string {
 // word-by-word output, with graceful fallback to the plain LRC.
 func Convert(p Payload, format string, opts Options) string {
 	lyric := p.pickLrcLikeLyric()
-	tokenLyric := p.pickTokenLyric()
+	// pickTokenLyric parses the whole TTML document for Apple Music payloads.
+	// Most formats never touch the result -- "ttml" passes RawTTML straight
+	// through, and raw/txt/srt/trans/roma ignore it entirely -- while one render
+	// calls Convert four or five times over the same payload. Resolve it on
+	// first use instead of on every call.
+	var (
+		tokenLyricResolved bool
+		tokenLyricValue    string
+	)
+	tokenLyric := func() string {
+		if !tokenLyricResolved {
+			tokenLyricValue = p.pickTokenLyric()
+			tokenLyricResolved = true
+		}
+		return tokenLyricValue
+	}
 	tlyric := p.Translation
 	roma := normalizeRomaLyric(pickRoma(p))
 	resolved := NormalizeFormat(format)
@@ -151,8 +166,8 @@ func Convert(p Payload, format string, opts Options) string {
 	includeRoma := opts.IncludeRoma
 	romaFirst := opts.RomaFirst
 
-	if lyric == "" && tokenLyric != "" {
-		lyric = tokenToLRC(tokenLyric)
+	if lyric == "" && tokenLyric() != "" {
+		lyric = tokenToLRC(tokenLyric())
 	}
 
 	switch resolved {
@@ -188,8 +203,8 @@ func Convert(p Payload, format string, opts Options) string {
 		if strings.TrimSpace(p.RawYRC) != "" {
 			return p.RawYRC
 		}
-		if tokenLyric != "" {
-			return tokenToYRC(tokenLyric)
+		if tokenLyric() != "" {
+			return tokenToYRC(tokenLyric())
 		}
 		return lyric
 	}
@@ -197,29 +212,29 @@ func Convert(p Payload, format string, opts Options) string {
 		if strings.TrimSpace(p.RawQRC) != "" {
 			return p.RawQRC
 		}
-		if tokenLyric != "" {
-			return tokenToQRC(tokenLyric)
+		if tokenLyric() != "" {
+			return tokenToQRC(tokenLyric())
 		}
 		return lyric
 	}
 	if resolved == "krc" {
 		// KRC has a bespoke on-wire encoding; for export we emit the LYS-style
 		// document which carries the same word timing in a readable form.
-		if tokenLyric != "" {
-			return tokenToLysDocument(tokenLyric, p, lyric, tlyric, roma)
+		if tokenLyric() != "" {
+			return tokenToLysDocument(tokenLyric(), p, lyric, tlyric, roma)
 		}
 		return lyric
 	}
 	if resolved == "lys" {
-		if tokenLyric != "" {
-			return tokenToLysDocument(tokenLyric, p, lyric, tlyric, roma)
+		if tokenLyric() != "" {
+			return tokenToLysDocument(tokenLyric(), p, lyric, tlyric, roma)
 		}
 		return lyric
 	}
 
 	if resolved == "elrc" {
-		if tokenLyric != "" {
-			if converted := tokenToElrc(tokenLyric, p, lyric, tlyric, roma); converted != "" {
+		if tokenLyric() != "" {
+			if converted := tokenToElrc(tokenLyric(), p, lyric, tlyric, roma); converted != "" {
 				return converted
 			}
 		}
@@ -233,41 +248,41 @@ func Convert(p Payload, format string, opts Options) string {
 
 	switch resolved {
 	case "spl":
-		if tokenLyric != "" {
+		if tokenLyric() != "" {
 			if includeTranslation {
-				return tokenToSpl(tokenLyric, tlyric, romaTrack, romaFirst)
+				return tokenToSpl(tokenLyric(), tlyric, romaTrack, romaFirst)
 			}
-			return tokenToSpl(tokenLyric, "", romaTrack, romaFirst)
+			return tokenToSpl(tokenLyric(), "", romaTrack, romaFirst)
 		}
 		if includeTranslation {
 			return lrcToSpl(lyric, tlyric, romaTrack, romaFirst)
 		}
 		return lrcToSpl(lyric, "", romaTrack, romaFirst)
 	case "ass":
-		if tokenLyric != "" {
+		if tokenLyric() != "" {
 			if includeTranslation {
-				return tokenToAss(tokenLyric, tlyric, romaTrack, romaFirst)
+				return tokenToAss(tokenLyric(), tlyric, romaTrack, romaFirst)
 			}
-			return tokenToAss(tokenLyric, "", romaTrack, romaFirst)
+			return tokenToAss(tokenLyric(), "", romaTrack, romaFirst)
 		}
 		if includeTranslation {
 			return lrcToAss(lyric, tlyric, romaTrack, romaFirst)
 		}
 		return lrcToAss(lyric, "", romaTrack, romaFirst)
 	case "lqe":
-		return lrcToLqe(lyric, ternary(includeTranslation, tlyric, ""), romaTrack, p, tokenLyric, romaFirst)
+		return lrcToLqe(lyric, ternary(includeTranslation, tlyric, ""), romaTrack, p, tokenLyric(), romaFirst)
 	case "ttml":
 		// Apple Music already hands us a complete word-timed TTML document.
 		if strings.TrimSpace(p.RawTTML) != "" {
 			return p.RawTTML
 		}
-		if tokenLyric != "" {
-			return tokenToTTML(tokenLyric, ternary(includeTranslation, tlyric, ""), p, romaTrack, true, romaFirst)
+		if tokenLyric() != "" {
+			return tokenToTTML(tokenLyric(), ternary(includeTranslation, tlyric, ""), p, romaTrack, true, romaFirst)
 		}
 		return lrcToTTML(lyric, ternary(includeTranslation, tlyric, ""), p, romaTrack, true, romaFirst)
 	case "amjson":
-		if tokenLyric != "" {
-			return ttmlToAppleMusicJSON(tokenToTTML(tokenLyric, ternary(includeTranslation, tlyric, ""), p, romaTrack, false, romaFirst))
+		if tokenLyric() != "" {
+			return ttmlToAppleMusicJSON(tokenToTTML(tokenLyric(), ternary(includeTranslation, tlyric, ""), p, romaTrack, false, romaFirst))
 		}
 		return ttmlToAppleMusicJSON(lrcToTTML(lyric, ternary(includeTranslation, tlyric, ""), p, romaTrack, false, romaFirst))
 	}
