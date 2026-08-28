@@ -20,17 +20,23 @@ import (
 
 // Client provides resilient Bilibili API calls.
 type Client struct {
-	httpClient   *retryablehttp.Client
-	breaker      *gobreaker.CircuitBreaker
-	maxRetries   int
-	minBackoff   time.Duration
-	maxBackoff   time.Duration
-	logger       bot.Logger
-	cookie       string
-	refreshToken string
-	cookieMutex  sync.RWMutex
-	autoRenew    bilibiliAutoRenewConfig
-	persistFunc  func(map[string]string) error
+	httpClient *retryablehttp.Client
+	breaker    *gobreaker.CircuitBreaker
+	// maxRetries bounds the transport-level retries performed by httpClient.
+	maxRetries int
+	// businessRetries bounds the outer retry loop. It is deliberately smaller
+	// than maxRetries: httpClient already retries connection errors, 5xx and
+	// 429 with backoff, so letting the outer loop multiply that turned one
+	// unreachable endpoint into ~20 requests and ~35s of sleep.
+	businessRetries int
+	minBackoff      time.Duration
+	maxBackoff      time.Duration
+	logger          bot.Logger
+	cookie          string
+	refreshToken    string
+	cookieMutex     sync.RWMutex
+	autoRenew       bilibiliAutoRenewConfig
+	persistFunc     func(map[string]string) error
 }
 
 type bilibiliAutoRenewConfig struct {
@@ -248,13 +254,14 @@ type SubtitleBodyResponse struct {
 // New returns an instance of Bilibili client.
 func New(logger bot.Logger, cookie string, refreshToken string, autoRenewEnabled bool, autoRenewInterval time.Duration, persist func(map[string]string) error) *Client {
 	c := &Client{
-		httpClient:   retryablehttp.NewClient(),
-		maxRetries:   3,
-		minBackoff:   1 * time.Second,
-		maxBackoff:   5 * time.Second,
-		logger:       logger,
-		cookie:       cookie,
-		refreshToken: refreshToken,
+		httpClient:      retryablehttp.NewClient(),
+		maxRetries:      3,
+		businessRetries: 1,
+		minBackoff:      1 * time.Second,
+		maxBackoff:      5 * time.Second,
+		logger:          logger,
+		cookie:          cookie,
+		refreshToken:    refreshToken,
 		autoRenew: bilibiliAutoRenewConfig{
 			enabled:  autoRenewEnabled,
 			interval: autoRenewInterval,
@@ -266,6 +273,11 @@ func New(logger bot.Logger, cookie string, refreshToken string, autoRenewEnabled
 	c.httpClient.RetryWaitMin = c.minBackoff
 	c.httpClient.RetryWaitMax = c.maxBackoff
 	c.httpClient.Logger = nil
+	if c.httpClient.HTTPClient != nil {
+		// retryablehttp leaves the underlying client without a deadline, so a
+		// stalled response body could hang a request indefinitely.
+		c.httpClient.HTTPClient.Timeout = 30 * time.Second
+	}
 
 	settings := gobreaker.Settings{
 		Name:        "bilibili-api",
@@ -274,6 +286,15 @@ func New(logger bot.Logger, cookie string, refreshToken string, autoRenewEnabled
 		Timeout:     30 * time.Second,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures > 5
+		},
+		// A non-zero business code says the service answered and declined --
+		// a deleted video, a region lock. That is a property of the request,
+		// not of bilibili's health, so it must not open the breaker and take
+		// every other request down with it. This matters now that such errors
+		// fail fast: previously each one burned enough seconds for the
+		// Interval above to reset the consecutive-failure count.
+		IsSuccessful: func(err error) bool {
+			return err == nil || isNonRetryable(err)
 		},
 	}
 
@@ -337,7 +358,7 @@ func (c *Client) GetAudioSongInfo(ctx context.Context, sid int) (*AudioSongInfoD
 		}
 
 		if result.Code != 0 {
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 
 		return nil
@@ -388,7 +409,7 @@ func (c *Client) GetAudioStreamUrl(ctx context.Context, sid int, quality int) (*
 		if result.Code != 0 {
 			// Specific handling for common bilibili errors could be added here
 			// 7201006 = Not Found / Taken Down
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 
 		return nil
@@ -490,7 +511,7 @@ func (c *Client) GetAudioSongLyric(ctx context.Context, sid int) (string, error)
 		}
 
 		if result.Code != 0 {
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 
 		return nil
@@ -677,7 +698,7 @@ func (c *Client) GetVideoInfo(ctx context.Context, id string) (*VideoInfoData, e
 		}
 
 		if result.Code != 0 {
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 
 		return nil
@@ -733,7 +754,7 @@ func (c *Client) SearchVideo(ctx context.Context, keyword string, page int) ([]V
 		}
 
 		if result.Code != 0 {
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 		return nil
 	})
@@ -785,7 +806,7 @@ func (c *Client) GetVideoPlayUrl(ctx context.Context, bvid string, cid int) ([]V
 		}
 
 		if result.Code != 0 {
-			return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+			return apiCodeError(result.Code, result.Message)
 		}
 
 		return nil
@@ -889,7 +910,7 @@ func (c *Client) GetVideoSubtitleURL(ctx context.Context, bvid string, cid int, 
 			}
 
 			if result.Code != 0 {
-				return fmt.Errorf("bilibili: API error code %d: %s", result.Code, result.Message)
+				return apiCodeError(result.Code, result.Message)
 			}
 
 			return nil
@@ -1021,6 +1042,24 @@ func (c *Client) GetVideoSubtitleLines(ctx context.Context, subtitleURL string) 
 	return result.Body, nil
 }
 
+// nonRetryableError marks a failure the API has already adjudicated: an
+// HTTP 200 carrying a non-zero business code. Asking again returns the same
+// answer, so the retry loop must not spend more round trips on it.
+type nonRetryableError struct{ err error }
+
+func (e *nonRetryableError) Error() string { return e.err.Error() }
+func (e *nonRetryableError) Unwrap() error { return e.err }
+
+// apiCodeError builds a non-retryable error for a non-zero API business code.
+func apiCodeError(code int, message string) error {
+	return &nonRetryableError{err: fmt.Errorf("bilibili: API error code %d: %s", code, message)}
+}
+
+func isNonRetryable(err error) bool {
+	var target *nonRetryableError
+	return errors.As(err, &target)
+}
+
 func (c *Client) execute(ctx context.Context, fn func() error) error {
 	if fn == nil {
 		return nil
@@ -1037,8 +1076,13 @@ func (c *Client) withRetry(ctx context.Context, fn func() error) error {
 		return nil
 	}
 
+	retries := c.businessRetries
+	if retries < 0 {
+		retries = 0
+	}
+
 	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	for attempt := 0; attempt <= retries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1047,9 +1091,15 @@ func (c *Client) withRetry(ctx context.Context, fn func() error) error {
 			return nil
 		} else {
 			lastErr = err
+			// A rejection the API already decided on (deleted video, region
+			// lock, risk control) returns the same answer however many times
+			// it is asked. Retrying only multiplies latency.
+			if isNonRetryable(err) {
+				return err
+			}
 		}
 
-		if attempt == c.maxRetries {
+		if attempt == retries {
 			break
 		}
 
