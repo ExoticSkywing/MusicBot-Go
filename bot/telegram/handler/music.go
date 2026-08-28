@@ -4247,7 +4247,14 @@ func normalizeExtractedAudioPath(filePath, currentExt string) (string, string) {
 	if ext == "" {
 		ext = strings.ToLower(strings.TrimSpace(currentExt))
 	}
-	if ext != ".mp4" && ext != ".m4a" {
+	// Decide by what the bytes are, not by what the file is called. A platform
+	// may name a download after its codec rather than its container: bilibili
+	// serves lossless audio as FLAC inside MP4 (mimeType audio/mp4, codecs
+	// fLaC, .m4s segments) and the plugin names it .flac. Such a file used to
+	// skip this whole normalisation, so it reached the tagger as an MP4 wearing
+	// a .flac name -- which TagLib resolves by extension, giving it a FLAC
+	// parser for MP4 bytes and failing every save.
+	if ext != ".mp4" && ext != ".m4a" && !hasISOBaseMediaHeader(trimmedPath) {
 		if ext != "" {
 			return filePath, strings.TrimPrefix(ext, ".")
 		}
@@ -4262,17 +4269,21 @@ func normalizeExtractedAudioPath(filePath, currentExt string) (string, string) {
 	defer cancel()
 	switch codec {
 	case "flac":
-		newPath := strings.TrimSuffix(trimmedPath, filepath.Ext(trimmedPath)) + ".flac"
-		if newPath != trimmedPath {
-			if err := extractEmbeddedFLAC(ctx, trimmedPath, newPath); err == nil {
-				if removeErr := os.Remove(trimmedPath); removeErr == nil || os.IsNotExist(removeErr) {
-					return newPath, "flac"
+		base := strings.TrimSuffix(trimmedPath, filepath.Ext(trimmedPath))
+		newPath := base + ".flac"
+		// Extract through a temporary file rather than straight to newPath: the
+		// source may already carry the .flac name while holding an MP4, and
+		// ffmpeg cannot read and write the same path.
+		tmpPath := base + ".extract.flac"
+		if err := extractEmbeddedFLAC(ctx, trimmedPath, tmpPath); err == nil {
+			if err := os.Rename(tmpPath, newPath); err == nil {
+				if newPath != trimmedPath {
+					_ = os.Remove(trimmedPath)
 				}
-				_ = os.Remove(newPath)
-			} else {
-				_ = os.Remove(newPath)
+				return newPath, "flac"
 			}
 		}
+		_ = os.Remove(tmpPath)
 		return trimmedPath, "flac"
 	case "aac", "alac":
 		newPath := strings.TrimSuffix(trimmedPath, filepath.Ext(trimmedPath)) + ".m4a"
@@ -4344,4 +4355,22 @@ func remuxExtractedAudioToM4A(ctx context.Context, srcPath, dstPath string) erro
 		return fmt.Errorf("remux extracted audio container: %w, stderr: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// hasISOBaseMediaHeader reports whether a file is an ISO base media container
+// (MP4/M4A/MOV), which is identified by an "ftyp" box at offset 4 rather than
+// by its name. Reading twelve bytes is cheap enough to run on every download;
+// probing with ffprobe would not be.
+func hasISOBaseMediaHeader(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	var header [12]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return false
+	}
+	return string(header[4:8]) == "ftyp"
 }
