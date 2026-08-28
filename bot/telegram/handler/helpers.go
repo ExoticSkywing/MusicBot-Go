@@ -21,6 +21,7 @@ import (
 
 	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
+	"github.com/liuran001/MusicBot-Go/bot/util"
 	"github.com/mymmrac/telego"
 )
 
@@ -1128,59 +1129,19 @@ type inlineResultPayload struct {
 	storedAt     time.Time
 }
 
-// ttlStore is a generic TTL-based in-memory store that evicts expired entries
-// on each write operation. It replaces multiple ad-hoc map+mutex+cleanup patterns.
-type ttlStore[V any] struct {
-	mu      sync.Mutex
-	entries map[string]ttlEntry[V]
-	ttl     time.Duration
-}
-
-type ttlEntry[V any] struct {
-	value    V
-	storedAt time.Time
-}
+// ttlStore is the handler-local spelling of util.TTLCache. It used to be a
+// separate map that rescanned every entry under its lock on each Load and
+// Store; the shared implementation makes lookups O(1) and bounds the entry
+// count, which matters because inline result and favourite tokens mint a fresh
+// key on every render and never reuse one.
+type ttlStore[V any] = util.TTLCache[V]
 
 func newTTLStore[V any](ttl time.Duration) *ttlStore[V] {
-	return &ttlStore[V]{
-		entries: make(map[string]ttlEntry[V]),
-		ttl:     ttl,
-	}
+	return util.NewTTLCache[V](ttl, util.TTLCacheDefaultMaxEntries)
 }
 
-func (s *ttlStore[V]) Store(key string, value V) {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, entry := range s.entries {
-		if now.Sub(entry.storedAt) > s.ttl {
-			delete(s.entries, k)
-		}
-	}
-	s.entries[key] = ttlEntry[V]{value: value, storedAt: now}
-}
-
-func (s *ttlStore[V]) Load(key string) (V, bool) {
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, entry := range s.entries {
-		if now.Sub(entry.storedAt) > s.ttl {
-			delete(s.entries, k)
-		}
-	}
-	entry, ok := s.entries[key]
-	if !ok {
-		var zero V
-		return zero, false
-	}
-	return entry.value, true
-}
-
-func (s *ttlStore[V]) Delete(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.entries, key)
+func newTTLStoreWithCap[V any](ttl time.Duration, maxEntries int) *ttlStore[V] {
+	return util.NewTTLCache[V](ttl, maxEntries)
 }
 
 type inlineMessageLockEntry struct {
