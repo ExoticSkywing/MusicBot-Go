@@ -31,7 +31,10 @@ func resizeImg(filePath string) (string, error) {
 		m = resize.Resize(uint(width*heightNew/height), uint(heightNew), img, resize.Lanczos3)
 	}
 
-	newImg := image.NewNRGBA(image.Rect(0, 0, 320, 320))
+	// RGBA, not NRGBA: image/jpeg and image/draw both have fast paths keyed on
+	// the concrete type, and NRGBA falls back to the generic per-pixel At()
+	// path that boxes a color.Color for every one of the 320x320 pixels.
+	newImg := image.NewRGBA(image.Rect(0, 0, 320, 320))
 	if m.Bounds().Dx() > m.Bounds().Dy() {
 		draw.Draw(newImg, image.Rectangle{
 			Min: image.Point{Y: (320 - m.Bounds().Dy()) / 2},
