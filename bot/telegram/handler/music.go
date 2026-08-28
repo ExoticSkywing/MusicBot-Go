@@ -1782,13 +1782,23 @@ func (h *MusicHandler) resolveTrackFromQuery(ctx context.Context, message *teleg
 	}
 
 	order := h.buildSearchOrder(primaryPlatform, fallbackPlatform)
+	// The tail of this order is every remaining searchable platform, walked
+	// until one answers. It runs on a detached context, so without a budget a
+	// single unresolvable keyword could occupy an event worker for as long as
+	// the slowest plugin's own client timeout allowed -- ten platforms deep.
+	deadline := time.Now().Add(resolveTrackSearchBudget)
 	for _, platformName := range order {
 		plat := h.PlatformManager.Get(platformName)
 		if plat == nil || !plat.SupportsSearch() {
 			continue
 		}
-		limit := searchLimitForPlatform(platformName)
-		tracks, err := plat.Search(ctx, keyword, limit)
+		if time.Now().After(deadline) {
+			if h.Logger != nil {
+				h.Logger.Warn("keyword resolution budget exhausted", "keyword", keyword, "stopped_at", platformName)
+			}
+			break
+		}
+		tracks, err := h.searchForTrackResolution(ctx, plat, platformName, keyword)
 		if err != nil || len(tracks) == 0 {
 			continue
 		}
@@ -1800,6 +1810,19 @@ func (h *MusicHandler) resolveTrackFromQuery(ctx context.Context, message *teleg
 	}
 
 	return "", "", false
+}
+
+// searchForTrackResolution runs one platform's search under its own deadline.
+// Only the first usable ID is consumed here, so the result limit is kept small:
+// some plugins page or fan out to fill a large limit (soda walks three pages,
+// bilibili expands each session), which is pure waste when a single hit ends
+// the search.
+func (h *MusicHandler) searchForTrackResolution(ctx context.Context, plat platform.Platform, platformName, keyword string) ([]platform.Track, error) {
+	searchCtx, cancel := context.WithTimeout(ctx, perPlatformSearchTimeout)
+	defer cancel()
+
+	limit := min(searchLimitForPlatform(platformName), resolveTrackSearchLimit)
+	return plat.Search(searchCtx, keyword, limit)
 }
 
 func (h *MusicHandler) resolveFallbackTrack(ctx context.Context, message *telego.Message, platformName, trackID string) (string, string, bool) {
@@ -1909,6 +1932,19 @@ func (h *MusicHandler) searchPlatforms() []string {
 	}
 	return results
 }
+
+const (
+	// perPlatformSearchTimeout bounds a single plugin's search. Plugin clients
+	// carry their own timeouts of up to 30s, which is far too long to spend on
+	// one link in a fallback chain.
+	perPlatformSearchTimeout = 6 * time.Second
+	// resolveTrackSearchBudget bounds the whole fallback chain.
+	resolveTrackSearchBudget = 25 * time.Second
+	// resolveTrackSearchLimit is how many results the keyword-resolution path
+	// asks for. It only ever consumes the first one with a usable ID, but keeps
+	// a few in reserve for plugins that return placeholder rows.
+	resolveTrackSearchLimit = 5
+)
 
 func searchLimitForPlatform(platformName string) int {
 	if strings.TrimSpace(platformName) == "netease" {
