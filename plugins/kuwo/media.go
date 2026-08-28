@@ -98,6 +98,10 @@ func losslessResolverPlan(quality platform.Quality) []losslessResolver {
 	case platform.QualityLossless:
 		return []losslessResolver{resolvePlayableFLAC, resolvePlayableExternalLossless}
 	case platform.QualityHiRes:
+		// The external resolver stays first on purpose: for paid metadata it is
+		// the only path allowed to serve Hi-Res, because its result is strictly
+		// verified before use. Reordering it behind the mobile endpoint would
+		// let a paid track reach that endpoint, which this tier must not do.
 		return []losslessResolver{
 			resolvePlayableHiRes,
 			resolvePlayableFLAC,
@@ -617,6 +621,13 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	// after its selector, identity, duration, STREAMINFO, size, and URL have all
 	// passed the resolver-specific checks above.
 	if accessErr != nil {
+		// Report why the resolvers actually failed alongside the access flag.
+		// Returning accessErr alone made every failure read as "paid track"
+		// whatever went wrong: a region block, an unreachable host and a genuine
+		// entitlement problem were indistinguishable in the logs.
+		if lastErr != nil {
+			return nil, fmt.Errorf("%w (lossless resolvers failed: %v)", accessErr, lastErr)
+		}
 		return nil, accessErr
 	}
 	for _, candidate := range mobileQualityCandidates(quality) {
