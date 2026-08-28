@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/httpproxy"
+	"github.com/liuran001/MusicBot-Go/bot/util"
 	"github.com/sony/gobreaker"
 )
 
@@ -29,7 +31,19 @@ type Client struct {
 	persistFunc func(map[string]string) error
 	autoRenew   neteaseAutoRenewConfig
 	autoRenewMu sync.RWMutex
+
+	// One download asks for the same song detail and URL twice: once through
+	// Platform.GetTrack/loadDownloadInfo and again from ID3Provider.GetTagData
+	// while embedding tags. Both are signed, encrypted POSTs to music.163.com,
+	// so a short memo removes two round trips per track without letting a
+	// stale CDN URL outlive its signature.
+	detailCache *util.TTLCache[*SongsDetailData]
+	urlCache    *util.TTLCache[*SongsURLData]
 }
+
+// neteaseMetaCacheTTL only has to span a single download, where the duplicate
+// calls land seconds apart.
+const neteaseMetaCacheTTL = 60 * time.Second
 
 type neteaseAutoRenewConfig struct {
 	enabled         bool
@@ -91,6 +105,8 @@ func New(musicU string, spoofIP bool, logger bot.Logger, persist ...func(map[str
 		maxBackoff:  client.RetryWaitMax,
 		logger:      logger,
 		persistFunc: persistFunc,
+		detailCache: util.NewTTLCache[*SongsDetailData](neteaseMetaCacheTTL, 2048),
+		urlCache:    util.NewTTLCache[*SongsURLData](neteaseMetaCacheTTL, 2048),
 	}
 }
 
@@ -111,6 +127,15 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 
 // GetSongDetail retrieves song detail data.
 func (c *Client) GetSongDetail(ctx context.Context, musicID int) (*SongsDetailData, error) {
+	if c.detailCache != nil {
+		return c.detailCache.Do(strconv.Itoa(musicID), func() (*SongsDetailData, error) {
+			return c.fetchSongDetail(ctx, musicID)
+		})
+	}
+	return c.fetchSongDetail(ctx, musicID)
+}
+
+func (c *Client) fetchSongDetail(ctx context.Context, musicID int) (*SongsDetailData, error) {
 	if c.logger != nil {
 		c.logger.Debug("fetching song detail", "music_id", musicID)
 	}
@@ -235,6 +260,15 @@ func (c *Client) GetArtistDetail(ctx context.Context, artistID int) (*ArtistDeta
 
 // GetSongURL retrieves song URL data.
 func (c *Client) GetSongURL(ctx context.Context, musicID int, quality string) (*SongsURLData, error) {
+	if c.urlCache != nil {
+		return c.urlCache.Do(strconv.Itoa(musicID)+"\x00"+quality, func() (*SongsURLData, error) {
+			return c.fetchSongURL(ctx, musicID, quality)
+		})
+	}
+	return c.fetchSongURL(ctx, musicID, quality)
+}
+
+func (c *Client) fetchSongURL(ctx context.Context, musicID int, quality string) (*SongsURLData, error) {
 	var result SongsURLData
 	err := c.execute(ctx, func() error {
 		data, err := GetSongURL(ctx, c.requestData(), SongURLConfig{IDs: []int{musicID}, Level: quality})
