@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,7 +47,7 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) 
 		}
 	}
 
-	cacheDB, err := gorm.Open(sqlite.Open(cacheDSN), &gorm.Config{
+	cacheDB, err := gorm.Open(sqlite.Open(sqliteDSN(cacheDSN)), &gorm.Config{
 		PrepareStmt:            true,
 		SkipDefaultTransaction: true,
 		Logger:                 gormLogger,
@@ -58,7 +59,7 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface) 
 		return nil, err
 	}
 
-	dataDB, err := gorm.Open(sqlite.Open(dataDSN), &gorm.Config{
+	dataDB, err := gorm.Open(sqlite.Open(sqliteDSN(dataDSN)), &gorm.Config{
 		PrepareStmt:            true,
 		SkipDefaultTransaction: true,
 		Logger:                 gormLogger,
@@ -776,17 +777,46 @@ func (r *Repository) Last(ctx context.Context) (*bot.SongInfo, error) {
 	return toInternal(model), nil
 }
 
-func applySQLitePragmas(db *gorm.DB) error {
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA busy_timeout=5000;",
-		"PRAGMA synchronous=NORMAL;",
-		"PRAGMA cache_size=-64000;",
-		"PRAGMA temp_store=MEMORY;",
-		"PRAGMA foreign_keys=ON;",
+// sqlitePragmas is the connection configuration both databases run with.
+// journal_mode is persisted in the database header; every other entry is
+// per-connection state that has to be re-established each time the pool opens
+// one.
+var sqlitePragmas = []string{
+	"journal_mode(WAL)",
+	"busy_timeout(5000)",
+	"synchronous(NORMAL)",
+	"cache_size(-64000)",
+	"temp_store(MEMORY)",
+	"foreign_keys(ON)",
+}
+
+// sqliteDSN turns a database path into a DSN that carries the pragmas.
+//
+// Setting them with PRAGMA statements after Open only configures whichever
+// connection the pool happened to hand out at that moment. Once that connection
+// is retired -- ConnMaxLifetime defaults to an hour -- its replacement comes up
+// with driver defaults, silently dropping synchronous, cache_size, temp_store
+// and foreign_keys. Carrying them in the DSN makes the driver apply them to
+// every connection it opens.
+func sqliteDSN(path string) string {
+	query := url.Values{}
+	for _, pragma := range sqlitePragmas {
+		query.Add("_pragma", pragma)
 	}
-	for _, stmt := range pragmas {
-		if err := db.Exec(stmt).Error; err != nil {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + query.Encode()
+}
+
+func applySQLitePragmas(db *gorm.DB) error {
+	for _, pragma := range sqlitePragmas {
+		name, value, ok := strings.Cut(strings.TrimSuffix(pragma, ")"), "(")
+		if !ok {
+			continue
+		}
+		if err := db.Exec("PRAGMA " + name + "=" + value + ";").Error; err != nil {
 			return err
 		}
 	}
