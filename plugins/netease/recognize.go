@@ -45,6 +45,13 @@ const (
 	afpFingerprintN = afpDurationSec * afpResampleHz // 48000 samples
 	afpFromSamples  = afpFromSec * afpSampleRate     // 192000
 	afpMinSamples   = afpFromSamples + (afpFingerprintN-1)*afpStride + 1
+	// afpDecodeSeconds bounds how much audio ffmpeg is asked to decode. Only
+	// the first afpMinSamples (~10s at 48kHz) are ever sampled, so decoding a
+	// full-length upload costs time and memory linear in its duration for no
+	// benefit: a 40-minute upload would otherwise materialise ~460MB of PCM
+	// twice over. The slack above the strict minimum absorbs container-level
+	// rounding so the sample count check below still passes.
+	afpDecodeSeconds = afpMinSamples/afpSampleRate + 3
 )
 
 // netease audio-match API, mirroring the headers/params from the JS reference.
@@ -303,6 +310,7 @@ func decodePCM(ctx context.Context, audioData []byte) ([]float32, error) {
 	cmd := exec.CommandContext(decodeCtx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
 		"-i", "pipe:0",
+		"-t", strconv.Itoa(afpDecodeSeconds),
 		"-ac", "1",
 		"-ar", strconv.Itoa(afpSampleRate),
 		"-f", "f32le",

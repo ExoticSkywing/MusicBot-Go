@@ -1,14 +1,12 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -87,24 +85,15 @@ func (h *RecognizeHandler) Handle(ctx context.Context, b *telego.Bot, update *te
 		return
 	}
 
-	mp3Data, err := convertToMP3(ctx, audioData, h.CacheDir)
-	if err != nil {
-		if h.Logger != nil {
-			h.Logger.Error("audio conversion failed", "error", err)
-		}
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_audio_convert_failed"))
-		return
-	}
-
 	if h.RecognizeService == nil {
 		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_service_unavailable_admin"))
 		return
 	}
 
-	result, err := h.RecognizeService.Recognize(ctx, mp3Data)
+	result, err := h.RecognizeService.Recognize(ctx, audioData)
 	if err != nil {
 		if h.Logger != nil {
-			h.Logger.Error("recognition service error", "error", err, "audio_size", len(mp3Data))
+			h.Logger.Error("recognition service error", "error", err, "audio_size", len(audioData))
 		}
 		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_failed_retry"))
 		return
@@ -150,40 +139,6 @@ func sendText(ctx context.Context, b *telego.Bot, chatID int64, replyID int, tex
 		ReplyParameters: &telego.ReplyParameters{MessageID: replyID},
 	}
 	_, _ = b.SendMessage(ctx, params)
-}
-
-func convertToMP3(ctx context.Context, audioData []byte, cacheDir string) ([]byte, error) {
-	if cacheDir == "" {
-		cacheDir = "./cache"
-	}
-
-	tmpFile := filepath.Join(cacheDir, fmt.Sprintf("recognize-%d.ogg", time.Now().UnixNano()))
-	mp3File := tmpFile + ".mp3"
-
-	defer os.Remove(tmpFile)
-	defer os.Remove(mp3File)
-
-	if err := os.WriteFile(tmpFile, audioData, 0644); err != nil {
-		return nil, fmt.Errorf("write temp file: %w", err)
-	}
-
-	ffmpegCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ffmpegCtx, "ffmpeg", "-i", tmpFile, "-f", "mp3", "-acodec", "libmp3lame", "-ar", "48000", mp3File)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg conversion failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	mp3Data, err := os.ReadFile(mp3File)
-	if err != nil {
-		return nil, fmt.Errorf("read converted file: %w", err)
-	}
-
-	return mp3Data, nil
 }
 
 func downloadTelegramFile(ctx context.Context, b *telego.Bot, filePath string) ([]byte, error) {

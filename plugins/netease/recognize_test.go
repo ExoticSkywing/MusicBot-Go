@@ -84,3 +84,45 @@ func TestRecognizeAudioTooShort(t *testing.T) {
 		t.Fatal("expected error for unstarted service / short input")
 	}
 }
+
+// TestDecodePCMHonoursDecodeWindow proves the decode is bounded: a long upload
+// must not be materialised in full, yet must still yield the samples the
+// fingerprint reads. Before the -t bound, a 40-minute upload decoded to
+// hundreds of megabytes of PCM only to have all but the first ten seconds
+// discarded.
+func TestDecodePCMHonoursDecodeWindow(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available")
+	}
+
+	// 120s of tone: an order of magnitude more than the decode window.
+	const sourceSeconds = 120
+	gen := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=120",
+		"-f", "ogg", "-acodec", "libvorbis", "pipe:1")
+	encoded, err := gen.Output()
+	if err != nil {
+		t.Skipf("cannot synthesise test audio: %v", err)
+	}
+
+	pcm, err := decodePCM(context.Background(), encoded)
+	if err != nil {
+		t.Fatalf("decodePCM: %v", err)
+	}
+
+	if len(pcm) < afpMinSamples {
+		t.Fatalf("decoded %d samples, fingerprint needs at least %d", len(pcm), afpMinSamples)
+	}
+	// Allow one second of container slack above the requested window, but the
+	// result must be nowhere near the full source length.
+	maxExpected := (afpDecodeSeconds + 1) * afpSampleRate
+	if len(pcm) > maxExpected {
+		t.Fatalf("decoded %d samples (~%ds); decode window of %ds was not applied",
+			len(pcm), len(pcm)/afpSampleRate, afpDecodeSeconds)
+	}
+	if len(pcm) >= sourceSeconds*afpSampleRate {
+		t.Fatalf("decoded the entire %ds source (%d samples)", sourceSeconds, len(pcm))
+	}
+	t.Logf("decoded %d samples (~%.1fs) from a %ds source; window=%ds, needed=%d",
+		len(pcm), float64(len(pcm))/afpSampleRate, sourceSeconds, afpDecodeSeconds, afpMinSamples)
+}

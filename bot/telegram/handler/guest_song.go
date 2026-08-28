@@ -406,19 +406,8 @@ func (h *GuestModeHandler) runGuestRecognize(ctx context.Context, b *telego.Bot,
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_download_voice_failed"), nil, "")
 		return
 	}
-	cacheDir := strings.TrimSpace(h.CacheDir)
-	if cacheDir == "" {
-		cacheDir = "./cache"
-	}
-	ensureDir(cacheDir)
-	_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_converting_audio"), nil, "")
-	mp3Data, err := convertToMP3(ctx, audioData, cacheDir)
-	if err != nil {
-		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_audio_convert_failed"), nil, "")
-		return
-	}
 	_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognizing"), nil, "")
-	result, err := h.RecognizeService.Recognize(ctx, mp3Data)
+	result, err := h.RecognizeService.Recognize(ctx, audioData)
 	if err != nil || result == nil || strings.TrimSpace(result.TrackID) == "" || strings.TrimSpace(result.Platform) == "" {
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognize_failed_short"), nil, "")
 		return
