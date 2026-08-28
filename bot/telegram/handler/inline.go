@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -355,7 +356,21 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 	searchCtx := withSearchFilterContext(ctx, h.PlatformManager, platformName, biliFilter)
 
 	searchWithFallback := func(keyword string) ([]platform.Track, string, error) {
+		cacheKey := inlineSearchCacheKey(platformName, fallbackPlatform, keyword, biliFilter)
+		if cached, ok := inlineSearchCache.Load(cacheKey); ok {
+			// A hit means no upstream call, so it must not spend the user's
+			// search quota either. Paging is the common case here: every page
+			// re-ran the whole search and charged for it, which walked the user
+			// into ErrRateLimited on their own results.
+			return slices.Clone(cached.tracks), cached.platformName, nil
+		}
 		tracks, matchedPlatform, _, searchErr := searchTracksWithFallbackLimited(searchCtx, h.PlatformManager, h.ResourceLimiter, query.From.ID, platformName, fallbackPlatform, keyword, h.inlineSearchLimit, true)
+		if searchErr == nil && len(tracks) > 0 {
+			inlineSearchCache.Store(cacheKey, inlineSearchResult{
+				tracks:       slices.Clone(tracks),
+				platformName: matchedPlatform,
+			})
+		}
 		return tracks, matchedPlatform, searchErr
 	}
 
@@ -1229,4 +1244,31 @@ func qualityFallbacks(primary string) []string {
 		result = append(result, q)
 	}
 	return result
+}
+
+// inlineSearchResult is one memoised inline search: the tracks plus whichever
+// platform actually answered, since a fallback can change it.
+type inlineSearchResult struct {
+	tracks       []platform.Track
+	platformName string
+}
+
+// inlineSearchCache memoises inline search results.
+//
+// Every keystroke is a distinct keyword and will always miss, which is fine --
+// what this exists for is the repeats: paging (each page re-ran the full search
+// and returned the same batch), backspacing to a prefix already searched,
+// reopening the panel with the same term, the second search inside one request,
+// and several users searching the same popular keyword. The TTL is short
+// because search results are the sort of thing a user expects to be live.
+var inlineSearchCache = newTTLStoreWithCap[inlineSearchResult](90*time.Second, 512)
+
+func inlineSearchCacheKey(platformName, fallbackPlatform, keyword string, biliFilter bool) string {
+	filter := "0"
+	if biliFilter {
+		filter = "1"
+	}
+	return strings.TrimSpace(platformName) + "\x00" +
+		strings.TrimSpace(fallbackPlatform) + "\x00" +
+		strings.TrimSpace(keyword) + "\x00" + filter
 }
