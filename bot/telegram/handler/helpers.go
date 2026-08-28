@@ -23,6 +23,7 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 	"github.com/liuran001/MusicBot-Go/bot/util"
 	"github.com/mymmrac/telego"
+	"golang.org/x/sync/singleflight"
 )
 
 func extractPlatformTrack(ctx context.Context, message *telego.Message, manager platform.Manager) (platformName, trackID string, found bool) {
@@ -426,6 +427,40 @@ func applyBrowserHeaders(req *http.Request) {
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 }
 
+const (
+	// shortURLCacheTTL bounds how long a resolved short link is reused. Short
+	// link redirects are effectively immutable, so this is generous.
+	shortURLCacheTTL = 30 * time.Minute
+	// shortURLFailureTTL is deliberately short: a failure should not be pinned
+	// for half an hour, but retrying it on every router predicate turns one
+	// unreachable host into a pile-up of 8s timeouts.
+	shortURLFailureTTL  = 30 * time.Second
+	shortURLCacheMaxLen = 4096
+)
+
+var (
+	// A single message is evaluated by several router predicates in sequence,
+	// each of which re-resolves the same short link. Memoising here collapses
+	// those 3-7 identical round trips into one.
+	shortURLCache        = newTTLStoreWithCap[string](shortURLCacheTTL, shortURLCacheMaxLen)
+	shortURLFailureCache = newTTLStoreWithCap[struct{}](shortURLFailureTTL, shortURLCacheMaxLen)
+	shortURLGroup        singleflight.Group
+
+	// Both clients rely on http.DefaultTransport, so they already share one
+	// connection pool; hoisting them out of the request path just avoids
+	// re-allocating the struct and the CheckRedirect closure per call.
+	shortURLNoRedirectClient = &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	shortURLFollowRedirectClient = &http.Client{Timeout: 8 * time.Second}
+)
+
+// resolveShortURL resolves a short link to its target, memoising both outcomes.
+// The cache lives here rather than around shortURLResolver so that tests which
+// swap that variable keep exercising their stub on every call.
 func resolveShortURL(ctx context.Context, manager platform.Manager, urlStr string) (string, error) {
 	parsed, err := url.Parse(urlStr)
 	if err != nil {
@@ -434,12 +469,31 @@ func resolveShortURL(ctx context.Context, manager platform.Manager, urlStr strin
 	if !shouldResolveHost(parsed.Hostname(), manager) {
 		return urlStr, nil
 	}
-	client := &http.Client{
-		Timeout: 8 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	if cached, ok := shortURLCache.Load(urlStr); ok {
+		return cached, nil
 	}
+	if _, failed := shortURLFailureCache.Load(urlStr); failed {
+		return urlStr, nil
+	}
+
+	resolved, err, _ := shortURLGroup.Do(urlStr, func() (any, error) {
+		return resolveShortURLUncached(ctx, parsed, urlStr)
+	})
+	if err != nil {
+		shortURLFailureCache.Store(urlStr, struct{}{})
+		return urlStr, err
+	}
+	target, _ := resolved.(string)
+	if target == "" {
+		shortURLFailureCache.Store(urlStr, struct{}{})
+		return urlStr, nil
+	}
+	shortURLCache.Store(urlStr, target)
+	return target, nil
+}
+
+func resolveShortURLUncached(ctx context.Context, parsed *url.URL, urlStr string) (string, error) {
+	client := shortURLNoRedirectClient
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return urlStr, err
@@ -462,7 +516,7 @@ func resolveShortURL(ctx context.Context, manager platform.Manager, urlStr strin
 			return resp.Request.URL.String(), nil
 		}
 	}
-	client = &http.Client{Timeout: 8 * time.Second}
+	client = shortURLFollowRedirectClient
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return urlStr, err
