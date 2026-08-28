@@ -29,7 +29,9 @@ type CacheJanitorStats struct {
 //   - directories named with the 16-digit Unix-microsecond media timestamp;
 //   - multipart directories beginning with that timestamp and ending in .parts;
 //   - regular files beginning with that timestamp and a hyphen;
-//   - recognize-<19-digit Unix-nanosecond>.ogg and its .mp3 conversion.
+//   - .musicbot-download-<digits> staging files left behind by a crash;
+//   - recognize-<19-digit Unix-nanosecond>.ogg and its .mp3 conversion, which
+//     older releases produced before recognition stopped transcoding.
 //
 // Symlinks and special files are always preserved. This keeps the cleanup from
 // following a cache entry to a path outside cacheDir. Unrecognized entries,
@@ -132,7 +134,27 @@ func isCacheJanitorEntry(name string, info os.FileInfo) bool {
 	if !info.Mode().IsRegular() {
 		return false
 	}
-	return hasMusicTimestampPrefix(name) || isRecognizeTempFile(name)
+	return hasMusicTimestampPrefix(name) || isRecognizeTempFile(name) || isDownloadStagingFile(name)
+}
+
+// isDownloadStagingFile matches the partial files the download service stages
+// alongside their destination. They are removed on the normal path; this only
+// reaps the ones a crash left behind.
+func isDownloadStagingFile(name string) bool {
+	const prefix = ".musicbot-download-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(name, prefix)
+	if remainder == "" {
+		return false
+	}
+	for i := 0; i < len(remainder); i++ {
+		if remainder[i] < '0' || remainder[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func hasMusicTimestampPrefix(name string) bool {

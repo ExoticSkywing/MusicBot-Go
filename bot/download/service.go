@@ -370,7 +370,13 @@ func (s *DownloadService) Download(ctx context.Context, info *platform.DownloadI
 	defer s.releaseInflight(key, call)
 
 	if leader {
-		tmpFile, err := os.CreateTemp("", "musicbot-download-*")
+		// Stage the download next to its destination rather than in os.TempDir.
+		// The two are routinely on different filesystems (the shipped
+		// docker-compose bind-mounts the work dir while /tmp stays on the
+		// container overlay), which makes the os.Link fast path in copyToPath
+		// fail with EXDEV and forces a full copy of every downloaded track.
+		// The dot prefix keeps the staged file out of cache directory scans.
+		tmpFile, err := os.CreateTemp(filepath.Dir(destPath), ".musicbot-download-*")
 		if err != nil {
 			call.err = err
 			s.inflightMu.Lock()
