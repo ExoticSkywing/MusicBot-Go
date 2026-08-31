@@ -1,0 +1,28 @@
+# Local production additions for this host.
+# Keep these outside docker-compose.yml so upstream Compose changes stay easy
+# to merge. Compose loads this file automatically for `docker-compose up`.
+
+services:
+  musicbot-go:
+    networks:
+      - default
+      - telegram_bot_api_net
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
+
+  wrapper:
+    environment:
+      # Read credentials from the host .env file only when the wrapper needs
+      # its first login; the values are not stored in this repository.
+      USERNAME: ${APPLE_MUSIC_USERNAME:-}
+      PASSWORD: ${APPLE_MUSIC_PASSWORD:-}
+
+networks:
+  telegram_bot_api_net:
+    external: true
+    name: telegram_bot_api_net
+
+volumes:
+  telegram-bot-api-data:
+    external: true
+    name: telegram-bot-api-data
