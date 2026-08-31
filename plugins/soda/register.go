@@ -38,5 +38,16 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 	if err := client.SetAPIProxy(cfg.ResolveAPIProxyConfig("soda")); err != nil {
 		return nil, err
 	}
+	signerTimeoutSec := cfg.GetPluginInt("soda", "bdms_signer_timeout")
+	if signerTimeoutSec <= 0 {
+		signerTimeoutSec = 5
+	}
+	if err := client.SetBDMSSigner(
+		cfg.GetPluginString("soda", "bdms_signer_url"),
+		cfg.GetPluginString("soda", "bdms_signer_token"),
+		time.Duration(signerTimeoutSec)*time.Second,
+	); err != nil {
+		return nil, err
+	}
 	return &platformplugins.Contribution{Platform: NewPlatform(client)}, nil
 }
