@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	sodaUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-	sodaPCChannel = "pc_web"
-	sodaAid       = "386088"
+	sodaUserAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	sodaPCUserAgent = "LunaPC/3.7.0"
+	sodaPCChannel   = "pc_web"
+	sodaAid         = "386088"
 )
 
 var (
@@ -46,6 +47,7 @@ var (
 
 type Client struct {
 	httpClient  *http.Client
+	signer      sodaRequestSigner
 	cookie      string
 	logger      bot.Logger
 	persistFunc func(map[string]string) error
@@ -893,13 +895,44 @@ func (c *Client) doRequest(ctx context.Context, rawURL string, accept string) ([
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", sodaUserAgent)
+	signedPCRequest := c.signer != nil && isSodaPCAPIURL(req.URL)
+	if signedPCRequest {
+		req.Header.Set("User-Agent", sodaPCUserAgent)
+		req.Header.Set("X-Luna-Background-Type", "blur")
+		req.Header.Set("X-Luna-Is-Background-Req", "1")
+		if strings.TrimSpace(c.cookie) == "" {
+			req.Header.Set("X-Luna-Is-Local-User", "0")
+		} else {
+			req.Header.Set("X-Luna-Is-Local-User", "1")
+		}
+	} else {
+		req.Header.Set("User-Agent", sodaUserAgent)
+	}
 	if strings.TrimSpace(accept) == "" {
 		accept = "*/*"
 	}
 	req.Header.Set("Accept", accept)
 	if strings.TrimSpace(c.cookie) != "" {
 		req.Header.Set("Cookie", c.cookie)
+	}
+	if signedPCRequest {
+		signerHeaders := req.Header.Clone()
+		signerHeaders.Del("Cookie")
+		signerHeaders.Del("Authorization")
+		signedURL, signedHeaders, signErr := c.signer.Sign(ctx, req.URL.String(), signerHeaders)
+		if signErr != nil {
+			return nil, fmt.Errorf("soda: sign PC API request: %w", signErr)
+		}
+		parsedSignedURL, parseErr := url.Parse(signedURL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("soda: parse signed PC API URL: %w", parseErr)
+		}
+		req.URL = parsedSignedURL
+		for name, values := range signedHeaders {
+			for _, value := range values {
+				req.Header.Add(name, value)
+			}
+		}
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -910,7 +943,21 @@ func (c *Client) doRequest(ctx context.Context, rawURL string, accept string) ([
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("soda: request failed status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if signedPCRequest && len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("soda: signed PC API returned an empty response")
+	}
+	return body, nil
+}
+
+func isSodaPCAPIURL(target *url.URL) bool {
+	if target == nil {
+		return false
+	}
+	return strings.EqualFold(target.Scheme, "https") && strings.EqualFold(target.Hostname(), "api.qishui.com") && strings.HasPrefix(target.Path, "/luna/pc/")
 }
 
 func extractSodaRouterData(page []byte) (*sodaSharePageData, error) {

@@ -16,7 +16,15 @@ import (
 
 type sodaSelfProfileResponse struct {
 	StatusCode int `json:"status_code"`
-	User       struct {
+	MyInfo     struct {
+		ID         string `json:"id"`
+		Nickname   string `json:"nickname"`
+		DouyinID   string `json:"douyin_id"`
+		PublicName string `json:"public_name"`
+		IsVIP      bool   `json:"is_vip"`
+		VIPStage   string `json:"vip_stage"`
+	} `json:"my_info"`
+	User struct {
 		UID      string `json:"uid"`
 		Nickname string `json:"nickname"`
 		UniqueID string `json:"unique_id"`
@@ -67,8 +75,8 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 	probe, err := s.client.FetchSelfProfile(probeCtx)
 	if err == nil && probe != nil {
 		status.LoggedIn = true
-		status.UserID = strings.TrimSpace(firstNonEmptyString(probe.User.UID, probe.Data.UID))
-		status.Nickname = strings.TrimSpace(firstNonEmptyString(probe.User.Nickname, probe.Data.Nickname))
+		status.UserID = strings.TrimSpace(firstNonEmptyString(probe.MyInfo.ID, probe.User.UID, probe.Data.UID))
+		status.Nickname = strings.TrimSpace(firstNonEmptyString(probe.MyInfo.Nickname, probe.User.Nickname, probe.Data.Nickname))
 		lines := []string{"- 状态: 已登录"}
 		if status.Nickname != "" {
 			lines = append(lines, "- 昵称: "+status.Nickname)
@@ -76,8 +84,15 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 		if status.UserID != "" {
 			lines = append(lines, "- UID: "+maskSodaValue(status.UserID))
 		}
-		if unique := strings.TrimSpace(firstNonEmptyString(probe.User.UniqueID, probe.Data.UniqueID)); unique != "" {
+		if unique := strings.TrimSpace(firstNonEmptyString(probe.MyInfo.DouyinID, probe.MyInfo.PublicName, probe.User.UniqueID, probe.Data.UniqueID)); unique != "" {
 			lines = append(lines, "- UniqueID: "+maskSodaValue(unique))
+		}
+		if strings.TrimSpace(probe.MyInfo.ID) != "" {
+			vip := "否"
+			if probe.MyInfo.IsVIP {
+				vip = "是"
+			}
+			lines = append(lines, "- 汽水会员: "+vip)
 		}
 		if len(keys) > 0 {
 			lines = append(lines, "- Cookie 字段: "+strings.Join(keys, ", "))
@@ -193,7 +208,14 @@ func (c *Client) FetchSelfProfile(ctx context.Context) (*sodaSelfProfileResponse
 	if c == nil {
 		return nil, fmt.Errorf("soda client unavailable")
 	}
-	body, err := c.getJSONWithHeaders(ctx, "https://www.douyin.com/aweme/v1/web/user/profile/self/", map[string]string{
+	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/me")
+	if err == nil {
+		var resp sodaSelfProfileResponse
+		if json.Unmarshal(body, &resp) == nil && resp.StatusCode == 0 && strings.TrimSpace(resp.MyInfo.ID) != "" {
+			return &resp, nil
+		}
+	}
+	body, err = c.getJSONWithHeaders(ctx, "https://www.douyin.com/aweme/v1/web/user/profile/self/", map[string]string{
 		"Referer": "https://music.douyin.com/",
 	})
 	if err == nil {

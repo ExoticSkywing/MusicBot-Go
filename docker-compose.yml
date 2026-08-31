@@ -17,7 +17,36 @@ services:
     #   wrapper_host = wrapper
     #（仅无损 / Hi-Res / Atmos 需要；AAC 256k 无需 wrapper 即可工作）
     depends_on:
-      - wrapper
+      wrapper:
+        condition: service_started
+      soda-bdms-signer:
+        condition: service_healthy
+
+  # --- 汽水音乐 PC API BDMS 签名服务 ---
+  # 只接收 Compose 内网请求，不承载 Cookie、不下载音频，也不映射宿主机端口。
+  # 首次构建会从校验和锁定的官方安装包中提取签名模块，并初始化 Wine prefix。
+  soda-bdms-signer:
+    build:
+      context: ./services/soda-bdms-signer
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: musicbot-soda-bdms-signer
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 默认依靠 Compose 内网隔离。若设置 Token，还需在 [plugins.soda]
+      # 中配置相同的 bdms_signer_token。
+      SODA_BDMS_TOKEN: ${SODA_BDMS_TOKEN:-}
+    volumes:
+      - soda-bdms-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 15s
 
   # --- Apple Music FairPlay 解密 wrapper（可选）---
   # 用于解密无损 / Hi-Res / Dolby Atmos。AAC 256k 不需要它——bot 内置原生解密。
@@ -50,3 +79,6 @@ services:
     #   - "10020:10020"
     #   - "20020:20020"
     #   - "30020:30020"
+
+volumes:
+  soda-bdms-data:
