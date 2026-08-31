@@ -375,14 +375,14 @@ func (h *ChosenInlineMusicHandler) renderInlineCollectionPage(ctx context.Contex
 		}
 	}
 	var bld strings.Builder
-	bld.WriteString(fmt.Sprintf("%s *%s* %s\n", platformEmoji(h.Music.PlatformManager, state.platformName), mdV2Replacer.Replace(platformDisplayName(ctx, h.Music.PlatformManager, state.platformName)), state.collectionLabel))
-	appendNumberedResultIntro(&bld, ctx, "cb", "music")
+	bld.WriteString(fmt.Sprintf("%s *%s* %s\n\n", platformEmoji(h.Music.PlatformManager, state.platformName), mdV2Replacer.Replace(platformDisplayName(ctx, h.Music.PlatformManager, state.platformName)), state.collectionLabel))
 	bld.WriteString(renderInlineCollectionInfo(ctx, state))
 	if pageCount > 1 {
 		bld.WriteString(tr(ctx, "cb_page_of", map[string]any{"Page": page, "Total": pageCount}) + "\n\n")
 	} else {
 		bld.WriteString("\n")
 	}
+	appendNumberedResultIntro(&bld, ctx, "cb", "music")
 	appendNumberedResultSourceHint(&bld, ctx, "cb")
 	rows := make([][]telego.InlineKeyboardButton, 0, 6)
 	numberButtons := make([]telego.InlineKeyboardButton, 0, end-start)

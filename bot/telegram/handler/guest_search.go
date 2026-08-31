@@ -191,10 +191,8 @@ func (h *GuestModeHandler) renderGuestSearchPage(ctx context.Context, state *sea
 		}
 		bld.WriteString(fmt.Sprintf("%s *%s* %s\n\n", platformEmojiText, mdV2Replacer.Replace(displayName), collectionLabel))
 		bld.WriteString(formatPlaylistInfo(ctx, state.playlist, collectionLabel))
-		appendNumberedResultIntro(&bld, ctx, "guest", state.resultAction())
 	} else {
-		bld.WriteString(fmt.Sprintf("%s *%s* %s\n", platformEmojiText, mdV2Replacer.Replace(displayName), trMd(ctx, "guest_search_results")))
-		appendNumberedResultIntro(&bld, ctx, "guest", state.resultAction())
+		bld.WriteString(fmt.Sprintf("%s *%s* %s\n\n", platformEmojiText, mdV2Replacer.Replace(displayName), trMd(ctx, "guest_search_results")))
 		if strings.TrimSpace(state.keyword) != "" {
 			bld.WriteString(fmt.Sprintf("%s%s\n", trMd(ctx, "guest_keyword_label"), mdV2Replacer.Replace(state.keyword)))
 		}
@@ -204,6 +202,7 @@ func (h *GuestModeHandler) renderGuestSearchPage(ctx context.Context, state *sea
 	} else if !isPlaylist {
 		bld.WriteString("\n")
 	}
+	appendNumberedResultIntro(&bld, ctx, "guest", state.resultAction())
 	appendNumberedResultSourceHint(&bld, ctx, "guest")
 
 	rows := make([][]telego.InlineKeyboardButton, 0, 8)
