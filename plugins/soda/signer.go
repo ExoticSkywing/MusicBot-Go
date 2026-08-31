@@ -4,15 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-const defaultSodaSignerTimeout = 5 * time.Second
+const (
+	defaultSodaSignerTimeout    = 10 * time.Second
+	defaultSodaSignerAttempts   = 2
+	defaultSodaSignerRetryDelay = 100 * time.Millisecond
+)
 
 type sodaRequestSigner interface {
 	Sign(ctx context.Context, rawURL string, headers http.Header) (string, http.Header, error)
@@ -22,6 +28,17 @@ type sodaBDMSSigner struct {
 	endpoint   string
 	token      string
 	httpClient *http.Client
+	attempts   int
+	retryDelay time.Duration
+}
+
+type sodaSignerHTTPError struct {
+	statusCode int
+	message    string
+}
+
+func (e *sodaSignerHTTPError) Error() string {
+	return fmt.Sprintf("signer returned HTTP %d: %s", e.statusCode, e.message)
 }
 
 type sodaSignerRequest struct {
@@ -58,6 +75,8 @@ func newSodaBDMSSigner(endpoint, token string, timeout time.Duration) (*sodaBDMS
 		endpoint:   parsed.String(),
 		token:      strings.TrimSpace(token),
 		httpClient: &http.Client{Timeout: timeout},
+		attempts:   defaultSodaSignerAttempts,
+		retryDelay: defaultSodaSignerRetryDelay,
 	}, nil
 }
 
@@ -95,6 +114,28 @@ func (s *sodaBDMSSigner) Sign(ctx context.Context, rawURL string, headers http.H
 	if err != nil {
 		return "", nil, fmt.Errorf("encode request: %w", err)
 	}
+	attempts := s.attempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		signedURL, signedHeaders, signErr := s.signOnce(ctx, rawURL, payload)
+		if signErr == nil {
+			return signedURL, signedHeaders, nil
+		}
+		lastErr = signErr
+		if attempt >= attempts || !shouldRetrySodaSigner(ctx, signErr) {
+			break
+		}
+		if err := waitForSodaSignerRetry(ctx, s.retryDelay); err != nil {
+			return "", nil, err
+		}
+	}
+	return "", nil, lastErr
+}
+
+func (s *sodaBDMSSigner) signOnce(ctx context.Context, rawURL string, payload []byte) (string, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return "", nil, fmt.Errorf("create request: %w", err)
@@ -113,15 +154,18 @@ func (s *sodaBDMSSigner) Sign(ctx context.Context, rawURL string, headers http.H
 		return "", nil, fmt.Errorf("read signer response: %w", err)
 	}
 	var result sodaSignerResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", nil, fmt.Errorf("decode signer response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
+		// Preserve retryable 5xx status errors even if an upstream proxy or a
+		// partially failing signer returns a non-JSON error page.
+		_ = json.Unmarshal(body, &result)
 		message := strings.TrimSpace(result.Error)
 		if message == "" {
 			message = http.StatusText(resp.StatusCode)
 		}
-		return "", nil, fmt.Errorf("signer returned HTTP %d: %s", resp.StatusCode, message)
+		return "", nil, &sodaSignerHTTPError{statusCode: resp.StatusCode, message: message}
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", nil, fmt.Errorf("decode signer response: %w", err)
 	}
 	if err := validateSignedSodaURL(rawURL, result.URL); err != nil {
 		return "", nil, err
@@ -139,6 +183,35 @@ func (s *sodaBDMSSigner) Sign(ctx context.Context, rawURL string, headers http.H
 		return "", nil, fmt.Errorf("signer response is missing X-Helios or X-Medusa")
 	}
 	return result.URL, signedHeaders, nil
+}
+
+func shouldRetrySodaSigner(ctx context.Context, err error) bool {
+	if err == nil || ctx == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var statusErr *sodaSignerHTTPError
+	if errors.As(err, &statusErr) {
+		return statusErr.statusCode >= http.StatusInternalServerError
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return networkErr.Timeout() || networkErr.Temporary()
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func waitForSodaSignerRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func validateSignedSodaURL(originalURL, signedURL string) error {

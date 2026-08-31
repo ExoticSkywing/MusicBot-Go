@@ -15,5 +15,10 @@ targets under `qishui.com`, and an optional bearer token can be enabled with
 `SODA_BDMS_TOKEN`. A stable device ID and the Wine prefix are kept in the
 `soda-bdms-data` volume.
 
+The MusicBot client uses a 10-second per-attempt timeout and retries one time
+only for temporary transport errors and signer HTTP 5xx responses. The signer
+records native calls taking at least 1000 ms in `/data/signer.log`; set
+`SODA_BDMS_SLOW_LOG_MS=0` to disable this diagnostic or use another threshold.
+
 This image currently supports Linux/amd64 only because the vendor addon is a
 Windows x64 binary.

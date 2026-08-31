@@ -19,6 +19,7 @@ const timeZone = process.env.SODA_TIMEZONE || 'Asia/Shanghai'
 const pcUserAgent = `LunaPC/${appVersion}`
 const maxBodyBytes = 64 * 1024
 const logFile = 'Z:\\data\\signer.log'
+const slowLogThresholdMs = parseNonNegativeInt(process.env.SODA_BDMS_SLOW_LOG_MS, 1000, 'SODA_BDMS_SLOW_LOG_MS')
 
 bdms.init({ deviceId })
 
@@ -26,6 +27,15 @@ function parsePort(value) {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
     throw new Error('SODA_BDMS_PORT must be a valid TCP port')
+  }
+  return parsed
+}
+
+function parseNonNegativeInt(value, fallback, name) {
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`)
   }
   return parsed
 }
@@ -220,7 +230,17 @@ const server = http.createServer(async (request, response) => {
     const target = normalizeTarget(payload.url)
     const commonParamsAdded = payload.add_common_params === false ? false : applyCommonParams(target)
     const headers = normalizeHeaders(payload.headers)
-    const signedHeaders = generateSignature(target, headers)
+    const signatureStartedAt = Date.now()
+    let signedHeaders
+    try {
+      signedHeaders = generateSignature(target, headers)
+    } finally {
+      const elapsedMs = Date.now() - signatureStartedAt
+      if (slowLogThresholdMs > 0 && elapsedMs >= slowLogThresholdMs) {
+        // Never log the query string because it may contain request-specific data.
+        writeLog('WARN', `slow signature duration_ms=${elapsedMs} target=${target.hostname}${target.pathname}`)
+      }
+    }
 
     sendJSON(response, 200, {
       url: target.toString(),
