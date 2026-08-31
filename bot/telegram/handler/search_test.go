@@ -391,15 +391,15 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 	if !strings.Contains(pageText, "[Song One](https://example.com/song-one)") {
 		t.Errorf("buildSearchPage: pageText dropped the platform URL")
 	}
-	if !strings.Contains(pageText, "🔗 歌曲名称可点击查看平台官方页面") {
+	if !strings.Contains(pageText, "🌐 歌曲名称可点击查看平台官方页面") {
 		t.Errorf("buildSearchPage: pageText missing source-link hint")
 	}
-	if !strings.Contains(pageText, "⬇️ 请点击下方编号按钮获取歌曲 ⬇️\n\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
+	if !strings.Contains(pageText, "下载入口：下方编号与上方歌曲一一对应\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
 		t.Errorf("buildSearchPage: pageText missing download footer")
 	}
 	keywordPos := strings.Index(pageText, "关键词: test")
 	actionPos := strings.Index(pageText, "操作提示：")
-	sourcePos := strings.Index(pageText, "🔗 歌曲名称可点击查看平台官方页面")
+	sourcePos := strings.Index(pageText, "🌐 歌曲名称可点击查看平台官方页面")
 	if keywordPos < 0 || actionPos < 0 || sourcePos < 0 || keywordPos > actionPos || actionPos > sourcePos {
 		t.Errorf("buildSearchPage: expected keyword, action and source order, got %q", pageText)
 	}
@@ -434,10 +434,10 @@ func TestSearchHandler_buildSearchPage_LyricPromptsUseLyricCopy(t *testing.T) {
 	tracks := []platform.Track{{ID: "1", Title: "Song", Artists: []platform.Artist{{Name: "Artist"}}}}
 
 	pageText, _ := handler.buildSearchPage(zhCtx(), tracks, "netease", "test", "hires", 12345, 100, 1, nil, false, 48, true, "", "lyric")
-	if !strings.Contains(pageText, "🔗 歌曲名称可点击查看平台官方页面") {
+	if !strings.Contains(pageText, "🌐 歌曲名称可点击查看平台官方页面") {
 		t.Errorf("lyric page missing source-link hint")
 	}
-	if !strings.Contains(pageText, "🎼 请点击下方编号按钮获取歌词 🎼\n\n🎼 点击下方按钮获取歌词 🎼") {
+	if !strings.Contains(pageText, "歌词入口：下方编号与上方歌曲一一对应\n🎼 点击下方按钮获取歌词") {
 		t.Errorf("lyric page missing lyric footer")
 	}
 	if strings.Contains(pageText, "下载入口：") || strings.Contains(pageText, "下载歌曲") {

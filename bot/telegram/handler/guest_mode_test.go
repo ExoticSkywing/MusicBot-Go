@@ -192,10 +192,10 @@ func TestRenderGuestSearchPage_SelectButtonsUseInlineFlow(t *testing.T) {
 	if !strings.Contains(text, "关键词: 晴天\n\n操作提示：\n⬇️ 请点击下方编号按钮获取歌曲\n\n") {
 		t.Errorf("guest result text has unexpected action ordering/spacing: %q", text)
 	}
-	if !strings.Contains(text, "🔗 歌曲名称可点击查看平台官方页面\n1\\.") {
+	if !strings.Contains(text, "🌐 歌曲名称可点击查看平台官方页面\n1\\.") {
 		t.Errorf("guest result text has source hint detached from song links: %q", text)
 	}
-	if !strings.Contains(text, "⬇️ 请点击下方编号按钮获取歌曲 ⬇️\n\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
+	if !strings.Contains(text, "下载入口：下方编号与上方歌曲一一对应\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
 		t.Errorf("guest result text missing download footer: %q", text)
 	}
 	if keyboard == nil || len(keyboard.InlineKeyboard) == 0 {

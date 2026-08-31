@@ -55,7 +55,7 @@ func appendNumberedResultFooter(builder *strings.Builder, ctx context.Context, p
 	}
 	builder.WriteString("\n")
 	builder.WriteString(trMd(ctx, footerKey))
-	builder.WriteString("\n\n")
+	builder.WriteString("\n")
 	builder.WriteString(trMd(ctx, buttonHintKey))
 	builder.WriteString("\n")
 }
