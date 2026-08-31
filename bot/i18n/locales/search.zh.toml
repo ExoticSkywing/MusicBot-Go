@@ -6,10 +6,10 @@ srch_results = "搜索结果"
 # Numbered result actions are split between the header, source-link note and
 # footer so the compact button row stays easy to scan.
 srch_action_label = "操作提示："
-srch_download_hint = "⬇️ 请点击下方编号按钮获取歌曲"
+srch_download_hint = "⬇️ 请点击下方【数字编号】按钮获取歌曲"
 srch_lyric_hint = "🎼 请点击下方编号按钮获取歌词"
 srch_source_hint = "🌐 歌曲名称可点击查看平台官方页面"
-srch_download_footer = "下载入口：下方编号与上方歌曲一一对应"
+srch_download_footer = "下载入口：下方【数字编号】与上方歌曲一一对应"
 srch_download_button_hint = "⬇️ 点击下方按钮下载歌曲 ⬇️"
 srch_lyric_footer = "歌词入口：下方编号与上方歌曲一一对应"
 srch_lyric_button_hint = "🎼 点击下方按钮获取歌词 🎼"

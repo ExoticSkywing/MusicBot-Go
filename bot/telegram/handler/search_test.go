@@ -394,7 +394,7 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 	if !strings.Contains(pageText, "🌐 歌曲名称可点击查看平台官方页面") {
 		t.Errorf("buildSearchPage: pageText missing source-link hint")
 	}
-	if !strings.Contains(pageText, "下载入口：下方编号与上方歌曲一一对应\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
+	if !strings.Contains(pageText, "下载入口：下方【数字编号】与上方歌曲一一对应\n⬇️ 点击下方按钮下载歌曲 ⬇️") {
 		t.Errorf("buildSearchPage: pageText missing download footer")
 	}
 	keywordPos := strings.Index(pageText, "关键词: test")
