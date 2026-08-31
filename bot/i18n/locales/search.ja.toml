@@ -4,7 +4,7 @@
 srch_results = "検索結果"
 # Numbered result actions are split between the header, source-link note and
 # footer so the compact button row stays easy to scan.
-srch_action_label = "操作案内："
+srch_action_label = "📌 操作案内："
 srch_download_hint = "⬇️ 下の番号ボタンをタップして曲を取得してください"
 srch_lyric_hint = "🎼 下の番号ボタンをタップして歌詞を取得してください"
 srch_source_hint = "🌐 曲名をタップすると公式プラットフォームページを開けます"

@@ -4,7 +4,7 @@
 guest_search_results = "search results"
 # Numbered result actions are split between the header, source-link note and
 # footer so the compact button row stays easy to scan.
-guest_action_label = "Action tips:"
+guest_action_label = "📌 Action tips:"
 guest_download_hint = "⬇️ Tap a number below to get the track"
 guest_lyric_hint = "🎼 Tap a number below to get the lyrics"
 guest_source_hint = "🌐 Tap a song title to open its official platform page"

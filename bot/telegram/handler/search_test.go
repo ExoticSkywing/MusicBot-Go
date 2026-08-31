@@ -398,7 +398,7 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 		t.Errorf("buildSearchPage: pageText missing download footer")
 	}
 	keywordPos := strings.Index(pageText, "关键词: test")
-	actionPos := strings.Index(pageText, "操作提示：")
+	actionPos := strings.Index(pageText, "📌 操作提示：")
 	sourcePos := strings.Index(pageText, "🌐 歌曲名称可点击查看平台官方页面")
 	if keywordPos < 0 || actionPos < 0 || sourcePos < 0 || keywordPos > actionPos || actionPos > sourcePos {
 		t.Errorf("buildSearchPage: expected keyword, action and source order, got %q", pageText)

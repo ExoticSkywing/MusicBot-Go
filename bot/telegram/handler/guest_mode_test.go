@@ -189,7 +189,7 @@ func TestRenderGuestSearchPage_SelectButtonsUseInlineFlow(t *testing.T) {
 	if text == "" {
 		t.Fatal("empty page text")
 	}
-	if !strings.Contains(text, "关键词: 晴天\n\n操作提示：\n⬇️ 请点击下方【数字编号】按钮获取歌曲\n\n") {
+	if !strings.Contains(text, "关键词: 晴天\n\n📌 操作提示：\n⬇️ 请点击下方【数字编号】按钮获取歌曲\n\n") {
 		t.Errorf("guest result text has unexpected action ordering/spacing: %q", text)
 	}
 	if !strings.Contains(text, "🌐 歌曲名称可点击查看平台官方页面\n1\\.") {

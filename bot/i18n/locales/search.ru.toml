@@ -4,7 +4,7 @@
 srch_results = "результаты поиска"
 # Numbered result actions are split between the header, source-link note and
 # footer so the compact button row stays easy to scan.
-srch_action_label = "Подсказка:"
+srch_action_label = "📌 Подсказка:"
 srch_download_hint = "⬇️ Нажмите номер ниже, чтобы получить трек"
 srch_lyric_hint = "🎼 Нажмите номер ниже, чтобы получить текст песни"
 srch_source_hint = "🌐 Нажмите название трека, чтобы открыть официальную страницу платформы"
