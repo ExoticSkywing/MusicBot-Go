@@ -3,6 +3,8 @@ package soda
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +12,27 @@ import (
 	"testing"
 	"time"
 )
+
+type sodaRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f sodaRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type sodaTimeoutError struct{}
+
+func (sodaTimeoutError) Error() string   { return "temporary signer timeout" }
+func (sodaTimeoutError) Timeout() bool   { return true }
+func (sodaTimeoutError) Temporary() bool { return true }
+
+func successfulSodaSignerResponse() *http.Response {
+	body := `{"url":"https://api.qishui.com/luna/pc/me?device_id=1234567890123456789","headers":{"X-Helios":"helios-value","X-Medusa":"medusa-value"}}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
 
 func TestSodaBDMSSignerSignsWithoutForwardingSecrets(t *testing.T) {
 	var captured sodaSignerRequest
@@ -87,6 +110,106 @@ func TestSodaBDMSSignerRejectsMismatchedTarget(t *testing.T) {
 	_, _, err = signer.Sign(context.Background(), "https://api.qishui.com/luna/pc/me", nil)
 	if err == nil || !strings.Contains(err.Error(), "mismatched target") {
 		t.Fatalf("Sign() error = %v, want mismatched target", err)
+	}
+}
+
+func TestSodaBDMSSignerRetriesTemporaryTransportError(t *testing.T) {
+	signer, err := newSodaBDMSSigner("http://signer.internal", "", time.Second)
+	if err != nil {
+		t.Fatalf("newSodaBDMSSigner() error = %v", err)
+	}
+	calls := 0
+	signer.retryDelay = 0
+	signer.httpClient.Transport = sodaRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return nil, sodaTimeoutError{}
+		}
+		return successfulSodaSignerResponse(), nil
+	})
+
+	if _, _, err := signer.Sign(context.Background(), "https://api.qishui.com/luna/pc/me", nil); err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("signer requests = %d, want 2", calls)
+	}
+}
+
+func TestSodaBDMSSignerRetriesHTTP5xx(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sodaSignerResponse{
+			URL: "https://api.qishui.com/luna/pc/me?device_id=1234567890123456789",
+			Headers: map[string]string{
+				"X-Helios": "helios-value",
+				"X-Medusa": "medusa-value",
+			},
+		})
+	}))
+	defer server.Close()
+
+	signer, err := newSodaBDMSSigner(server.URL, "", time.Second)
+	if err != nil {
+		t.Fatalf("newSodaBDMSSigner() error = %v", err)
+	}
+	signer.retryDelay = 0
+	if _, _, err := signer.Sign(context.Background(), "https://api.qishui.com/luna/pc/me", nil); err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("signer requests = %d, want 2", calls)
+	}
+}
+
+func TestSodaBDMSSignerDoesNotRetryHTTP4xx(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(sodaSignerResponse{Error: "bad request"})
+	}))
+	defer server.Close()
+
+	signer, err := newSodaBDMSSigner(server.URL, "", time.Second)
+	if err != nil {
+		t.Fatalf("newSodaBDMSSigner() error = %v", err)
+	}
+	signer.retryDelay = 0
+	_, _, err = signer.Sign(context.Background(), "https://api.qishui.com/luna/pc/me", nil)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Fatalf("Sign() error = %v, want HTTP 400", err)
+	}
+	if calls != 1 {
+		t.Fatalf("signer requests = %d, want 1", calls)
+	}
+}
+
+func TestSodaBDMSSignerDoesNotRetryCanceledContext(t *testing.T) {
+	signer, err := newSodaBDMSSigner("http://signer.internal", "", time.Second)
+	if err != nil {
+		t.Fatalf("newSodaBDMSSigner() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	signer.retryDelay = 0
+	signer.httpClient.Transport = sodaRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		cancel()
+		return nil, context.Canceled
+	})
+
+	_, _, err = signer.Sign(ctx, "https://api.qishui.com/luna/pc/me", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sign() error = %v, want context canceled", err)
+	}
+	if calls != 1 {
+		t.Fatalf("signer requests = %d, want 1", calls)
 	}
 }
 

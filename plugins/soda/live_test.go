@@ -38,7 +38,7 @@ func TestLiveSodaPCFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetAPIProxy() error = %v", err)
 	}
-	if err := client.SetBDMSSigner(signerURL, strings.TrimSpace(os.Getenv("SODA_LIVE_SIGNER_TOKEN")), 5*time.Second); err != nil {
+	if err := client.SetBDMSSigner(signerURL, strings.TrimSpace(os.Getenv("SODA_LIVE_SIGNER_TOKEN")), 10*time.Second); err != nil {
 		t.Fatalf("SetBDMSSigner() error = %v", err)
 	}
 

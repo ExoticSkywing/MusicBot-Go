@@ -40,7 +40,7 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 	}
 	signerTimeoutSec := cfg.GetPluginInt("soda", "bdms_signer_timeout")
 	if signerTimeoutSec <= 0 {
-		signerTimeoutSec = 5
+		signerTimeoutSec = 10
 	}
 	if err := client.SetBDMSSigner(
 		cfg.GetPluginString("soda", "bdms_signer_url"),
