@@ -2,7 +2,16 @@
 
 # --- search result page (MarkdownV2) ---
 srch_results = "検索結果"
-srch_pick_number_hint = "下の番号をタップして曲を選択してください"
+# Numbered result actions are split between the header, source-link note and
+# footer so the compact button row stays easy to scan.
+srch_action_label = "操作案内："
+srch_download_hint = "⬇️ 下の番号ボタンをタップして曲を取得してください"
+srch_lyric_hint = "🎼 下の番号ボタンをタップして歌詞を取得してください"
+srch_source_hint = "🔗 曲名をタップすると公式プラットフォームページを開けます"
+srch_download_footer = "ダウンロード：下の番号は上の曲一覧に対応しています"
+srch_download_button_hint = "⬇️ 下のボタンをタップして曲をダウンロードしてください"
+srch_lyric_footer = "歌詞：下の番号は上の曲一覧に対応しています"
+srch_lyric_button_hint = "🎼 下のボタンをタップして歌詞を取得してください"
 srch_keyword_label = "キーワード: "
 srch_page_indicator = "{{.Page}}/{{.Total}} ページ"
 srch_fallback_switched = "⚠️ デフォルトプラットフォームでの検索に失敗したため、{{.Name}} に切り替えました\n\n"

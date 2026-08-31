@@ -351,7 +351,8 @@ func (h *SearchHandler) runSearch(ctx context.Context, b *telego.Bot, message *t
 		textMessage.WriteString(tr(ctx, "srch_fallback_switched", map[string]any{"Name": displayName}))
 	}
 
-	textMessage.WriteString(fmt.Sprintf("%s *%s* %s\n\\* %s\n\n", platformEmoji, mdV2Replacer.Replace(displayName), trMd(ctx, "srch_results"), trMd(ctx, "srch_pick_number_hint")))
+	textMessage.WriteString(fmt.Sprintf("%s *%s* %s\n", platformEmoji, mdV2Replacer.Replace(displayName), trMd(ctx, "srch_results")))
+	appendNumberedResultIntro(&textMessage, ctx, "srch", action)
 
 	initialLimit := h.initialSearchLimit(platformName)
 	hasMore := len(tracks) >= initialLimit && initialLimit < searchLimit
@@ -573,9 +574,11 @@ func (h *SearchCallbackHandler) Handle(ctx context.Context, b *telego.Bot, updat
 		hasMore = state.hasMore(state.platform)
 	}
 	manager := h.Search.PlatformManager
-	textHeader := fmt.Sprintf("%s *%s* %s\n\\* %s\n\n", platformEmoji(manager, state.platform), mdV2Replacer.Replace(platformDisplayName(ctx, manager, state.platform)), trMd(ctx, "srch_results"), trMd(ctx, "srch_pick_number_hint"))
+	var textHeader strings.Builder
+	textHeader.WriteString(fmt.Sprintf("%s *%s* %s\n", platformEmoji(manager, state.platform), mdV2Replacer.Replace(platformDisplayName(ctx, manager, state.platform)), trMd(ctx, "srch_results")))
+	appendNumberedResultIntro(&textHeader, ctx, "srch", state.resultAction())
 	pageText, keyboard := h.Search.buildSearchPage(ctx, tracks, state.platform, state.keyword, state.quality, state.requesterID, messageID, page, state.unavailable, hasMore, state.limit, state.biliFilter, state.searchFilterText, state.resultAction())
-	text := textHeader + pageText
+	text := textHeader.String() + pageText
 	disablePreview := true
 	params := &telego.EditMessageTextParams{
 		ChatID:             telego.ChatID{ID: msg.Chat.ID},
@@ -768,6 +771,7 @@ func (h *SearchHandler) buildSearchPage(ctx context.Context, tracks []platform.T
 	} else {
 		textMessage.WriteString("\n")
 	}
+	appendNumberedResultSourceHint(&textMessage, ctx, "srch")
 	buttons := make([]telego.InlineKeyboardButton, 0, pageSize)
 	for i := start; i < end; i++ {
 		track := tracks[i]
@@ -798,6 +802,9 @@ func (h *SearchHandler) buildSearchPage(ctx context.Context, tracks []platform.T
 			Text:         fmt.Sprintf("%d", i-start+1),
 			CallbackData: callbackData,
 		})
+	}
+	if len(buttons) > 0 {
+		appendNumberedResultFooter(&textMessage, ctx, "srch", action)
 	}
 
 	var rows [][]telego.InlineKeyboardButton

@@ -183,15 +183,18 @@ func (h *GuestModeHandler) renderGuestSearchPage(ctx context.Context, state *sea
 	if isPlaylist {
 		// Playlist/album mode: use the same header style as PlaylistHandler
 		// (platform · label, then title/creator/track-count via
-		// formatPlaylistInfo). No keyword line, no "点击数字" hint duplication.
+		// formatPlaylistInfo). The numbered-result action hint follows the
+		// collection information and is shared with keyword search results.
 		collectionLabel := strings.TrimSpace(state.collectionLabel)
 		if collectionLabel == "" {
 			collectionLabel = collectionTypeLabel(ctx, collectionTypePlaylist)
 		}
 		bld.WriteString(fmt.Sprintf("%s *%s* %s\n\n", platformEmojiText, mdV2Replacer.Replace(displayName), collectionLabel))
 		bld.WriteString(formatPlaylistInfo(ctx, state.playlist, collectionLabel))
+		appendNumberedResultIntro(&bld, ctx, "guest", state.resultAction())
 	} else {
-		bld.WriteString(fmt.Sprintf("%s *%s* %s\n\\* %s\n\n", platformEmojiText, mdV2Replacer.Replace(displayName), trMd(ctx, "guest_search_results"), trMd(ctx, "guest_pick_number_hint")))
+		bld.WriteString(fmt.Sprintf("%s *%s* %s\n", platformEmojiText, mdV2Replacer.Replace(displayName), trMd(ctx, "guest_search_results")))
+		appendNumberedResultIntro(&bld, ctx, "guest", state.resultAction())
 		if strings.TrimSpace(state.keyword) != "" {
 			bld.WriteString(fmt.Sprintf("%s%s\n", trMd(ctx, "guest_keyword_label"), mdV2Replacer.Replace(state.keyword)))
 		}
@@ -201,6 +204,7 @@ func (h *GuestModeHandler) renderGuestSearchPage(ctx context.Context, state *sea
 	} else if !isPlaylist {
 		bld.WriteString("\n")
 	}
+	appendNumberedResultSourceHint(&bld, ctx, "guest")
 
 	rows := make([][]telego.InlineKeyboardButton, 0, 8)
 	resultButtons := make([]telego.InlineKeyboardButton, 0, pageSize)
@@ -224,6 +228,9 @@ func (h *GuestModeHandler) renderGuestSearchPage(ctx context.Context, state *sea
 		if cb := buildInlineSendCallbackData(state.platform, track.ID, state.quality, state.requesterID); cb != "" {
 			resultButtons = append(resultButtons, telego.InlineKeyboardButton{Text: fmt.Sprintf("%d", i-start+1), CallbackData: cb})
 		}
+	}
+	if len(resultButtons) > 0 {
+		appendNumberedResultFooter(&bld, ctx, "guest", state.resultAction())
 	}
 	if len(resultButtons) > 0 {
 		rows = append(rows, resultButtons)

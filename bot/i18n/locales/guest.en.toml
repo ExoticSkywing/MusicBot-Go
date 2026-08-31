@@ -2,7 +2,16 @@
 
 # --- guest search page (MarkdownV2) ---
 guest_search_results = "search results"
-guest_pick_number_hint = "Tap a number below to pick a track"
+# Numbered result actions are split between the header, source-link note and
+# footer so the compact button row stays easy to scan.
+guest_action_label = "Action tips:"
+guest_download_hint = "⬇️ Tap a number below to get the track"
+guest_lyric_hint = "🎼 Tap a number below to get the lyrics"
+guest_source_hint = "🔗 Tap a song title to open its official platform page"
+guest_download_footer = "Download: the numbers below match the tracks above"
+guest_download_button_hint = "⬇️ Tap a button below to download the track"
+guest_lyric_footer = "Lyrics: the numbers below match the tracks above"
+guest_lyric_button_hint = "🎼 Tap a button below to get the lyrics"
 guest_keyword_label = "Keyword: "
 guest_page_indicator = "Page {{.Page}}/{{.Total}}"
 

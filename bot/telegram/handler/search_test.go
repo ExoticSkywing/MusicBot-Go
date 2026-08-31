@@ -368,6 +368,7 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 		{
 			ID:    "1",
 			Title: "Song One",
+			URL:   "https://example.com/song-one",
 			Artists: []platform.Artist{
 				{Name: "Artist A"},
 			},
@@ -386,6 +387,15 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 
 	if !strings.Contains(pageText, "test") {
 		t.Errorf("buildSearchPage: pageText missing keyword 'test'")
+	}
+	if !strings.Contains(pageText, "[Song One](https://example.com/song-one)") {
+		t.Errorf("buildSearchPage: pageText dropped the platform URL")
+	}
+	if !strings.Contains(pageText, "🔗 歌曲名称可点击查看平台官方页面") {
+		t.Errorf("buildSearchPage: pageText missing source-link hint")
+	}
+	if !strings.Contains(pageText, "下载入口：下方编号与上方歌曲一一对应\n⬇️ 点击下方按钮下载歌曲") {
+		t.Errorf("buildSearchPage: pageText missing download footer")
 	}
 	if keyboard == nil {
 		t.Fatal("buildSearchPage: keyboard is nil")
@@ -410,6 +420,22 @@ func TestSearchHandler_buildSearchPage_Basic(t *testing.T) {
 	}
 	if !strings.Contains(buttonRow[0].CallbackData, "hires") {
 		t.Errorf("buildSearchPage: callback data missing 'hires'")
+	}
+}
+
+func TestSearchHandler_buildSearchPage_LyricPromptsUseLyricCopy(t *testing.T) {
+	handler := &SearchHandler{}
+	tracks := []platform.Track{{ID: "1", Title: "Song", Artists: []platform.Artist{{Name: "Artist"}}}}
+
+	pageText, _ := handler.buildSearchPage(zhCtx(), tracks, "netease", "test", "hires", 12345, 100, 1, nil, false, 48, true, "", "lyric")
+	if !strings.Contains(pageText, "🔗 歌曲名称可点击查看平台官方页面") {
+		t.Errorf("lyric page missing source-link hint")
+	}
+	if !strings.Contains(pageText, "歌词入口：下方编号与上方歌曲一一对应\n🎼 点击下方按钮获取歌词") {
+		t.Errorf("lyric page missing lyric footer")
+	}
+	if strings.Contains(pageText, "下载入口：") || strings.Contains(pageText, "下载歌曲") {
+		t.Errorf("lyric page should not use download copy: %q", pageText)
 	}
 }
 

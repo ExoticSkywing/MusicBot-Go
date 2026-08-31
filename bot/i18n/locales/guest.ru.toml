@@ -2,7 +2,16 @@
 
 # --- страница поиска гостя (MarkdownV2) ---
 guest_search_results = "результаты поиска"
-guest_pick_number_hint = "Нажмите номер ниже, чтобы выбрать трек"
+# Numbered result actions are split between the header, source-link note and
+# footer so the compact button row stays easy to scan.
+guest_action_label = "Подсказка:"
+guest_download_hint = "⬇️ Нажмите номер ниже, чтобы получить трек"
+guest_lyric_hint = "🎼 Нажмите номер ниже, чтобы получить текст песни"
+guest_source_hint = "🔗 Нажмите название трека, чтобы открыть официальную страницу платформы"
+guest_download_footer = "Загрузка: номера ниже соответствуют трекам выше"
+guest_download_button_hint = "⬇️ Нажмите кнопку ниже, чтобы скачать трек"
+guest_lyric_footer = "Текст песни: номера ниже соответствуют трекам выше"
+guest_lyric_button_hint = "🎼 Нажмите кнопку ниже, чтобы получить текст песни"
 guest_keyword_label = "Запрос: "
 guest_page_indicator = "Страница {{.Page}}/{{.Total}}"
 
