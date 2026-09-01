@@ -171,6 +171,10 @@ CheckMD5 = false
 	if conf.GetBool("CheckMD5") {
 		t.Errorf("backward compatibility broken for CheckMD5")
 	}
+
+	if !conf.GetBool("EnableStandaloneCover") {
+		t.Errorf("EnableStandaloneCover should default to true")
+	}
 }
 
 func TestMixedFormat(t *testing.T) {

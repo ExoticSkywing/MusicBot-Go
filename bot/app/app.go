@@ -296,6 +296,9 @@ func initPluginRuntime(ctx context.Context, conf *config.Config, log *logpkg.Log
 		registerContribution(platformManager, pluginTagProviders, &recognizeService, &adminCommands, &pluginSettingDefinitions, contrib, log)
 	}
 
+	if conf.GetBool("EnableStandaloneCover") {
+		pluginSettingDefinitions = append(pluginSettingDefinitions, handler.StandaloneCoverSettingDefinition())
+	}
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.ForwardButtonSettingDefinition())
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.GroupFavoritesSettingDefinition())
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.CommentButtonsSettingDefinition())
@@ -485,6 +488,7 @@ func (a *App) Start(ctx context.Context) error {
 		DefaultQuality:            defaultQuality,
 		DefaultLyricFormat:        defaultLyricFormat,
 		InlineUploadChatID:        int64(a.Config.GetInt("InlineUploadChatID")),
+		EnableStandaloneCover:     a.Config.GetBool("EnableStandaloneCover"),
 		DefaultPlatform:           defaultPlatform,
 		FallbackPlatform:          searchFallback,
 		AdminIDs:                  a.adminSet,

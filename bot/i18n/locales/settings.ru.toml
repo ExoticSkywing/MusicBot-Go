@@ -55,6 +55,8 @@ set_lang_name_ja = "日本語"
 set_lang_name_ru = "Русский"
 
 # --- plugin setting definitions (forward button / group favorites) ---
+set_pdef_standalone_cover_title = "Показывать обложку крупно"
+set_pdef_standalone_cover_desc = "Отправлять отдельную крупную обложку перед песней"
 set_pdef_forward_title = "Показывать нижние кнопки песни"
 set_pdef_forward_desc = "Показывать ли нижние кнопки (отправить в чат / показать текст песни / в избранное) при отправке песни"
 set_pdef_groupfav_title = "Включить групповое избранное"

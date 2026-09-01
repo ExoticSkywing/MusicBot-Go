@@ -147,7 +147,7 @@ func (h *SettingsHandler) buildSettingsText(ctx context.Context, chatType string
 		}
 		value := h.resolvePluginSettingValue(ctx, chatType, settings, groupSettings, def)
 		resolve := func(key string) string { return tr(ctx, key) }
-		sb.WriteString(fmt.Sprintf("🔌 %s：%s\n", def.TitleLocalized(resolve), def.LabelOfLocalized(resolve, value)))
+		sb.WriteString(fmt.Sprintf("%s %s：%s\n", pluginSettingIcon(def), def.TitleLocalized(resolve), def.LabelOfLocalized(resolve, value)))
 	}
 
 	if len(platforms) > 1 {
@@ -269,7 +269,7 @@ func (h *SettingsHandler) buildSettingsKeyboard(ctx context.Context, chatType st
 		current := h.resolvePluginSettingValue(ctx, chatType, settings, groupSettings, def)
 		resolve := func(key string) string { return tr(ctx, key) }
 		rows = append(rows, []telego.InlineKeyboardButton{{
-			Text:         fmt.Sprintf("🔌 %s：%s", def.TitleLocalized(resolve), def.LabelOfLocalized(resolve, current)),
+			Text:         fmt.Sprintf("%s %s：%s", pluginSettingIcon(def), def.TitleLocalized(resolve), def.LabelOfLocalized(resolve, current)),
 			CallbackData: fmt.Sprintf("settings pcycle %s %s", def.Plugin, def.Key),
 		}})
 	}
@@ -460,6 +460,13 @@ func (h *SettingsHandler) sortedPluginSettingDefinitions() []botpkg.PluginSettin
 		return defs[i].Key < defs[j].Key
 	})
 	return defs
+}
+
+func pluginSettingIcon(def botpkg.PluginSettingDefinition) string {
+	if icon := strings.TrimSpace(def.Icon); icon != "" {
+		return icon
+	}
+	return "🔌"
 }
 
 func (h *SettingsHandler) findPluginSettingDefinition(plugin string, key string) (botpkg.PluginSettingDefinition, bool) {

@@ -17,8 +17,11 @@ type PluginSettingOption struct {
 }
 
 type PluginSettingDefinition struct {
-	Plugin                string
-	Key                   string
+	Plugin string
+	Key    string
+	// Icon customizes the leading icon in the settings summary and button.
+	// Empty keeps the generic plug icon used by existing plugin settings.
+	Icon                  string
 	Title                 string
 	Description           string
 	DefaultUser           string

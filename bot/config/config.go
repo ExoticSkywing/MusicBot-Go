@@ -632,6 +632,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("UploadWorkerCount", 1)
 	v.SetDefault("UploadQueueSize", 20)
 	v.SetDefault("InlineUploadChatID", 0)
+	v.SetDefault("EnableStandaloneCover", true)
 	v.SetDefault("EnableAprilFools", false)
 	v.SetDefault("AprilFoolsTextPrankProbability", 0.01)
 	v.SetDefault("AprilFoolsTrackHijackProbability", 0.15)

@@ -1735,6 +1735,11 @@ func fillSongInfoFromTrack(songInfo *botpkg.SongInfo, track *platform.Track, pla
 	if strings.TrimSpace(track.URL) != "" {
 		songInfo.TrackURL = track.URL
 	}
+	if strings.TrimSpace(track.CoverURL) != "" {
+		songInfo.CoverURL = strings.TrimSpace(track.CoverURL)
+	} else if track.Album != nil && strings.TrimSpace(track.Album.CoverURL) != "" {
+		songInfo.CoverURL = strings.TrimSpace(track.Album.CoverURL)
+	}
 	songInfo.LyricsAvailable = track.LyricsAvailable
 
 	if message != nil {

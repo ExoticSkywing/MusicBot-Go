@@ -41,10 +41,18 @@ type SongInfo struct {
 	Duration        int
 	FileID          string
 	ThumbFileID     string
-	FromUserID      int64
-	FromUserName    string
-	FromChatID      int64
-	FromChatName    string
+	// CoverFileID is the reusable Telegram photo file_id for the standalone
+	// full-size cover message. It is intentionally separate from ThumbFileID:
+	// Telegram audio thumbnails are not a reliable reusable photo source.
+	CoverFileID string
+	CoverURL    string
+	// CoverLocalPath is a transient path to the original downloaded artwork.
+	// It exists only while a preparation task is alive and is never persisted.
+	CoverLocalPath string
+	FromUserID     int64
+	FromUserName   string
+	FromChatID     int64
+	FromChatName   string
 	// LyricsAvailable is nil when unknown. When false, the platform explicitly
 	// reported that this track has no lyrics.
 	LyricsAvailable *bool

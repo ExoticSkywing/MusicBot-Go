@@ -163,15 +163,18 @@ type MusicHandler struct {
 	Artist             *ArtistHandler
 	LyricHandler       *LyricHandler
 	RecognizeEnabled   bool
-	DownloadPool       botpkg.WorkerPool
-	Limiter            chan struct{}
-	UploadLimiter      chan struct{}
-	UploadQueue        chan uploadTask
-	UploadWorkerCount  int
-	UploadQueueSize    int
-	UploadBot          *telego.Bot
-	RateLimiter        *telegram.RateLimiter
-	ResourceLimiter    *ResourceRateLimiter
+	// EnableStandaloneCover is the deployment-wide master switch. Per-user and
+	// per-group preferences are consulted only while this is enabled.
+	EnableStandaloneCover bool
+	DownloadPool          botpkg.WorkerPool
+	Limiter               chan struct{}
+	UploadLimiter         chan struct{}
+	UploadQueue           chan uploadTask
+	UploadWorkerCount     int
+	UploadQueueSize       int
+	UploadBot             *telego.Bot
+	RateLimiter           *telegram.RateLimiter
+	ResourceLimiter       *ResourceRateLimiter
 	// uploadLifecycleMu protects worker acceptance, active tasks, and shutdown.
 	uploadLifecycleMu sync.Mutex
 	uploadAccepting   bool
@@ -264,6 +267,7 @@ type uploadTask struct {
 	songInfo    botpkg.SongInfo
 	musicPath   string
 	picPath     string
+	showCover   bool
 	cleanup     []string
 	cleanupDone func()
 	// releaseJob drops this task's /cancel registry entry. Uploads register
@@ -288,8 +292,11 @@ type queuedStatus struct {
 }
 
 type uploadResult struct {
-	message *telego.Message
-	err     error
+	message        *telego.Message
+	coverMessage   *telego.Message
+	coverFileID    string
+	coverAttempted bool
+	err            error
 }
 
 type inlineProcessCall struct {
@@ -326,6 +333,7 @@ type preparedSongInfo struct {
 	BitDepth        int
 	PicSize         int
 	EmbPicSize      int
+	CoverLocalPath  string
 }
 
 // StartWorker initializes and starts the upload worker.
@@ -1241,6 +1249,9 @@ func (h *MusicHandler) trySendCachedTrack(
 	if h != nil {
 		h.refreshCachedSongLinks(ctx, &songInfo)
 		verifyCachedNeteaseQuality(ctx, h.PlatformManager, h.Repo, h.Logger, &songInfo, platformName, trackID, cacheQuality)
+		if h.EnableStandaloneCover && resolveStandaloneCoverEnabled(ctx, h.Repo, message) {
+			h.refreshCachedCoverSource(ctx, &songInfo)
+		}
 	}
 	if !silent {
 		status.Upsert(buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), tr(ctx, "hit_cache")))
@@ -1253,6 +1264,32 @@ func (h *MusicHandler) trySendCachedTrack(
 	}
 
 	return songInfo, true, nil
+}
+
+// refreshCachedCoverSource lazily upgrades legacy cache rows that predate the
+// dedicated cover fields. It fetches metadata only when the requester actually
+// has standalone covers enabled; the next successful audio send persists the
+// URL and the photo upload persists CoverFileID.
+func (h *MusicHandler) refreshCachedCoverSource(ctx context.Context, songInfo *botpkg.SongInfo) {
+	if h == nil || h.PlatformManager == nil || songInfo == nil || strings.TrimSpace(songInfo.CoverFileID) != "" || strings.TrimSpace(songInfo.CoverURL) != "" {
+		return
+	}
+	platformName := strings.TrimSpace(songInfo.Platform)
+	trackID := strings.TrimSpace(songInfo.TrackID)
+	if platformName == "" || trackID == "" {
+		return
+	}
+	track, err := h.getTrackSingleflight(ctx, platformName, trackID)
+	if err != nil || track == nil {
+		return
+	}
+	if coverURL := strings.TrimSpace(track.CoverURL); coverURL != "" {
+		songInfo.CoverURL = coverURL
+		return
+	}
+	if track.Album != nil {
+		songInfo.CoverURL = strings.TrimSpace(track.Album.CoverURL)
+	}
 }
 
 func (h *MusicHandler) refreshCachedSongLinks(ctx context.Context, songInfo *botpkg.SongInfo) {
@@ -1447,6 +1484,7 @@ func capturePreparedSongInfo(songInfo *botpkg.SongInfo) preparedSongInfo {
 		BitDepth:        songInfo.BitDepth,
 		PicSize:         songInfo.PicSize,
 		EmbPicSize:      songInfo.EmbPicSize,
+		CoverLocalPath:  songInfo.CoverLocalPath,
 	}
 }
 
@@ -1467,6 +1505,7 @@ func applyPreparedSongInfo(songInfo *botpkg.SongInfo, prepared preparedSongInfo)
 	}
 	songInfo.PicSize = prepared.PicSize
 	songInfo.EmbPicSize = prepared.EmbPicSize
+	songInfo.CoverLocalPath = prepared.CoverLocalPath
 }
 
 func normalizeCleanupPaths(paths []string) []string {
@@ -2086,6 +2125,7 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	h.verifyPreparedAppleMusicQuality(plat, filePath, songInfo, trackID)
 
 	picPath, resizePicPath := h.prepareCoverFiles(ctx, track, trackID, stamp, songInfo, &cleanupList)
+	songInfo.CoverLocalPath = picPath
 
 	embedPicPath := picPath
 	thumbPicPath := picPath
@@ -2253,6 +2293,7 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 		songInfo:    songCopy,
 		musicPath:   musicPath,
 		picPath:     picPath,
+		showCover:   h.EnableStandaloneCover && resolveStandaloneCoverEnabled(ctx, h.Repo, message),
 		cleanup:     cleanupCopy,
 		cleanupDone: cleanupDone,
 		releaseJob:  releaseJob,
@@ -2268,6 +2309,9 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 				if result.message.Audio.Thumbnail != nil {
 					songCopy.ThumbFileID = result.message.Audio.Thumbnail.FileID
 				}
+			}
+			if result.coverAttempted {
+				songCopy.CoverFileID = result.coverFileID
 			}
 			if h.Repo != nil && result.err == nil && songCopy.FileID != "" {
 				if err := h.Repo.Create(cleanupCtx, &songCopy); err != nil {
@@ -2604,7 +2648,7 @@ func (h *MusicHandler) processUploadTask(task uploadTask) {
 			}
 		}
 	}
-	result.message, result.err = h.sendMusicDirect(task.ctx, task.b, task.message, &task.songInfo, task.musicPath, task.picPath)
+	result = h.sendMusicDirect(task.ctx, task.b, task.message, &task.songInfo, task.musicPath, task.picPath, task.showCover)
 }
 
 // registerQueuedStatus appends one status message entry into upload-status queue.
@@ -2752,16 +2796,17 @@ func (h *MusicHandler) updateQueuedStatusText(messageID int, text string) {
 	}
 }
 
-func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, musicPath, picPath string) (*telego.Message, error) {
+func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, musicPath, picPath string, showCover bool) uploadResult {
 	if songInfo == nil {
-		return nil, errors.New("song info required")
+		return uploadResult{err: errors.New("song info required")}
 	}
 	if message == nil {
-		return nil, errors.New("message required")
+		return uploadResult{err: errors.New("message required")}
 	}
 	if message.Chat.ID == 0 {
-		return nil, errors.New("message chat required")
+		return uploadResult{err: errors.New("message chat required")}
 	}
+	result := uploadResult{}
 	uploadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -2804,7 +2849,7 @@ func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, messa
 	} else {
 		audioUpload, audioHandle, err := openAudioUpload()
 		if err != nil {
-			return nil, err
+			return uploadResult{err: err}
 		}
 		defer audioHandle.Close()
 		audioFile = audioUpload
@@ -2851,6 +2896,10 @@ func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, messa
 		}
 	}
 
+	if showCover {
+		result.coverMessage, result.coverFileID, result.coverAttempted = h.sendStandaloneCover(uploadCtx, b, message, songInfo, picPath)
+	}
+
 	var audio *telego.Message
 	var err error
 	if h.RateLimiter != nil {
@@ -2880,11 +2929,17 @@ func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, messa
 	if err != nil && strings.Contains(fmt.Sprintf("%v", err), "file must be non-empty") && songInfo.FileID == "" {
 		params.Thumbnail = nil
 		if strings.TrimSpace(musicPath) == "" {
-			return audio, err
+			result.message = audio
+			result.err = err
+			h.rollbackStandaloneCover(ctx, b, message.Chat.ID, result.coverMessage)
+			return result
 		}
 		file, fileErr := os.Open(musicPath)
 		if fileErr != nil {
-			return audio, err
+			result.message = audio
+			result.err = err
+			h.rollbackStandaloneCover(ctx, b, message.Chat.ID, result.coverMessage)
+			return result
 		}
 		defer file.Close()
 		params.Audio = telego.InputFile{File: file}
@@ -2894,7 +2949,131 @@ func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, messa
 			audio, err = b.SendAudio(uploadCtx, params)
 		}
 	}
-	return audio, err
+	result.message = audio
+	result.err = err
+	if err != nil {
+		h.rollbackStandaloneCover(ctx, b, message.Chat.ID, result.coverMessage)
+	}
+	return result
+}
+
+// sendStandaloneCover sends a pure photo message immediately before the audio.
+// It deliberately has no caption, buttons, or reply header: the existing audio
+// message remains the single information surface and the cover adds only visual
+// hierarchy. Failures are non-fatal and the caller still sends the song.
+func (h *MusicHandler) sendStandaloneCover(ctx context.Context, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, picPath string) (*telego.Message, string, bool) {
+	if b == nil || message == nil || songInfo == nil || message.Chat.ID == 0 {
+		return nil, "", false
+	}
+
+	send := func(photo telego.InputFile) (*telego.Message, error) {
+		params := &telego.SendPhotoParams{
+			ChatID:          telego.ChatID{ID: message.Chat.ID},
+			MessageThreadID: message.MessageThreadID,
+			Photo:           photo,
+		}
+		if h != nil && h.RateLimiter != nil {
+			return telegram.SendPhotoWithRetry(ctx, h.RateLimiter, b, params)
+		}
+		return b.SendPhoto(ctx, params)
+	}
+
+	attempted := false
+	if coverFileID := strings.TrimSpace(songInfo.CoverFileID); coverFileID != "" {
+		attempted = true
+		msg, err := send(telego.InputFile{FileID: coverFileID})
+		if err == nil && msg != nil {
+			fileID := standaloneCoverFileID(msg)
+			if fileID == "" {
+				fileID = coverFileID
+			}
+			return msg, fileID, true
+		}
+		if err != nil && h != nil && h.Logger != nil {
+			h.Logger.Warn("failed to reuse standalone cover", "platform", songInfo.Platform, "trackID", songInfo.TrackID, "error", downloadErrorForLog(err))
+		}
+	}
+
+	// A freshly prepared song still owns the original downloaded artwork, so
+	// upload that exact file before asking Telegram to fetch the remote URL.
+	if originalPath := strings.TrimSpace(songInfo.CoverLocalPath); originalPath != "" {
+		if stat, err := os.Stat(originalPath); err == nil && stat.Size() > 0 {
+			attempted = true
+			if file, err := os.Open(originalPath); err == nil {
+				msg, sendErr := send(telego.InputFile{File: file})
+				_ = file.Close()
+				if sendErr == nil && msg != nil {
+					return msg, standaloneCoverFileID(msg), true
+				}
+				if sendErr != nil && h != nil && h.Logger != nil {
+					h.Logger.Warn("failed to send standalone cover from original file", "platform", songInfo.Platform, "trackID", songInfo.TrackID, "error", downloadErrorForLog(sendErr))
+				}
+			}
+		}
+	}
+
+	// CoverURL normally points at the original album artwork. Telegram returns a
+	// reusable photo file_id after fetching it once.
+	if coverURL := strings.TrimSpace(songInfo.CoverURL); coverURL != "" {
+		attempted = true
+		msg, err := send(telego.InputFile{URL: coverURL})
+		if err == nil && msg != nil {
+			return msg, standaloneCoverFileID(msg), true
+		}
+		if err != nil && h != nil && h.Logger != nil {
+			h.Logger.Warn("failed to send standalone cover from source URL", "platform", songInfo.Platform, "trackID", songInfo.TrackID, "url", downloadURLForLog(coverURL), "error", downloadErrorForLog(err))
+		}
+	}
+
+	// The already-prepared thumbnail is a reliable no-network fallback when the
+	// platform's original cover URL cannot be fetched by Telegram.
+	if localPath := strings.TrimSpace(picPath); localPath != "" {
+		if stat, err := os.Stat(localPath); err == nil && stat.Size() > 0 {
+			attempted = true
+			if file, err := os.Open(localPath); err == nil {
+				msg, sendErr := send(telego.InputFile{File: file})
+				_ = file.Close()
+				if sendErr == nil && msg != nil {
+					return msg, standaloneCoverFileID(msg), true
+				}
+				if sendErr != nil && h != nil && h.Logger != nil {
+					h.Logger.Warn("failed to send standalone cover from prepared thumbnail", "platform", songInfo.Platform, "trackID", songInfo.TrackID, "error", downloadErrorForLog(sendErr))
+				}
+			}
+		}
+	}
+
+	return nil, "", attempted
+}
+
+func standaloneCoverFileID(message *telego.Message) string {
+	if message == nil {
+		return ""
+	}
+	for i := len(message.Photo) - 1; i >= 0; i-- {
+		if fileID := strings.TrimSpace(message.Photo[i].FileID); fileID != "" {
+			return fileID
+		}
+	}
+	return ""
+}
+
+func (h *MusicHandler) rollbackStandaloneCover(ctx context.Context, b *telego.Bot, chatID int64, cover *telego.Message) {
+	if b == nil || cover == nil || chatID == 0 || cover.MessageID == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(detachContext(ctx), 10*time.Second)
+	defer cancel()
+	params := &telego.DeleteMessageParams{ChatID: telego.ChatID{ID: chatID}, MessageID: cover.MessageID}
+	var err error
+	if h != nil && h.RateLimiter != nil {
+		err = telegram.DeleteMessageWithRetry(cleanupCtx, h.RateLimiter, b, params)
+	} else {
+		err = b.DeleteMessage(cleanupCtx, params)
+	}
+	if err != nil && h != nil && h.Logger != nil {
+		h.Logger.Warn("failed to roll back standalone cover", "chatID", chatID, "messageID", cover.MessageID, "error", err)
+	}
 }
 
 func buildReplyParams(message *telego.Message) *telego.ReplyParameters {

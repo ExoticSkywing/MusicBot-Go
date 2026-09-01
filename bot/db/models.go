@@ -35,6 +35,8 @@ type SongInfoModel struct {
 	Duration        int
 	FileID          string
 	ThumbFileID     string
+	CoverFileID     string
+	CoverURL        string
 	FromUserID      int64
 	FromUserName    string
 	FromChatID      int64
@@ -88,6 +90,8 @@ func toInternal(model SongInfoModel) *bot.SongInfo {
 		Duration:        model.Duration,
 		FileID:          model.FileID,
 		ThumbFileID:     model.ThumbFileID,
+		CoverFileID:     model.CoverFileID,
+		CoverURL:        model.CoverURL,
 		FromUserID:      model.FromUserID,
 		FromUserName:    model.FromUserName,
 		FromChatID:      model.FromChatID,
@@ -127,6 +131,8 @@ func toModel(info *bot.SongInfo) *SongInfoModel {
 		Duration:        info.Duration,
 		FileID:          info.FileID,
 		ThumbFileID:     info.ThumbFileID,
+		CoverFileID:     info.CoverFileID,
+		CoverURL:        info.CoverURL,
 		FromUserID:      info.FromUserID,
 		FromUserName:    info.FromUserName,
 		FromChatID:      info.FromChatID,

@@ -616,6 +616,8 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 				"duration",
 				"file_id",
 				"thumb_file_id",
+				"cover_file_id",
+				"cover_url",
 				"from_user_id",
 				"from_user_name",
 				"from_chat_id",

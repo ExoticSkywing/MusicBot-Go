@@ -55,6 +55,8 @@ set_lang_name_ja = "日本語"
 set_lang_name_ru = "Русский"
 
 # --- plugin setting definitions (forward button / group favorites) ---
+set_pdef_standalone_cover_title = "Show full-size song cover"
+set_pdef_standalone_cover_desc = "Send a standalone full-size cover before the song"
 set_pdef_forward_title = "Show song bottom buttons"
 set_pdef_forward_desc = "Whether to show bottom buttons (send to chat / show lyrics / favorite) when sending a song"
 set_pdef_groupfav_title = "Enable group favorites"

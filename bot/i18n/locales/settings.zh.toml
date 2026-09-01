@@ -55,6 +55,8 @@ set_lang_name_ja = "日本語"
 set_lang_name_ru = "Русский"
 
 # --- plugin setting definitions (forward button / group favorites) ---
+set_pdef_standalone_cover_title = "独立展示歌曲封面"
+set_pdef_standalone_cover_desc = "发送歌曲前单独展示大图封面"
 set_pdef_forward_title = "展示歌曲底部按钮"
 set_pdef_forward_desc = "发送歌曲时是否显示底部按钮（发送到聊天 / 展示歌词 / 收藏）"
 set_pdef_groupfav_title = "启用群聊收藏"

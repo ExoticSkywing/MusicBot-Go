@@ -55,6 +55,8 @@ set_lang_name_ja = "日本語"
 set_lang_name_ru = "Русский"
 
 # --- plugin setting definitions (forward button / group favorites) ---
+set_pdef_standalone_cover_title = "曲のカバーを大きく表示"
+set_pdef_standalone_cover_desc = "曲を送信する前に大きなカバー画像を単独で表示します"
 set_pdef_forward_title = "曲の下部ボタンを表示"
 set_pdef_forward_desc = "曲を送信するとき下部ボタン（チャットに送信 / 歌詞表示 / お気に入り）を表示するか"
 set_pdef_groupfav_title = "グループお気に入りを有効化"

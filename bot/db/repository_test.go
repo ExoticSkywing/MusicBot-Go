@@ -58,6 +58,8 @@ func TestRepositoryCRUD(t *testing.T) {
 		FileExt:         "mp3",
 		MusicSize:       123,
 		Duration:        10,
+		CoverFileID:     "cover-file-id",
+		CoverURL:        "https://img.example/cover.jpg",
 		LyricsAvailable: &noLyrics,
 	}
 	if err := repo.Create(ctx, song); err != nil {
@@ -88,6 +90,9 @@ func TestRepositoryCRUD(t *testing.T) {
 	}
 	if loaded.LyricsAvailable == nil || *loaded.LyricsAvailable {
 		t.Fatalf("expected lyrics availability false, got %v", loaded.LyricsAvailable)
+	}
+	if loaded.CoverFileID != song.CoverFileID || loaded.CoverURL != song.CoverURL {
+		t.Fatalf("cover cache fields = (%q, %q), want (%q, %q)", loaded.CoverFileID, loaded.CoverURL, song.CoverFileID, song.CoverURL)
 	}
 
 	loaded.SongName = "Song Updated"
