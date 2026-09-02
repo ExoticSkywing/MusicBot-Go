@@ -66,13 +66,31 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 	return nil
 }
 
-// webContext / iosContext build the per-request client contexts.
+// webContext builds the WEB_REMIX context used by search and lyrics.
 func webContext() innertubeContext {
 	return innertubeContext{Client: clientInfo{
 		ClientName:    webRemixClientName,
 		ClientVersion: webRemixClientVersion,
 		Hl:            "en",
 		Gl:            "US",
+	}}
+}
+
+// visionOSContext builds the primary anonymous player context. It currently
+// exposes direct audio URLs for tracks that ANDROID_VR rejects as bot traffic.
+func visionOSContext() innertubeContext {
+	zero := 0
+	return innertubeContext{Client: clientInfo{
+		ClientName:      visionOSClientName,
+		ClientVersion:   visionOSClientVersion,
+		Hl:              "en",
+		DeviceMake:      "Apple",
+		DeviceModel:     "RealityDevice17,1",
+		OsName:          "visionOS",
+		OsVersion:       "26.5.23O471",
+		UserAgent:       visionOSUserAgent,
+		TimeZone:        "UTC",
+		UtcOffsetMinute: &zero,
 	}}
 }
 
@@ -93,6 +111,32 @@ func androidVRContext() innertubeContext {
 		AndroidSDKVersion: 32,
 		UserAgent:         androidVRUserAgent,
 	}}
+}
+
+type playerClientProfile struct {
+	clientNumber  string
+	clientVersion string
+	userAgent     string
+	context       func() innertubeContext
+	embedded      bool
+}
+
+func playerClientProfiles() []playerClientProfile {
+	return []playerClientProfile{
+		{
+			clientNumber:  visionOSClientNumber,
+			clientVersion: visionOSClientVersion,
+			userAgent:     visionOSUserAgent,
+			context:       visionOSContext,
+		},
+		{
+			clientNumber:  androidVRClientNumber,
+			clientVersion: androidVRClientVersion,
+			userAgent:     androidVRUserAgent,
+			context:       androidVRContext,
+			embedded:      true,
+		},
+	}
 }
 
 // post sends an InnerTube POST and returns the raw body. base is one of the
@@ -209,9 +253,8 @@ func (c *Client) GetTrack(ctx context.Context, videoID string) (*platform.Track,
 }
 
 // GetDownloadInfo resolves a directly-downloadable audio stream for videoID.
-// The iOS client context returns adaptiveFormats whose URLs are NOT cipher-
-// protected, so the bot's DownloadService can fetch them directly. When only
-// ciphered URLs are present (rare for music), it returns ErrUnavailable.
+// It tries player contexts that expose unciphered adaptiveFormats so the bot's
+// DownloadService can fetch them directly.
 func (c *Client) GetDownloadInfo(ctx context.Context, videoID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	pr, err := c.player(ctx, videoID)
 	if err != nil {
@@ -240,14 +283,10 @@ func (c *Client) GetDownloadInfo(ctx context.Context, videoID string, quality pl
 		Bitrate: bestBitrate(best) / 1000,
 		Quality: qualityFromBitrate(bestBitrate(best)),
 		Size:    parseInt64(best.ContentLength),
-		// The stream URL was minted for the ANDROID_VR client context; fetch it
-		// with a matching User-Agent so googlevideo doesn't reject the download.
-		Headers: map[string]string{"User-Agent": androidVRUserAgent},
-		// googlevideo still rejects HEAD, plain GET, and open-ended ("bytes=0-")
-		// requests; it serves only bounded Range chunks. Unlike the IOS client's
-		// PO-Token-walled URLs (which 403 at any offset!=0), the ANDROID_VR URL
-		// serves arbitrary byte ranges, so chunked download succeeds end to end.
-		// Keep the cap to force the bounded-Range path the downloader needs.
+		// Fetch the stream with the same client identity that minted its URL.
+		Headers: map[string]string{"User-Agent": pr.PlayerUserAgent},
+		// Keep googlevideo downloads on the conservative bounded-Range path. Both
+		// current profiles serve these chunks, including non-zero offsets.
 		MaxChunkSize: googleVideoMaxChunk,
 	}
 	if secs := parseInt64(pr.StreamingData.ExpiresInSeconds); secs > 0 {
@@ -327,47 +366,71 @@ func extractVisitorData(html string) string {
 	return token
 }
 
-// player calls /player with the ANDROID_VR context. That client's googlevideo
-// stream URLs are not behind the PO Token wall (arbitrary byte ranges return
-// 206 even on a YouTube-flagged IP, unlike the IOS client whose URLs 403 past
-// the first ~1 MiB), and they are direct/un-ciphered (no JS player needed). The
-// extra envelope fields (thirdParty/user/request + playbackContext) mirror
-// yt-dlp; a bare context gets bot-flagged.
+// player tries a small ordered set of direct-URL InnerTube clients. VISIONOS is
+// preferred; ANDROID_VR is retained as a fallback. If every profile is bot-
+// flagged, visitorData is refreshed once before the final attempt.
 func (c *Client) player(ctx context.Context, videoID string) (*playerResponse, error) {
 	videoID = strings.TrimSpace(videoID)
 	if videoID == "" {
 		return nil, platform.ErrNotFound
 	}
-	// ANDROID_VR /player is bot-flagged without a Visitor ID. Harvest one from a
-	// youtube.com/watch page (cached) and send it as X-Goog-Visitor-Id, matching
-	// yt-dlp. If the first attempt comes back LOGIN_REQUIRED (typical bot-flag),
-	// the cached visitorData may be stale, so we refresh it once and retry.
-	pr, err := c.playerOnce(ctx, videoID, c.getVisitorData(ctx, false))
-	if err != nil {
-		return nil, err
-	}
-	if isBotFlagged(pr) {
-		if refreshed := c.getVisitorData(ctx, true); refreshed != "" {
-			if pr2, err2 := c.playerOnce(ctx, videoID, refreshed); err2 == nil {
-				return pr2, nil
+
+	visitor := c.getVisitorData(ctx, false)
+	var metadataResponse, lastResponse *playerResponse
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		sawBotFlag := false
+		for _, profile := range playerClientProfiles() {
+			pr, err := c.playerOnce(ctx, videoID, visitor, profile)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			lastResponse = pr
+			if isBotFlagged(pr) {
+				sawBotFlag = true
+			}
+			if isPlayablePlayerResponse(pr) && metadataResponse == nil {
+				metadataResponse = pr
+			}
+			if hasDirectAudio(pr) {
+				return pr, nil
 			}
 		}
+		if attempt > 0 || !sawBotFlag {
+			break
+		}
+		refreshed := c.getVisitorData(ctx, true)
+		if refreshed == "" || refreshed == visitor {
+			break
+		}
+		visitor = refreshed
 	}
-	return pr, nil
+	if metadataResponse != nil {
+		return metadataResponse, nil
+	}
+	if lastResponse != nil {
+		return lastResponse, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, platform.ErrUnavailable
 }
 
-// playerOnce performs a single ANDROID_VR /player call with the given visitor
-// ID. visitor may be empty (best-effort).
-func (c *Client) playerOnce(ctx context.Context, videoID, visitor string) (*playerResponse, error) {
-	vrCtx := androidVRContext()
+// playerOnce performs one /player call with a concrete client profile.
+func (c *Client) playerOnce(ctx context.Context, videoID, visitor string, profile playerClientProfile) (*playerResponse, error) {
+	playerCtx := profile.context()
 	if visitor != "" {
-		vrCtx.Client.VisitorData = visitor
+		playerCtx.Client.VisitorData = visitor
 	}
-	vrCtx.ThirdParty = &thirdPartyInfo{EmbedURL: "https://www.youtube.com"}
-	vrCtx.User = &userInfo{LockedSafetyMode: false}
-	vrCtx.Request = &requestInfo{UseSSL: true, InternalExperimentFlags: []string{}, ConsistencyTokenJars: []string{}}
+	if profile.embedded {
+		playerCtx.ThirdParty = &thirdPartyInfo{EmbedURL: "https://www.youtube.com"}
+		playerCtx.User = &userInfo{LockedSafetyMode: false}
+		playerCtx.Request = &requestInfo{UseSSL: true, InternalExperimentFlags: []string{}, ConsistencyTokenJars: []string{}}
+	}
 	payload := playerRequest{
-		Context:        vrCtx,
+		Context:        playerCtx,
 		VideoID:        videoID,
 		RacyOK:         true,
 		ContentCheckOK: true,
@@ -375,11 +438,15 @@ func (c *Client) playerOnce(ctx context.Context, videoID, visitor string) (*play
 			ContentPlaybackContext: contentPlaybackContextInfo{HTML5Preference: "HTML5_PREF_WANTS"},
 		},
 	}
-	headers := map[string]string{"Origin": "https://www.youtube.com"}
+	headers := map[string]string{
+		"Origin":                   "https://www.youtube.com",
+		"X-YouTube-Client-Name":    profile.clientNumber,
+		"X-YouTube-Client-Version": profile.clientVersion,
+	}
 	if visitor != "" {
 		headers["X-Goog-Visitor-Id"] = visitor
 	}
-	data, err := c.post(ctx, innerTubeBaseVideo, "player", payload, androidVRUserAgent, headers)
+	data, err := c.post(ctx, innerTubeBaseVideo, "player", payload, profile.userAgent, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +454,24 @@ func (c *Client) playerOnce(ctx context.Context, videoID, visitor string) (*play
 	if err := json.Unmarshal(data, &pr); err != nil {
 		return nil, err
 	}
+	pr.PlayerUserAgent = profile.userAgent
 	return &pr, nil
+}
+
+func isPlayablePlayerResponse(pr *playerResponse) bool {
+	if pr == nil {
+		return false
+	}
+	status := strings.ToUpper(strings.TrimSpace(pr.PlayabilityStatus.Status))
+	return status == "" || status == "OK"
+}
+
+func hasDirectAudio(pr *playerResponse) bool {
+	if !isPlayablePlayerResponse(pr) {
+		return false
+	}
+	return selectAudioFormat(pr.StreamingData.AdaptiveFormats, platform.QualityHigh) != nil ||
+		selectAudioFormat(pr.StreamingData.Formats, platform.QualityHigh) != nil
 }
 
 // isBotFlagged reports whether a player response is the "Sign in to confirm

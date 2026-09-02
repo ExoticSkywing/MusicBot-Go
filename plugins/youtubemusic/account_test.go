@@ -35,6 +35,13 @@ func TestYouTubeMusicCheckCookieAnonymousDownloadProbe(t *testing.T) {
 			if got := req.Header.Get("X-Goog-Visitor-Id"); got != "VISITOR" {
 				t.Fatalf("visitor header = %q, want VISITOR", got)
 			}
+			requestBody, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read player request: %v", err)
+			}
+			if !strings.Contains(string(requestBody), `"videoId":"`+youtubeMusicCookieCheckVideoID+`"`) {
+				t.Fatalf("player request does not use representative check track: %s", requestBody)
+			}
 			body := `{
 				"playabilityStatus": {"status": "OK"},
 				"streamingData": {
@@ -49,7 +56,7 @@ func TestYouTubeMusicCheckCookieAnonymousDownloadProbe(t *testing.T) {
 					]
 				},
 				"videoDetails": {
-					"videoId": "dQw4w9WgXcQ",
+					"videoId": "UQ8cXH7qbVU",
 					"title": "Test",
 					"lengthSeconds": "10",
 					"author": "Artist"
