@@ -29,6 +29,7 @@ func (q *QQMusicPlatform) AccountStatus(ctx context.Context) (platform.AccountSt
 	cookie := q.client.Cookie()
 	uin, authst, source := parseQQAuthDetails(cookie)
 	status.LoggedIn = strings.TrimSpace(authst) != ""
+	status.ThirdPartyAudioAvailable = q.thirdPartyAudioAvailable()
 	status.UserID = strings.TrimSpace(uin)
 	lines := []string{"- 状态: 未登录"}
 	if status.LoggedIn {

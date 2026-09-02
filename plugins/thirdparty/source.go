@@ -104,7 +104,7 @@ func NewChain(names []string, timeout time.Duration, logger bot.Logger) (*Chain,
 	for _, name := range names {
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "jbsou":
-			item, err := newJBSouProvider(defaultJBSouBaseURL, timeout, nil, isQQMusicMediaURL)
+			item, err := newJBSouProvider(defaultJBSouBaseURL, timeout, nil, nil)
 			if err != nil {
 				return nil, err
 			}

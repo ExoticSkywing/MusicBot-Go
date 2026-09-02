@@ -18,6 +18,7 @@ var _ platform.URLMatcher = (*KuwoPlatform)(nil)
 var _ platform.PlaylistURLMatcher = (*KuwoPlatform)(nil)
 var _ platform.TextMatcher = (*KuwoPlatform)(nil)
 var _ platform.MetadataProvider = (*KuwoPlatform)(nil)
+var _ platform.AccountStatusProvider = (*KuwoPlatform)(nil)
 
 func TestPlatformMetadataAndCapabilities(t *testing.T) {
 	instance := NewPlatform(NewClient(time.Second, nil))

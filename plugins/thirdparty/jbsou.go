@@ -69,17 +69,18 @@ func newJBSouProvider(baseURL string, timeout time.Duration, client *http.Client
 		}
 		client.Jar = jar
 	}
-	if mediaURLAllowed == nil {
-		mediaURLAllowed = isQQMusicMediaURL
+	redirectURLAllowed := mediaURLAllowed
+	if redirectURLAllowed == nil {
+		redirectURLAllowed = isJBSouMediaURL
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return fmt.Errorf("jbsou: too many redirects")
 		}
-		if sameOrigin(req.URL, parsed) || mediaURLAllowed(req.URL) {
+		if sameOrigin(req.URL, parsed) || redirectURLAllowed(req.URL) {
 			return nil
 		}
-		return fmt.Errorf("jbsou: redirect target is not an allowed QQ Music CDN")
+		return fmt.Errorf("jbsou: redirect target is not an allowed music CDN")
 	}
 	return &jbsouProvider{baseURL: parsed, httpClient: client, mediaURLAllowed: mediaURLAllowed}, nil
 }
@@ -90,26 +91,55 @@ func (p *jbsouProvider) Resolve(ctx context.Context, platformName, trackID strin
 	if p == nil || p.baseURL == nil || p.httpClient == nil {
 		return nil, fmt.Errorf("jbsou: provider unavailable")
 	}
-	if strings.ToLower(strings.TrimSpace(platformName)) != "qqmusic" {
+	platformName = strings.ToLower(strings.TrimSpace(platformName))
+	requestType := ""
+	mediaLabel := ""
+	mediaURLAllowed := p.mediaURLAllowed
+	classifyMedia := classifyQQMusicMedia
+	equalFoldTrackID := false
+	switch platformName {
+	case "qqmusic":
+		requestType = "qq"
+		mediaLabel = "QQ Music"
+		if mediaURLAllowed == nil {
+			mediaURLAllowed = isQQMusicMediaURL
+		}
+	case "kugou":
+		requestType = "kugou"
+		mediaLabel = "Kugou"
+		classifyMedia = classifyKugouMedia
+		equalFoldTrackID = true
+		trackID = normalizeKugouTrackID(trackID)
+		if mediaURLAllowed == nil {
+			mediaURLAllowed = isKugouMediaURL
+		}
+	case "kuwo":
+		requestType = "kuwo"
+		mediaLabel = "Kuwo"
+		classifyMedia = classifyKuwoMedia
+		if mediaURLAllowed == nil {
+			mediaURLAllowed = isKuwoMediaURL
+		}
+	default:
 		return nil, fmt.Errorf("jbsou: unsupported platform %q", platformName)
 	}
 	trackID = strings.TrimSpace(trackID)
 	if trackID == "" {
-		return nil, fmt.Errorf("jbsou: empty QQ songmid")
+		return nil, fmt.Errorf("jbsou: empty or invalid %s track ID", mediaLabel)
 	}
 
 	if err := p.establishSession(ctx); err != nil {
 		return nil, err
 	}
-	track, err := p.lookupQQTrack(ctx, trackID)
+	track, err := p.lookupTrack(ctx, requestType, trackID, equalFoldTrackID)
 	if err != nil {
 		return nil, err
 	}
-	mediaURL, err := p.resolveMediaURL(ctx, track.URL)
+	mediaURL, err := p.resolveMediaURL(ctx, track.URL, mediaURLAllowed, mediaLabel)
 	if err != nil {
 		return nil, err
 	}
-	format, bitrate, quality, err := classifyQQMusicMedia(mediaURL.URL)
+	format, bitrate, quality, err := classifyMedia(mediaURL.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -124,8 +154,8 @@ func (p *jbsouProvider) Resolve(ctx context.Context, platformName, trackID strin
 		Quality: quality,
 		ValidateURL: func(rawURL string) error {
 			parsed, parseErr := url.Parse(rawURL)
-			if parseErr != nil || !p.mediaURLAllowed(parsed) {
-				return fmt.Errorf("jbsou: download URL is not an allowed QQ Music CDN")
+			if parseErr != nil || !mediaURLAllowed(parsed) {
+				return fmt.Errorf("jbsou: download URL is not an allowed %s CDN", mediaLabel)
 			}
 			return nil
 		},
@@ -150,11 +180,11 @@ func (p *jbsouProvider) establishSession(ctx context.Context) error {
 	return nil
 }
 
-func (p *jbsouProvider) lookupQQTrack(ctx context.Context, trackID string) (*jbsouTrack, error) {
+func (p *jbsouProvider) lookupTrack(ctx context.Context, requestType, trackID string, equalFoldTrackID bool) (*jbsouTrack, error) {
 	form := url.Values{
 		"input":  {trackID},
 		"filter": {"id"},
-		"type":   {"qq"},
+		"type":   {requestType},
 		"page":   {"1"},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL.String(), strings.NewReader(form.Encode()))
@@ -186,14 +216,19 @@ func (p *jbsouProvider) lookupQQTrack(ctx context.Context, trackID string) (*jbs
 	}
 	for i := range payload.Data {
 		item := &payload.Data[i]
-		if strings.TrimSpace(item.SongID) == trackID && strings.TrimSpace(item.URL) != "" {
+		itemTrackID := strings.TrimSpace(item.SongID)
+		matches := itemTrackID == trackID
+		if equalFoldTrackID {
+			matches = strings.EqualFold(itemTrackID, trackID)
+		}
+		if matches && strings.TrimSpace(item.URL) != "" {
 			return item, nil
 		}
 	}
-	return nil, fmt.Errorf("jbsou: exact QQ songmid match not found")
+	return nil, fmt.Errorf("jbsou: exact track ID match not found")
 }
 
-func (p *jbsouProvider) resolveMediaURL(ctx context.Context, raw string) (*jbsouMedia, error) {
+func (p *jbsouProvider) resolveMediaURL(ctx context.Context, raw string, mediaURLAllowed func(*url.URL) bool, mediaLabel string) (*jbsouMedia, error) {
 	reference, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return nil, fmt.Errorf("jbsou: invalid media endpoint")
@@ -217,9 +252,9 @@ func (p *jbsouProvider) resolveMediaURL(ctx context.Context, raw string) (*jbsou
 		resp.Body.Close()
 		return nil, fmt.Errorf("jbsou: media URL returned HTTP %d", resp.StatusCode)
 	}
-	if resp.Request == nil || resp.Request.URL == nil || !p.mediaURLAllowed(resp.Request.URL) {
+	if resp.Request == nil || resp.Request.URL == nil || !mediaURLAllowed(resp.Request.URL) {
 		resp.Body.Close()
-		return nil, fmt.Errorf("jbsou: media URL is not an allowed QQ Music CDN")
+		return nil, fmt.Errorf("jbsou: media URL is not an allowed %s CDN", mediaLabel)
 	}
 	probe, readErr := io.ReadAll(io.LimitReader(resp.Body, jbsouProbeBytes))
 	resp.Body.Close()
@@ -231,7 +266,7 @@ func (p *jbsouProvider) resolveMediaURL(ctx context.Context, raw string) (*jbsou
 	}
 	size := responseTotalSize(resp)
 	if size <= 0 {
-		return nil, fmt.Errorf("jbsou: QQ Music CDN did not provide a file size")
+		return nil, fmt.Errorf("jbsou: %s CDN did not provide a file size", mediaLabel)
 	}
 	return &jbsouMedia{URL: resp.Request.URL, Size: size}, nil
 }
@@ -298,12 +333,94 @@ func classifyQQMusicMedia(mediaURL *url.URL) (string, int, platform.Quality, err
 	return format, platform.QualityStandard.Bitrate(), platform.QualityStandard, nil
 }
 
+func classifyKugouMedia(mediaURL *url.URL) (string, int, platform.Quality, error) {
+	if mediaURL == nil {
+		return "", 0, platform.QualityStandard, fmt.Errorf("jbsou: empty media URL")
+	}
+	format := strings.ToLower(strings.TrimPrefix(path.Ext(mediaURL.Path), "."))
+	allowedFormats := map[string]bool{"mp3": true, "flac": true, "m4a": true, "aac": true, "ogg": true}
+	if !allowedFormats[format] {
+		return "", 0, platform.QualityStandard, fmt.Errorf("jbsou: unsupported audio format %q", format)
+	}
+	pathValue := strings.ToLower(mediaURL.Path)
+	switch {
+	case format == "flac":
+		return format, platform.QualityLossless.Bitrate(), platform.QualityLossless, nil
+	case strings.Contains(pathValue, "_qu320_"):
+		return format, platform.QualityHigh.Bitrate(), platform.QualityHigh, nil
+	case strings.Contains(pathValue, "_qu192_"):
+		return format, 192, platform.QualityStandard, nil
+	case strings.Contains(pathValue, "_qu128_"):
+		return format, platform.QualityStandard.Bitrate(), platform.QualityStandard, nil
+	default:
+		return format, platform.QualityStandard.Bitrate(), platform.QualityStandard, nil
+	}
+}
+
+func classifyKuwoMedia(mediaURL *url.URL) (string, int, platform.Quality, error) {
+	if mediaURL == nil {
+		return "", 0, platform.QualityStandard, fmt.Errorf("jbsou: empty media URL")
+	}
+	format := strings.ToLower(strings.TrimPrefix(path.Ext(mediaURL.Path), "."))
+	if format != "mp3" && format != "flac" {
+		return "", 0, platform.QualityStandard, fmt.Errorf("jbsou: unsupported audio format %q", format)
+	}
+	if format == "flac" {
+		return format, platform.QualityLossless.Bitrate(), platform.QualityLossless, nil
+	}
+	filename := strings.ToUpper(path.Base(mediaURL.Path))
+	if strings.HasPrefix(filename, "M800") {
+		return format, platform.QualityHigh.Bitrate(), platform.QualityHigh, nil
+	}
+	if strings.HasPrefix(filename, "M500") {
+		return format, platform.QualityStandard.Bitrate(), platform.QualityStandard, nil
+	}
+	return format, platform.QualityStandard.Bitrate(), platform.QualityStandard, nil
+}
+
 func isQQMusicMediaURL(candidate *url.URL) bool {
 	if candidate == nil || !strings.EqualFold(candidate.Scheme, "https") {
 		return false
 	}
 	host := strings.ToLower(candidate.Hostname())
 	return host == "aqqmusic.tc.qq.com" || strings.HasSuffix(host, ".qqmusic.qq.com")
+}
+
+func isKugouMediaURL(candidate *url.URL) bool {
+	if candidate == nil || !strings.EqualFold(candidate.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(candidate.Hostname())
+	return strings.HasSuffix(host, ".kugou.com")
+}
+
+func isKuwoMediaURL(candidate *url.URL) bool {
+	if candidate == nil || !strings.EqualFold(candidate.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(candidate.Hostname())
+	labels := strings.Split(host, ".")
+	if len(labels) != 3 || labels[1] != "kuwo" || labels[2] != "cn" {
+		return false
+	}
+	return strings.HasPrefix(labels[0], "kw-") || strings.HasSuffix(labels[0], "-sycdn")
+}
+
+func isJBSouMediaURL(candidate *url.URL) bool {
+	return isQQMusicMediaURL(candidate) || isKugouMediaURL(candidate) || isKuwoMediaURL(candidate)
+}
+
+func normalizeKugouTrackID(trackID string) string {
+	trackID = strings.TrimSpace(trackID)
+	if len(trackID) != 32 {
+		return ""
+	}
+	for _, char := range trackID {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+			return ""
+		}
+	}
+	return strings.ToUpper(trackID)
 }
 
 func sameOrigin(left, right *url.URL) bool {

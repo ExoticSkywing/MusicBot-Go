@@ -27,11 +27,13 @@ func (k *KugouPlatform) AccountStatus(ctx context.Context) (platform.AccountStat
 	manager := k.client.Concept()
 	state := manager.Snapshot()
 	status.LoggedIn = manager.HasUsableSession()
+	status.ThirdPartyAudioAvailable = k.thirdPartyAudioAvailable()
 	status.UserID = strings.TrimSpace(state.UserID)
 	status.Nickname = strings.TrimSpace(state.Nickname)
 	status.CanCheckCookie = true
 	status.CanRenewCookie = true
 	status.SupportedLogins = k.SupportedLoginMethods()
+	status.Highlights = k.thirdPartyStatusLines()
 	status.Summary = manager.StatusSummaryForChat(true)
 	return status, nil
 }

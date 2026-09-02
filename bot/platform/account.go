@@ -6,18 +6,27 @@ import (
 )
 
 type AccountStatus struct {
-	Platform        string
-	DisplayName     string
-	LoggedIn        bool
-	UserID          string
-	Nickname        string
-	Summary         string
-	AuthMode        string
-	SessionSource   string
-	CanCheckCookie  bool
-	CanRenewCookie  bool
-	SupportedLogins []string
-	ExpiresAt       *time.Time
+	Platform    string
+	DisplayName string
+	LoggedIn    bool
+	// Available reports that the platform can serve audio through either its
+	// official endpoint or a configured third-party source. LoggedIn remains
+	// reserved for the official account session.
+	Available bool
+	// NoLoginRequired marks platforms whose official audio endpoint is public.
+	NoLoginRequired bool
+	// ThirdPartyAudioAvailable reports that the configured primary audio
+	// source can serve tracks without relying on the official account session.
+	ThirdPartyAudioAvailable bool
+	UserID                   string
+	Nickname                 string
+	Summary                  string
+	AuthMode                 string
+	SessionSource            string
+	CanCheckCookie           bool
+	CanRenewCookie           bool
+	SupportedLogins          []string
+	ExpiresAt                *time.Time
 	// Highlights are concise operational facts rendered before routine account
 	// fields in the detailed /status view.
 	Highlights []string

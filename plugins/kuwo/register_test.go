@@ -21,6 +21,7 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot/config"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 	platformplugins "github.com/liuran001/MusicBot-Go/bot/platform/plugins"
+	"github.com/liuran001/MusicBot-Go/plugins/thirdparty"
 )
 
 const (
@@ -111,6 +112,26 @@ timeout = 7
 				t.Fatalf("download retries = %d, want 3", downloadRetries)
 			}
 		})
+	}
+}
+
+func TestKuwoFactoryConfiguresThirdPartyAudio(t *testing.T) {
+	factory := registeredKuwoFactory(t)
+	cfg := loadKuwoFactoryConfig(t, `[plugins.kuwo]
+third_party_mode = third_party_first
+third_party_providers = jbsou
+third_party_timeout = 7
+`)
+	contribution, err := factory(cfg, nil)
+	if err != nil {
+		t.Fatalf("factory() = %v", err)
+	}
+	kuwoPlatform, ok := contribution.Platform.(*KuwoPlatform)
+	if !ok {
+		t.Fatalf("factory platform = %T", contribution.Platform)
+	}
+	if kuwoPlatform.thirdPartyMode != thirdparty.ModeThirdPartyFirst || kuwoPlatform.thirdPartyResolver == nil {
+		t.Fatalf("third-party config = mode:%q resolver:%T", kuwoPlatform.thirdPartyMode, kuwoPlatform.thirdPartyResolver)
 	}
 }
 

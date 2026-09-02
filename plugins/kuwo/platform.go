@@ -5,11 +5,14 @@ import (
 	"io"
 
 	"github.com/liuran001/MusicBot-Go/bot/platform"
+	"github.com/liuran001/MusicBot-Go/plugins/thirdparty"
 )
 
 // KuwoPlatform adapts the Kuwo client to the shared music platform contract.
 type KuwoPlatform struct {
-	client *Client
+	client             *Client
+	thirdPartyMode     thirdparty.Mode
+	thirdPartyResolver thirdparty.Resolver
 }
 
 // NewPlatform creates a Kuwo platform backed by client.
@@ -66,7 +69,14 @@ func (p *KuwoPlatform) GetDownloadInfo(
 	if p == nil || p.client == nil {
 		return nil, platform.NewUnavailableError("kuwo", "track", trackID)
 	}
-	return p.client.GetDownloadInfo(ctx, trackID, quality)
+	return resolveKuwoDownload(
+		ctx,
+		p.thirdPartyMode,
+		p.client.GetDownloadInfo,
+		p.getThirdPartyDownloadInfo,
+		trackID,
+		quality,
+	)
 }
 
 func (p *KuwoPlatform) Search(ctx context.Context, query string, limit int) ([]platform.Track, error) {

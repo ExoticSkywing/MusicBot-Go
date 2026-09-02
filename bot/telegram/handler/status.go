@@ -171,32 +171,36 @@ func renderSafeAccountStatuses(ctx context.Context, statuses []platform.AccountS
 	if len(statuses) == 0 {
 		return tr(ctx, "status_no_accounts")
 	}
+	loggedIn := 0
 	available := 0
+	showAvailabilityCount := false
 	lines := make([]string, 0, len(statuses)+1)
 	for _, status := range statuses {
-		state := tr(ctx, "status_state_not_logged_in")
-		icon := "❌"
+		state, icon := accountStatusPresentation(ctx, status, false)
 		if status.LoggedIn {
-			state = tr(ctx, "status_state_available")
-			icon = "✅"
+			loggedIn++
+		}
+		if accountStatusAvailable(status) {
 			available++
-		} else if strings.TrimSpace(status.Summary) != "" {
-			state = classifySafeStatus(ctx, status)
+		}
+		if status.NoLoginRequired {
+			showAvailabilityCount = true
 		}
 		lines = append(lines, fmt.Sprintf("%s %s：%s", icon, status.DisplayName, state))
 	}
-	return fmt.Sprintf("%s：%d/%d\n%s", tr(ctx, "status_logged_in"), available, len(statuses), strings.Join(lines, "\n"))
+	countLabel := tr(ctx, "status_logged_in")
+	count := loggedIn
+	if showAvailabilityCount {
+		countLabel = tr(ctx, "status_available")
+		count = available
+	}
+	return fmt.Sprintf("%s：%d/%d\n%s", countLabel, count, len(statuses), strings.Join(lines, "\n"))
 }
 
 func renderDetailedAccountStatusesHTML(ctx context.Context, statuses []platform.AccountStatus) string {
 	blocks := make([]string, 0, len(statuses))
 	for _, status := range statuses {
-		emoji := "❌"
-		stateText := tr(ctx, "status_state_not_logged_in")
-		if status.LoggedIn {
-			emoji = "✅"
-			stateText = tr(ctx, "status_logged_in")
-		}
+		stateText, emoji := accountStatusPresentation(ctx, status, true)
 		header := fmt.Sprintf("%s %s（%s）", emoji, html.EscapeString(strings.TrimSpace(status.DisplayName)), html.EscapeString(stateText))
 		detailLines := make([]string, 0, len(status.Highlights)+8)
 		for _, line := range status.Highlights {
@@ -206,6 +210,10 @@ func renderDetailedAccountStatusesHTML(ctx context.Context, statuses []platform.
 			}
 		}
 		detailLines = append(detailLines, tr(ctx, "status_field_state")+": "+stateText)
+		if status.ThirdPartyAudioAvailable {
+			accountState := officialAccountStatusText(ctx, status)
+			detailLines = append(detailLines, tr(ctx, "status_field_official_account")+": "+accountState)
+		}
 		if strings.TrimSpace(status.Nickname) != "" {
 			detailLines = append(detailLines, tr(ctx, "status_field_nickname")+": "+strings.TrimSpace(status.Nickname))
 		}
@@ -237,6 +245,39 @@ func renderDetailedAccountStatusesHTML(ctx context.Context, statuses []platform.
 		blocks = append(blocks, header+"\n<blockquote expandable>"+strings.Join(escapedLines, "\n")+"</blockquote>")
 	}
 	return strings.Join(blocks, "\n")
+}
+
+func accountStatusAvailable(status platform.AccountStatus) bool {
+	return status.Available || status.LoggedIn || status.ThirdPartyAudioAvailable
+}
+
+func accountStatusPresentation(ctx context.Context, status platform.AccountStatus, detailed bool) (string, string) {
+	if status.ThirdPartyAudioAvailable {
+		return tr(ctx, "status_state_third_party_available"), "✅"
+	}
+	if status.LoggedIn {
+		if detailed {
+			return tr(ctx, "status_logged_in"), "✅"
+		}
+		return tr(ctx, "status_state_available"), "✅"
+	}
+	if status.NoLoginRequired || status.Available {
+		return tr(ctx, "status_state_available_without_login"), "✅"
+	}
+	if strings.TrimSpace(status.Summary) != "" {
+		return classifySafeStatus(ctx, status), "❌"
+	}
+	return tr(ctx, "status_state_not_logged_in"), "❌"
+}
+
+func officialAccountStatusText(ctx context.Context, status platform.AccountStatus) string {
+	if status.NoLoginRequired {
+		return tr(ctx, "status_state_available_without_login")
+	}
+	if status.LoggedIn {
+		return tr(ctx, "status_logged_in")
+	}
+	return tr(ctx, "status_state_not_logged_in")
 }
 
 // buildStatusInfoMarkdown renders the cache summary block as MarkdownV2. Labels

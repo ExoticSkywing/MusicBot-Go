@@ -12,10 +12,13 @@ import (
 
 	"github.com/guohuiyuan/music-lib/model"
 	"github.com/liuran001/MusicBot-Go/bot/platform"
+	"github.com/liuran001/MusicBot-Go/plugins/thirdparty"
 )
 
 type KugouPlatform struct {
-	client *Client
+	client             *Client
+	thirdPartyMode     thirdparty.Mode
+	thirdPartyResolver thirdparty.Resolver
 }
 
 const kugouCookieCheckTrackID = "f73f22fb046ca1a135c70417163af82e"
@@ -76,7 +79,8 @@ func (k *KugouPlatform) CheckCookie(ctx context.Context) (platform.CookieCheckRe
 	if !ok {
 		return platform.CookieCheckResult{OK: false, Message: "Cookie 未检测到 VIP 能力或未配置"}, nil
 	}
-	info, err := k.GetDownloadInfo(checkCtx, kugouCookieCheckTrackID, platform.QualityHiRes)
+	// Authentication checks must never be satisfied by a third-party source.
+	info, err := k.getOfficialDownloadInfo(checkCtx, kugouCookieCheckTrackID, platform.QualityHiRes)
 	if err != nil {
 		return platform.CookieCheckResult{OK: false, Message: fmt.Sprintf("VIP 已识别，但测试曲目下载链路校验失败: %v", err)}, nil
 	}
@@ -149,6 +153,20 @@ func (k *KugouPlatform) Close() error {
 }
 
 func (k *KugouPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
+	if k == nil {
+		return nil, platform.NewUnavailableError("kugou", "track", trackID)
+	}
+	return resolveKugouDownload(
+		ctx,
+		k.thirdPartyMode,
+		k.getOfficialDownloadInfo,
+		k.getThirdPartyDownloadInfo,
+		trackID,
+		quality,
+	)
+}
+
+func (k *KugouPlatform) getOfficialDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	if k == nil || k.client == nil {
 		return nil, platform.NewUnavailableError("kugou", "track", trackID)
 	}

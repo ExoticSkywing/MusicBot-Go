@@ -96,6 +96,136 @@ func TestJBSouResolveQQTrack(t *testing.T) {
 	}
 }
 
+func TestJBSouResolveKugouTrack(t *testing.T) {
+	const (
+		inputTrackID = "055a804b8a3ccc05240d08f8ff1f7de8"
+		jbsouTrackID = "055A804B8A3CCC05240D08F8FF1F7DE8"
+	)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			http.SetCookie(w, &http.Cookie{Name: "PHPSESSID", Value: "kugou-session", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/":
+			cookie, err := r.Cookie("PHPSESSID")
+			if err != nil || cookie.Value != "kugou-session" {
+				http.Error(w, "session cookie missing", http.StatusForbidden)
+				return
+			}
+			if err := r.ParseForm(); err != nil || r.Form.Get("input") != jbsouTrackID || r.Form.Get("filter") != "id" || r.Form.Get("type") != "kugou" {
+				http.Error(w, "unexpected form", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jbsouResponse{
+				Code: http.StatusOK,
+				Data: []jbsouTrack{{SongID: jbsouTrackID, URL: "/api.php?get=url&type=kg&id=" + jbsouTrackID}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api.php":
+			http.Redirect(w, r, "/media/full_ap1005_qu320_track.mp3", http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/media/full_ap1005_qu320_track.mp3":
+			w.Header().Set("Content-Range", "bytes 0-1023/8266389")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusPartialContent)
+			probe := make([]byte, 1024)
+			copy(probe, "ID3")
+			_, _ = w.Write(probe)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	baseURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowTestMedia := func(candidate *url.URL) bool {
+		return candidate != nil && candidate.Host == baseURL.Host && strings.HasPrefix(candidate.Path, "/media/")
+	}
+	provider, err := newJBSouProvider(server.URL+"/", 2*time.Second, server.Client(), allowTestMedia)
+	if err != nil {
+		t.Fatalf("newJBSouProvider: %v", err)
+	}
+	info, err := provider.Resolve(t.Context(), "kugou", inputTrackID, platform.QualityLossless)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if info.Format != "mp3" || info.Quality != platform.QualityHigh || info.Bitrate != 320 {
+		t.Fatalf("unexpected media classification: %+v", info)
+	}
+	if info.Size != 8266389 {
+		t.Fatalf("size = %d, want 8266389", info.Size)
+	}
+	if err := info.ValidateURL(info.URL); err != nil {
+		t.Fatalf("ValidateURL: %v", err)
+	}
+}
+
+func TestJBSouResolveKuwoTrack(t *testing.T) {
+	const trackID = "41378936"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			http.SetCookie(w, &http.Cookie{Name: "PHPSESSID", Value: "kuwo-session", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/":
+			cookie, err := r.Cookie("PHPSESSID")
+			if err != nil || cookie.Value != "kuwo-session" {
+				http.Error(w, "session cookie missing", http.StatusForbidden)
+				return
+			}
+			if err := r.ParseForm(); err != nil || r.Form.Get("input") != trackID || r.Form.Get("filter") != "id" || r.Form.Get("type") != "kuwo" {
+				http.Error(w, "unexpected form", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jbsouResponse{
+				Code: http.StatusOK,
+				Data: []jbsouTrack{{SongID: trackID, URL: "/api.php?get=url&type=kw&id=" + trackID}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api.php":
+			http.Redirect(w, r, "/media/M8000009WImX34uQMp.mp3", http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/media/M8000009WImX34uQMp.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Header().Set("Content-Range", "bytes 0-1023/8525534")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusPartialContent)
+			probe := make([]byte, 1024)
+			copy(probe, "ID3")
+			_, _ = w.Write(probe)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	baseURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowTestMedia := func(candidate *url.URL) bool {
+		return candidate != nil && candidate.Host == baseURL.Host && strings.HasPrefix(candidate.Path, "/media/")
+	}
+	provider, err := newJBSouProvider(server.URL+"/", 2*time.Second, server.Client(), allowTestMedia)
+	if err != nil {
+		t.Fatalf("newJBSouProvider: %v", err)
+	}
+	info, err := provider.Resolve(t.Context(), "kuwo", trackID, platform.QualityLossless)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if info.Format != "mp3" || info.Quality != platform.QualityHigh || info.Bitrate != 320 {
+		t.Fatalf("unexpected media classification: %+v", info)
+	}
+	if info.Size != 8525534 {
+		t.Fatalf("size = %d, want 8525534", info.Size)
+	}
+	if err := info.ValidateURL(info.URL); err != nil {
+		t.Fatalf("ValidateURL: %v", err)
+	}
+}
+
 func TestLooksLikeAudio(t *testing.T) {
 	tests := []struct {
 		name string
@@ -161,5 +291,58 @@ func TestQQMusicMediaURLAllowlist(t *testing.T) {
 		if got := isQQMusicMediaURL(parsed); got != test.want {
 			t.Fatalf("isQQMusicMediaURL(%q) = %v, want %v", test.raw, got, test.want)
 		}
+	}
+}
+
+func TestKugouMediaURLAllowlist(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "https://fsandroid.kugou.com/path/track.mp3", want: true},
+		{raw: "https://trackercdn.kugou.com/path/track.flac", want: true},
+		{raw: "http://fsandroid.kugou.com/path/track.mp3", want: false},
+		{raw: "https://kugou.com.evil.example/path/track.mp3", want: false},
+		{raw: "https://example.com/path/track.mp3", want: false},
+	}
+	for _, test := range tests {
+		parsed, err := url.Parse(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isKugouMediaURL(parsed); got != test.want {
+			t.Fatalf("isKugouMediaURL(%q) = %v, want %v", test.raw, got, test.want)
+		}
+	}
+}
+
+func TestKuwoMediaURLAllowlist(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "https://kw-er.kuwo.cn/path/M800.mp3", want: true},
+		{raw: "https://er-sycdn.kuwo.cn/path/M800.mp3", want: true},
+		{raw: "http://kw-er.kuwo.cn/path/M800.mp3", want: false},
+		{raw: "https://kw-er.kuwo.cn.evil.example/path/M800.mp3", want: false},
+		{raw: "https://evil.kuwo.cn/path/M800.mp3", want: false},
+	}
+	for _, test := range tests {
+		parsed, err := url.Parse(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isKuwoMediaURL(parsed); got != test.want {
+			t.Fatalf("isKuwoMediaURL(%q) = %v, want %v", test.raw, got, test.want)
+		}
+	}
+}
+
+func TestNormalizeKugouTrackID(t *testing.T) {
+	if got := normalizeKugouTrackID("055a804b8a3ccc05240d08f8ff1f7de8"); got != "055A804B8A3CCC05240D08F8FF1F7DE8" {
+		t.Fatalf("normalizeKugouTrackID() = %q", got)
+	}
+	if got := normalizeKugouTrackID("not-a-hash"); got != "" {
+		t.Fatalf("invalid hash normalized to %q", got)
 	}
 }

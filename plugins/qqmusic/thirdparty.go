@@ -21,6 +21,10 @@ func (q *QQMusicPlatform) ConfigureThirdPartyAudio(mode thirdparty.Mode, resolve
 	q.thirdPartyResolver = resolver
 }
 
+func (q *QQMusicPlatform) thirdPartyAudioAvailable() bool {
+	return q != nil && q.thirdPartyResolver != nil && q.thirdPartyMode == thirdparty.ModeThirdPartyFirst
+}
+
 func (q *QQMusicPlatform) thirdPartyStatusLines() []string {
 	if q == nil || q.thirdPartyResolver == nil || q.thirdPartyMode == thirdparty.ModeDisabled {
 		return nil
