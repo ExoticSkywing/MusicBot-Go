@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/liuran001/MusicBot-Go/bot/platform"
+	"github.com/liuran001/MusicBot-Go/plugins/thirdparty"
 )
 
 type QQMusicPlatform struct {
-	client *Client
+	client             *Client
+	thirdPartyMode     thirdparty.Mode
+	thirdPartyResolver thirdparty.Resolver
 }
 
 func NewPlatform(client *Client) *QQMusicPlatform {
@@ -43,7 +46,8 @@ func (q *QQMusicPlatform) SupportsRecognition() bool {
 func (q *QQMusicPlatform) CheckCookie(ctx context.Context) (platform.CookieCheckResult, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	info, err := q.GetDownloadInfo(checkCtx, "0013WPvt4fQH2b", platform.QualityHiRes)
+	// Authentication checks must never be satisfied by a third-party source.
+	info, err := q.getOfficialDownloadInfo(checkCtx, "0013WPvt4fQH2b", platform.QualityHiRes)
 	if err != nil {
 		return platform.CookieCheckResult{OK: false, Message: fmt.Sprintf("Hi-Res 校验失败: %v", err)}, nil
 	}
@@ -100,6 +104,17 @@ func (q *QQMusicPlatform) Metadata() platform.Meta {
 }
 
 func (q *QQMusicPlatform) GetDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
+	return resolveQQMusicDownload(
+		ctx,
+		q.thirdPartyMode,
+		q.getOfficialDownloadInfo,
+		q.getThirdPartyDownloadInfo,
+		trackID,
+		quality,
+	)
+}
+
+func (q *QQMusicPlatform) getOfficialDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	if q.client == nil {
 		return nil, platform.NewUnavailableError("qqmusic", "track", trackID)
 	}

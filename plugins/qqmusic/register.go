@@ -7,6 +7,7 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot/config"
 	logpkg "github.com/liuran001/MusicBot-Go/bot/logger"
 	platformplugins "github.com/liuran001/MusicBot-Go/bot/platform/plugins"
+	"github.com/liuran001/MusicBot-Go/plugins/thirdparty"
 )
 
 func init() {
@@ -38,5 +39,21 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 		return nil, err
 	}
 	platform := NewPlatform(client)
+	thirdPartyMode, err := thirdparty.ParseMode(cfg.GetPluginString("qqmusic", "third_party_mode"))
+	if err != nil {
+		return nil, fmt.Errorf("qqmusic: %w", err)
+	}
+	if thirdPartyMode != thirdparty.ModeDisabled {
+		providerNames := thirdparty.ParseProviderNames(cfg.GetPluginString("qqmusic", "third_party_providers"))
+		thirdPartyTimeoutSec := cfg.GetPluginInt("qqmusic", "third_party_timeout")
+		if thirdPartyTimeoutSec <= 0 {
+			thirdPartyTimeoutSec = 5
+		}
+		resolver, resolverErr := thirdparty.NewChain(providerNames, time.Duration(thirdPartyTimeoutSec)*time.Second, logger)
+		if resolverErr != nil {
+			return nil, fmt.Errorf("qqmusic: configure third-party audio: %w", resolverErr)
+		}
+		platform.ConfigureThirdPartyAudio(thirdPartyMode, resolver)
+	}
 	return &platformplugins.Contribution{Platform: platform}, nil
 }

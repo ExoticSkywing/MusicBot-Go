@@ -18,6 +18,9 @@ type AccountStatus struct {
 	CanRenewCookie  bool
 	SupportedLogins []string
 	ExpiresAt       *time.Time
+	// Highlights are concise operational facts rendered before routine account
+	// fields in the detailed /status view.
+	Highlights []string
 }
 
 type AccountStatusProvider interface {

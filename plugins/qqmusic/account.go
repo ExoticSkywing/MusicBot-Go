@@ -43,6 +43,7 @@ func (q *QQMusicPlatform) AccountStatus(ctx context.Context) (platform.AccountSt
 	if strings.TrimSpace(parseCookieValue(cookie, "psrf_qqrefresh_token")) != "" {
 		lines = append(lines, "- refresh_token: 已配置")
 	}
+	status.Highlights = q.thirdPartyStatusLines()
 	status.Summary = strings.Join(lines, "\n")
 	return status, nil
 }

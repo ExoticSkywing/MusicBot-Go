@@ -198,7 +198,13 @@ func renderDetailedAccountStatusesHTML(ctx context.Context, statuses []platform.
 			stateText = tr(ctx, "status_logged_in")
 		}
 		header := fmt.Sprintf("%s %s（%s）", emoji, html.EscapeString(strings.TrimSpace(status.DisplayName)), html.EscapeString(stateText))
-		detailLines := make([]string, 0, 8)
+		detailLines := make([]string, 0, len(status.Highlights)+8)
+		for _, line := range status.Highlights {
+			trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+			if trimmed != "" {
+				detailLines = append(detailLines, trimmed)
+			}
+		}
 		detailLines = append(detailLines, tr(ctx, "status_field_state")+": "+stateText)
 		if strings.TrimSpace(status.Nickname) != "" {
 			detailLines = append(detailLines, tr(ctx, "status_field_nickname")+": "+strings.TrimSpace(status.Nickname))
