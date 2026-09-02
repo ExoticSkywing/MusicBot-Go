@@ -29,6 +29,7 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 		timeoutSec = 20
 	}
 	client := NewClient(cookie, time.Duration(timeoutSec)*time.Second, logger)
+	client.SetPreferIPv6(cfg.GetPluginBool(platformName, "prefer_ipv6"))
 	if err := client.SetAPIProxy(cfg.ResolveAPIProxyConfig(platformName)); err != nil {
 		return nil, err
 	}

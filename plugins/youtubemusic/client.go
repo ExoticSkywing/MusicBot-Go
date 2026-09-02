@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ type Client struct {
 	httpClient *http.Client
 	cookie     string
 	logger     bot.Logger
+	preferIPv6 bool
 
 	// visitorData is harvested from a youtube.com/watch page and sent as the
 	// X-Goog-Visitor-Id header on ANDROID_VR /player requests. Without it the
@@ -37,10 +39,26 @@ func NewClient(cookie string, timeout time.Duration, logger bot.Logger) *Client 
 		timeout = 20 * time.Second
 	}
 	return &Client{
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: newYouTubeMusicDirectHTTPClient(timeout, false),
 		cookie:     strings.TrimSpace(cookie),
 		logger:     logger,
 	}
+}
+
+// SetPreferIPv6 makes direct InnerTube requests try IPv6 first and fall back
+// to IPv4. This is useful when YouTube silently returns empty search results
+// for a rate-limited IPv4 address while the host's IPv6 address remains usable.
+// An explicitly configured API proxy still takes precedence.
+func (c *Client) SetPreferIPv6(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.preferIPv6 = enabled
+	timeout := 20 * time.Second
+	if c.httpClient != nil && c.httpClient.Timeout > 0 {
+		timeout = c.httpClient.Timeout
+	}
+	c.httpClient = newYouTubeMusicDirectHTTPClient(timeout, enabled)
 }
 
 // SetAPIProxy routes InnerTube requests through the configured platform proxy,
@@ -59,11 +77,37 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 		return err
 	}
 	if proxied == nil {
-		c.httpClient = &http.Client{Timeout: timeout}
+		c.httpClient = newYouTubeMusicDirectHTTPClient(timeout, c.preferIPv6)
 		return nil
 	}
 	c.httpClient = proxied
 	return nil
+}
+
+type youtubeMusicDialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+func newYouTubeMusicDirectHTTPClient(timeout time.Duration, preferIPv6 bool) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if preferIPv6 {
+		dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+		transport.DialContext = preferIPv6DialContext(dialer.DialContext)
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
+
+func preferIPv6DialContext(dial youtubeMusicDialContextFunc) youtubeMusicDialContextFunc {
+	return func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		ipv6Ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		conn, ipv6Err := dial(ipv6Ctx, "tcp6", address)
+		cancel()
+		if ipv6Err == nil {
+			return conn, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return dial(ctx, "tcp4", address)
+	}
 }
 
 // webContext builds the WEB_REMIX context used by search and lyrics.

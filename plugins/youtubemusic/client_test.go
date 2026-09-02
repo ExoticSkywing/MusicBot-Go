@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -48,6 +49,45 @@ func TestYouTubeMusicLiveDownloadInfo(t *testing.T) {
 				t.Fatalf("range response status=%d bytes=%d", resp.StatusCode, len(body))
 			}
 		})
+	}
+}
+
+func TestPreferIPv6DialContextUsesIPv6WhenAvailable(t *testing.T) {
+	var networks []string
+	dial := preferIPv6DialContext(func(_ context.Context, network, _ string) (net.Conn, error) {
+		networks = append(networks, network)
+		left, right := net.Pipe()
+		_ = right.Close()
+		return left, nil
+	})
+	conn, err := dial(t.Context(), "tcp", "example.test:443")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.Close()
+	if !reflect.DeepEqual(networks, []string{"tcp6"}) {
+		t.Fatalf("networks = %v, want [tcp6]", networks)
+	}
+}
+
+func TestPreferIPv6DialContextFallsBackToIPv4(t *testing.T) {
+	var networks []string
+	dial := preferIPv6DialContext(func(_ context.Context, network, _ string) (net.Conn, error) {
+		networks = append(networks, network)
+		if network == "tcp6" {
+			return nil, fmt.Errorf("IPv6 unavailable")
+		}
+		left, right := net.Pipe()
+		_ = right.Close()
+		return left, nil
+	})
+	conn, err := dial(t.Context(), "tcp", "example.test:443")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_ = conn.Close()
+	if !reflect.DeepEqual(networks, []string{"tcp6", "tcp4"}) {
+		t.Fatalf("networks = %v, want [tcp6 tcp4]", networks)
 	}
 }
 

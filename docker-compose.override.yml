@@ -7,6 +7,7 @@ services:
     networks:
       - default
       - telegram_bot_api_net
+      - youtubemusic_ipv6
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
 
@@ -21,6 +22,15 @@ networks:
   telegram_bot_api_net:
     external: true
     name: telegram_bot_api_net
+  # Dedicated IPv6 egress. The host NATs this stable ULA subnet through
+  # its public IPv6 address so YouTube Music can avoid the restricted IPv4.
+  youtubemusic_ipv6:
+    name: musicbot_youtubemusic_ipv6
+    enable_ipv4: false
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd42:6d75:7369:6301::/64
 
 volumes:
   telegram-bot-api-data:
