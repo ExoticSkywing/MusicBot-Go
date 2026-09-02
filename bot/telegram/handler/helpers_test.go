@@ -96,6 +96,13 @@ func TestBuildMusicCaption(t *testing.T) {
 	if !strings.Contains(caption, "专辑: Album") {
 		t.Fatalf("expected caption contains album line")
 	}
+	wantCopyBlock := "────────────\n点击下方复制歌名 📋\n<code>Song - Artist</code>\n\n专辑: Album"
+	if !strings.Contains(caption, wantCopyBlock) {
+		t.Fatalf("expected caption contains copy block before album, got %q", caption)
+	}
+	if strings.Contains(caption, "</b>\n\n────────────") {
+		t.Fatalf("expected no blank line between heading and divider, got %q", caption)
+	}
 	if !strings.Contains(caption, "#HiRes #flac") {
 		t.Fatalf("expected caption contains quality tag before format tag, got %q", caption)
 	}
@@ -179,6 +186,9 @@ func TestBuildMusicCaptionEscapesHTMLAndKeepsLinks(t *testing.T) {
 	}
 	if !strings.Contains(caption, `<a href="https://album.example/?q=1&amp;x=2">Album &amp; More</a>`) {
 		t.Fatalf("expected escaped album link, got %q", caption)
+	}
+	if !strings.Contains(caption, `<code>Song &lt;Test&gt; - A &amp; B/C&lt;D&gt;</code>`) {
+		t.Fatalf("expected escaped plain-text copy value, got %q", caption)
 	}
 }
 

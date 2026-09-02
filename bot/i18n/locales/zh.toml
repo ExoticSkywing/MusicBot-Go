@@ -98,6 +98,7 @@ err_playlist_not_found = "未找到歌单"
 
 # --- music info text ---
 album_label = "专辑: "
+copy_song_name_hint = "点击下方复制歌名 📋"
 quality_tag_standard = "标准音质"
 quality_tag_high = "高品质"
 quality_tag_lossless = "无损"

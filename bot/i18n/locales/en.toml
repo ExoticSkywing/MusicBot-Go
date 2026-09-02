@@ -115,6 +115,7 @@ err_playlist_not_found = "Playlist not found"
 
 # --- music info ---
 album_label = "Album: "
+copy_song_name_hint = "Tap below to copy the song name 📋"
 # Quality hashtags in the audio caption (single tokens — no spaces, hashtag-safe).
 quality_tag_standard = "Standard"
 quality_tag_high = "HiFi"

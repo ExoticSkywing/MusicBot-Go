@@ -887,10 +887,19 @@ func buildMusicCaption(ctx context.Context, manager platform.Manager, songInfo *
 	if strings.TrimSpace(songInfo.SongAlbum) != "" {
 		albumLine = fmt.Sprintf("%s%s\n", tr(ctx, "album_label"), albumHTML)
 	}
+	copyLine := ""
+	if strings.TrimSpace(songInfo.SongName) != "" {
+		copyText := songNameText
+		if strings.TrimSpace(songInfo.SongArtists) != "" {
+			copyText += " - " + artistsText
+		}
+		copyLine = fmt.Sprintf("────────────\n%s\n<code>%s</code>\n\n", tr(ctx, "copy_song_name_hint"), copyText)
+	}
 
-	return fmt.Sprintf("<b>「%s」- %s</b>\n%s<blockquote>%s%s\n</blockquote>via @%s",
+	return fmt.Sprintf("<b>「%s」- %s</b>\n%s%s<blockquote>%s%s\n</blockquote>via @%s",
 		songNameHTML,
 		artistsHTML,
+		copyLine,
 		albumLine,
 		infoLine,
 		tags,
