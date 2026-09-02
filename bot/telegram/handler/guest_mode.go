@@ -64,25 +64,26 @@ func (h *GuestModeHandler) Handle(ctx context.Context, b *telego.Bot, update *te
 	// username never leaks into the search keyword.
 	content := strings.TrimSpace(stripBotMention(message.Text, message.Entities, h.BotName))
 
+	// Replying to supported media with @bot (no text) triggers recognition
+	// directly, without needing a "识曲" keyword. Check this before using the
+	// media caption as a song query.
+	if content == "" && hasRecognitionMedia(message.ReplyToMessage) {
+		h.handleGuestRecognize(ctx, b, message, guestQueryID)
+		return
+	}
+
+	// Recognition is keyed off the literal keyword and needs replied media,
+	// so route it before the empty-content guard.
+	if isShazamKeyword(content) {
+		h.handleGuestRecognize(ctx, b, message, guestQueryID)
+		return
+	}
+
 	// When the mention carries no payload, fall back to the replied message's
 	// embedded link / text / caption: "回复一条消息 + @bot" should act on that
 	// message (e.g. replying to a bot-sent song message links to its track URL).
 	if content == "" {
 		content = strings.TrimSpace(repliedMessageQuery(message.ReplyToMessage))
-	}
-
-	// Replying to a voice message with @bot (no text) triggers recognition
-	// directly, without needing a "识曲" keyword.
-	if content == "" && message.ReplyToMessage != nil && message.ReplyToMessage.Voice != nil {
-		h.handleGuestRecognize(ctx, b, message, guestQueryID)
-		return
-	}
-
-	// Recognition is keyed off the literal keyword and needs the replied voice,
-	// so route it before the empty-content guard.
-	if isShazamKeyword(content) {
-		h.handleGuestRecognize(ctx, b, message, guestQueryID)
-		return
 	}
 
 	if content == "" {

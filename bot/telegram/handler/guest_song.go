@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -372,41 +373,31 @@ func (h *GuestModeHandler) runGuestRecognize(ctx context.Context, b *telego.Bot,
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognize_service_unavailable"), nil, "")
 		return
 	}
-	voiceMessage := message.ReplyToMessage
-	if voiceMessage == nil || voiceMessage.Voice == nil {
-		if message.Voice != nil {
-			voiceMessage = message
-		} else {
-			_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_reply_voice_message"), nil, "")
-			return
-		}
+	media, ok := recognitionMediaForMessage(message)
+	if !ok {
+		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_reply_voice_message"), nil, "")
+		return
 	}
 	if requesterID, _ := guestRequester(message); !h.ResourceLimiter.AllowFor(ActionRecognize, requesterID, message.Chat.ID, "") {
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "err_rate_limited"), nil, "")
 		return
 	}
-	fileBot := b
-	if h.DownloadBot != nil {
-		fileBot = h.DownloadBot
-	}
-	fileInfo, err := fileBot.GetFile(ctx, &telego.GetFileParams{FileID: voiceMessage.Voice.FileID})
-	if err != nil || fileInfo == nil || fileInfo.FilePath == "" {
-		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_get_voice_failed"), nil, "")
-		return
-	}
-	if fileInfo.FileSize > 20*1024*1024 {
-		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_voice_too_large"), nil, "")
-		return
-	}
 	_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_downloading_voice"), nil, "")
-	audioData, err := downloadTelegramFile(ctx, fileBot, fileInfo.FilePath)
+	result, _, err := recognizeTelegramMedia(ctx, b, h.DownloadBot, h.RecognizeService, media)
 	if err != nil {
-		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_download_voice_failed"), nil, "")
+		switch {
+		case errors.Is(err, errRecognitionMediaTooLarge):
+			_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_voice_too_large"), nil, "")
+		case errors.Is(err, errRecognitionGetMedia):
+			_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_get_voice_failed"), nil, "")
+		case errors.Is(err, errRecognitionDownloadMedia):
+			_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_download_voice_failed"), nil, "")
+		default:
+			_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognize_failed_retry"), nil, "")
+		}
 		return
 	}
-	_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognizing"), nil, "")
-	result, err := h.RecognizeService.Recognize(ctx, audioData)
-	if err != nil || result == nil || strings.TrimSpace(result.TrackID) == "" || strings.TrimSpace(result.Platform) == "" {
+	if result == nil || strings.TrimSpace(result.TrackID) == "" || strings.TrimSpace(result.Platform) == "" {
 		_ = h.editGuestInlineText(ctx, b, inlineMessageID, tr(ctx, "guest_recognize_failed_short"), nil, "")
 		return
 	}

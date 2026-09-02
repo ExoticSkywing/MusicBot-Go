@@ -36,6 +36,20 @@ func (r *Recognizer) Recognize(ctx context.Context, audioData []byte) (*recogniz
 		return nil, errors.New("recognizer not configured")
 	}
 	result, err := r.service.Recognize(ctx, audioData)
+	return mapRecognizeResult(result, err)
+}
+
+// RecognizeFile implements recognize.FileService for local Telegram Bot API
+// paths, keeping large uploads out of Go memory.
+func (r *Recognizer) RecognizeFile(ctx context.Context, filePath string) (*recognize.Result, error) {
+	if r == nil || r.service == nil {
+		return nil, errors.New("recognizer not configured")
+	}
+	result, err := r.service.RecognizeFile(ctx, filePath)
+	return mapRecognizeResult(result, err)
+}
+
+func mapRecognizeResult(result *RecognizeResult, err error) (*recognize.Result, error) {
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -198,6 +199,26 @@ func (s *RecognizeService) Recognize(ctx context.Context, audioData []byte) (*Re
 	if err != nil {
 		return nil, err
 	}
+	return s.recognizePCM(ctx, pcm)
+}
+
+// RecognizeFile decodes directly from a local media file. This is used with a
+// local Telegram Bot API so large audio/video uploads are never materialized in
+// Go memory; ffmpeg still reads only the short fingerprint window.
+func (s *RecognizeService) RecognizeFile(ctx context.Context, filePath string) (*RecognizeResult, error) {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return nil, errors.New("recognize: empty media file path")
+	}
+
+	pcm, err := decodePCMFile(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+	return s.recognizePCM(ctx, pcm)
+}
+
+func (s *RecognizeService) recognizePCM(ctx context.Context, pcm []float32) (*RecognizeResult, error) {
 	if len(pcm) < afpMinSamples {
 		return nil, fmt.Errorf("recognize: audio too short, need >= %d samples (~10s at 48kHz), got %d", afpMinSamples, len(pcm))
 	}
@@ -299,6 +320,17 @@ func loadAFPWasm() ([]byte, error) {
 // decodePCM converts arbitrary audio bytes to mono float32 PCM at 48kHz using
 // ffmpeg (reading from stdin, writing f32le to stdout).
 func decodePCM(ctx context.Context, audioData []byte) ([]float32, error) {
+	return decodePCMInput(ctx, "pipe:0", bytes.NewReader(audioData))
+}
+
+// decodePCMFile is the path-based counterpart of decodePCM. It lets ffmpeg
+// seek/read the mounted Telegram file itself instead of first copying the
+// entire upload into a []byte.
+func decodePCMFile(ctx context.Context, filePath string) ([]float32, error) {
+	return decodePCMInput(ctx, filePath, nil)
+}
+
+func decodePCMInput(ctx context.Context, input string, stdin io.Reader) ([]float32, error) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return nil, fmt.Errorf("recognize: ffmpeg not found: %w", err)
@@ -309,14 +341,15 @@ func decodePCM(ctx context.Context, audioData []byte) ([]float32, error) {
 
 	cmd := exec.CommandContext(decodeCtx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
-		"-i", "pipe:0",
+		"-nostdin",
+		"-i", input,
 		"-t", strconv.Itoa(afpDecodeSeconds),
 		"-ac", "1",
 		"-ar", strconv.Itoa(afpSampleRate),
 		"-f", "f32le",
 		"pipe:1",
 	)
-	cmd.Stdin = bytes.NewReader(audioData)
+	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

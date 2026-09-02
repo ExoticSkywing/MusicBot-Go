@@ -104,7 +104,7 @@ wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 | `/search <关键词>` | 搜索并选择下载 |
 | `/lyric <URL>` | 获取歌词 |
 | `/fav` | 收藏歌曲 / 查看收藏列表 |
-| `/recognize` | 回复一条语音消息识别歌曲（需 `EnableRecognize`） |
+| `/recognize` | 从语音、音频或视频中识别歌曲；私聊可直接发送，群聊请回复媒体（需 `EnableRecognize`） |
 | `/settings` | 默认平台、音质与歌词格式（支持私聊 / 群聊维度） |
 | `/status` | 查看统计与各平台账号状态 |
 | `/queue` | 查看当前下载、发送和 Telegram API 队列 |

@@ -17,7 +17,15 @@ import (
 	"github.com/mymmrac/telego"
 )
 
-// RecognizeHandler handles voice recognition.
+const maxRemoteRecognitionFileSize int64 = 20 * 1024 * 1024
+
+var (
+	errRecognitionMediaTooLarge = errors.New("recognition media exceeds remote download limit")
+	errRecognitionGetMedia      = errors.New("failed to get recognition media")
+	errRecognitionDownloadMedia = errors.New("failed to download recognition media")
+)
+
+// RecognizeHandler handles audio recognition from Telegram media.
 type RecognizeHandler struct {
 	CacheDir         string
 	Music            *MusicHandler
@@ -35,20 +43,17 @@ func (h *RecognizeHandler) Handle(ctx context.Context, b *telego.Bot, update *te
 	message := update.Message
 	chatID := message.Chat.ID
 	replyID := message.MessageID
-	voiceMessage := message.ReplyToMessage
-	if voiceMessage != nil && voiceMessage.Voice != nil {
-		replyID = voiceMessage.MessageID
-	} else if message.Voice != nil {
-		voiceMessage = message
-	} else {
+	media, ok := recognitionMediaForMessage(message)
+	if !ok {
 		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_reply_voice_note"))
 		return
 	}
+	replyID = media.message.MessageID
 
-	if h.CacheDir == "" {
-		h.CacheDir = "./cache"
+	if h.RecognizeService == nil {
+		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_service_unavailable_admin"))
+		return
 	}
-	ensureDir(h.CacheDir)
 
 	// Recognition is the single most expensive op (Telegram file download +
 	// ffmpeg transcode + external fingerprint API, then a chained download), so
@@ -63,39 +68,21 @@ func (h *RecognizeHandler) Handle(ctx context.Context, b *telego.Bot, update *te
 		return
 	}
 
-	fileBot := b
-	if h.DownloadBot != nil {
-		fileBot = h.DownloadBot
-	}
-	fileInfo, err := fileBot.GetFile(ctx, &telego.GetFileParams{FileID: voiceMessage.Voice.FileID})
-	if err != nil || fileInfo == nil || fileInfo.FilePath == "" {
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_get_voice_failed"))
-		return
-	}
-	if fileInfo.FileSize > 20*1024*1024 {
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_voice_too_large"))
-		return
-	}
-	audioData, err := downloadTelegramFile(ctx, fileBot, fileInfo.FilePath)
+	result, inputSize, err := recognizeTelegramMedia(ctx, b, h.DownloadBot, h.RecognizeService, media)
 	if err != nil {
 		if h.Logger != nil {
-			h.Logger.Warn("failed to download voice", "file_path", fileInfo.FilePath, "error", err)
+			h.Logger.Warn("failed to recognize media", "media_type", media.kind, "file_size", inputSize, "error", err)
 		}
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_download_voice_failed"))
-		return
-	}
-
-	if h.RecognizeService == nil {
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_service_unavailable_admin"))
-		return
-	}
-
-	result, err := h.RecognizeService.Recognize(ctx, audioData)
-	if err != nil {
-		if h.Logger != nil {
-			h.Logger.Error("recognition service error", "error", err, "audio_size", len(audioData))
+		switch {
+		case errors.Is(err, errRecognitionMediaTooLarge):
+			sendText(ctx, b, chatID, replyID, tr(ctx, "guest_voice_too_large"))
+		case errors.Is(err, errRecognitionGetMedia):
+			sendText(ctx, b, chatID, replyID, tr(ctx, "guest_get_voice_failed"))
+		case errors.Is(err, errRecognitionDownloadMedia):
+			sendText(ctx, b, chatID, replyID, tr(ctx, "guest_download_voice_failed"))
+		default:
+			sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_failed_retry"))
 		}
-		sendText(ctx, b, chatID, replyID, tr(ctx, "guest_recognize_failed_retry"))
 		return
 	}
 
@@ -125,8 +112,178 @@ func (h *RecognizeHandler) Handle(ctx context.Context, b *telego.Bot, update *te
 	}
 
 	if h.Music != nil {
-		h.Music.dispatch(ctx, b, voiceMessage, result.Platform, result.TrackID, "")
+		h.Music.dispatch(ctx, b, media.message, result.Platform, result.TrackID, "")
 	}
+}
+
+type recognitionMedia struct {
+	message  *telego.Message
+	fileID   string
+	fileSize int64
+	kind     string
+}
+
+// recognitionMediaForMessage prefers the replied media, preserving the
+// established "/recognize as a reply" behavior, and otherwise accepts media on
+// the command/current message (including automatic recognition in private
+// chats).
+func recognitionMediaForMessage(message *telego.Message) (recognitionMedia, bool) {
+	if message == nil {
+		return recognitionMedia{}, false
+	}
+	if media, ok := recognitionMediaFromMessage(message.ReplyToMessage); ok {
+		return media, true
+	}
+	return recognitionMediaFromMessage(message)
+}
+
+func recognitionMediaFromMessage(message *telego.Message) (recognitionMedia, bool) {
+	if message == nil {
+		return recognitionMedia{}, false
+	}
+	switch {
+	case message.Voice != nil && strings.TrimSpace(message.Voice.FileID) != "":
+		return recognitionMedia{message: message, fileID: message.Voice.FileID, fileSize: message.Voice.FileSize, kind: "voice"}, true
+	case message.Audio != nil && strings.TrimSpace(message.Audio.FileID) != "":
+		return recognitionMedia{message: message, fileID: message.Audio.FileID, fileSize: message.Audio.FileSize, kind: "audio"}, true
+	case message.Video != nil && strings.TrimSpace(message.Video.FileID) != "":
+		return recognitionMedia{message: message, fileID: message.Video.FileID, fileSize: message.Video.FileSize, kind: "video"}, true
+	case message.VideoNote != nil && strings.TrimSpace(message.VideoNote.FileID) != "":
+		return recognitionMedia{message: message, fileID: message.VideoNote.FileID, fileSize: int64(message.VideoNote.FileSize), kind: "video_note"}, true
+	case message.Document != nil && recognizableMediaDocument(message.Document):
+		return recognitionMedia{message: message, fileID: message.Document.FileID, fileSize: message.Document.FileSize, kind: "document"}, true
+	default:
+		return recognitionMedia{}, false
+	}
+}
+
+func recognizableMediaDocument(document *telego.Document) bool {
+	if document == nil || strings.TrimSpace(document.FileID) == "" {
+		return false
+	}
+	mimeType := strings.ToLower(strings.TrimSpace(strings.SplitN(document.MimeType, ";", 2)[0]))
+	if strings.HasPrefix(mimeType, "audio/") || strings.HasPrefix(mimeType, "video/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(document.FileName))) {
+	case ".aac", ".ac3", ".aiff", ".alac", ".amr", ".ape", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".wma",
+		".3gp", ".avi", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".ogv", ".ts", ".webm", ".wmv":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasRecognitionMedia(message *telego.Message) bool {
+	_, ok := recognitionMediaFromMessage(message)
+	return ok
+}
+
+type recognitionInput struct {
+	localPath string
+	data      []byte
+	fileSize  int64
+}
+
+func recognizeTelegramMedia(ctx context.Context, primaryBot, fallbackBot *telego.Bot, service recognize.Service, media recognitionMedia) (*recognize.Result, int64, error) {
+	input, err := loadTelegramRecognitionInput(ctx, primaryBot, fallbackBot, media)
+	if err != nil {
+		return nil, media.fileSize, err
+	}
+	if input.localPath != "" {
+		if fileService, ok := service.(recognize.FileService); ok {
+			result, err := fileService.RecognizeFile(ctx, input.localPath)
+			return result, input.fileSize, err
+		}
+		data, err := readFileLimited(input.localPath, maxRemoteRecognitionFileSize)
+		if err != nil {
+			return nil, input.fileSize, err
+		}
+		input.data = data
+	}
+	result, err := service.Recognize(ctx, input.data)
+	return result, input.fileSize, err
+}
+
+func loadTelegramRecognitionInput(ctx context.Context, primaryBot, fallbackBot *telego.Bot, media recognitionMedia) (recognitionInput, error) {
+	bots := make([]*telego.Bot, 0, 2)
+	seen := make(map[*telego.Bot]struct{}, 2)
+	for _, bot := range []*telego.Bot{primaryBot, fallbackBot} {
+		if bot == nil {
+			continue
+		}
+		if _, ok := seen[bot]; ok {
+			continue
+		}
+		seen[bot] = struct{}{}
+		bots = append(bots, bot)
+	}
+	if len(bots) == 0 {
+		return recognitionInput{}, fmt.Errorf("%w: bot client is nil", errRecognitionGetMedia)
+	}
+
+	var lastErr error
+	gotFile := false
+	tooLarge := false
+	for _, bot := range bots {
+		fileInfo, err := bot.GetFile(ctx, &telego.GetFileParams{FileID: media.fileID})
+		if err != nil || fileInfo == nil || strings.TrimSpace(fileInfo.FilePath) == "" {
+			if err == nil {
+				err = errors.New("empty Telegram file path")
+			}
+			lastErr = err
+			continue
+		}
+		gotFile = true
+		filePath := strings.TrimSpace(fileInfo.FilePath)
+		fileSize := fileInfo.FileSize
+		if fileSize <= 0 {
+			fileSize = media.fileSize
+		}
+
+		if filepath.IsAbs(filePath) {
+			info, statErr := os.Stat(filePath)
+			if statErr == nil && info.Mode().IsRegular() {
+				if fileSize <= 0 {
+					fileSize = info.Size()
+				}
+				return recognitionInput{localPath: filePath, fileSize: fileSize}, nil
+			}
+			if statErr == nil {
+				statErr = errors.New("Telegram file path is not a regular file")
+			}
+			lastErr = statErr
+			continue
+		}
+
+		if fileSize > maxRemoteRecognitionFileSize {
+			tooLarge = true
+			continue
+		}
+		data, downloadErr := downloadTelegramFile(ctx, bot, filePath)
+		if downloadErr != nil {
+			if errors.Is(downloadErr, errRecognitionMediaTooLarge) {
+				tooLarge = true
+			}
+			lastErr = downloadErr
+			continue
+		}
+		if fileSize <= 0 {
+			fileSize = int64(len(data))
+		}
+		return recognitionInput{data: data, fileSize: fileSize}, nil
+	}
+
+	if tooLarge {
+		return recognitionInput{}, errRecognitionMediaTooLarge
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no usable Telegram file source")
+	}
+	if !gotFile {
+		return recognitionInput{}, fmt.Errorf("%w: %v", errRecognitionGetMedia, lastErr)
+	}
+	return recognitionInput{}, fmt.Errorf("%w: %v", errRecognitionDownloadMedia, lastErr)
 }
 
 func sendText(ctx context.Context, b *telego.Bot, chatID int64, replyID int, text string) {
@@ -193,10 +350,19 @@ func downloadTelegramFile(ctx context.Context, b *telego.Bot, filePath string) (
 			_ = resp.Body.Close()
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		if resp.ContentLength > maxRemoteRecognitionFileSize {
+			_ = resp.Body.Close()
+			lastErr = errRecognitionMediaTooLarge
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteRecognitionFileSize+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			lastErr = err
+			continue
+		}
+		if int64(len(data)) > maxRemoteRecognitionFileSize {
+			lastErr = errRecognitionMediaTooLarge
 			continue
 		}
 		return data, nil
@@ -205,4 +371,20 @@ func downloadTelegramFile(ctx context.Context, b *telego.Bot, filePath string) (
 		lastErr = errors.New("download failed")
 	}
 	return nil, lastErr
+}
+
+func readFileLimited(filePath string, maxSize int64) ([]byte, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errRecognitionDownloadMedia, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errRecognitionDownloadMedia, err)
+	}
+	if int64(len(data)) > maxSize {
+		return nil, errRecognitionMediaTooLarge
+	}
+	return data, nil
 }

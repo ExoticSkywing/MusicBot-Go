@@ -76,7 +76,7 @@ func mentionTokenPresent(text, botName string) bool {
 }
 
 // Handle dispatches a "<keyword> @bot" message to the matching feature handler,
-// classifying exactly like GuestModeHandler.Handle: voice-reply / 识曲 → recognize,
+// classifying exactly like GuestModeHandler.Handle: media-reply / 识曲 → recognize,
 // 歌词 → lyric, otherwise → song-or-search.
 func (r *MentionRouter) Handle(ctx context.Context, b *telego.Bot, update *telego.Update) {
 	if update == nil || update.Message == nil {
@@ -88,9 +88,9 @@ func (r *MentionRouter) Handle(ctx context.Context, b *telego.Bot, update *teleg
 		return
 	}
 
-	// Replying to a voice with just "@bot" (no payload) triggers recognition,
+	// Replying to supported media with just "@bot" (no payload) triggers recognition,
 	// same as guest mode.
-	if content == "" && message.ReplyToMessage != nil && message.ReplyToMessage.Voice != nil {
+	if content == "" && hasRecognitionMedia(message.ReplyToMessage) {
 		r.dispatchRecognize(ctx, b, message)
 		return
 	}
@@ -203,7 +203,7 @@ func (r *MentionRouter) isDirectDownload(ctx context.Context, content string) bo
 }
 
 // dispatchRecognize forwards the original message to the recognize handler, which
-// reads the replied voice itself.
+// reads the replied media itself.
 func (r *MentionRouter) dispatchRecognize(ctx context.Context, b *telego.Bot, message *telego.Message) {
 	if r.Recognize == nil {
 		sendText(ctx, b, message.Chat.ID, message.MessageID, tr(ctx, "guest_recognize_service_unavailable"))

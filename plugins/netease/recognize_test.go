@@ -61,6 +61,21 @@ func TestRecognizeFingerprint(t *testing.T) {
 		t.Fatalf("fingerprint mismatch:\n  got=%s\n want=%s", first, golden)
 	}
 
+	// Reading the same media through the local-path pipeline must produce the
+	// identical fingerprint. This is the production path when a local Telegram
+	// Bot API volume is mounted into the bot container.
+	pathPCM, err := decodePCMFile(ctx, filepath.Join("testdata", "recognize_tone.mp3"))
+	if err != nil {
+		t.Fatalf("decodePCMFile: %v", err)
+	}
+	fromPath, err := svc.encodeFingerprint(ctx, pathPCM)
+	if err != nil {
+		t.Fatalf("encodeFingerprint from file: %v", err)
+	}
+	if fromPath != first {
+		t.Fatalf("path fingerprint differs from byte pipeline:\n bytes=%s\n  path=%s", first, fromPath)
+	}
+
 	// The fingerprint must be deterministic across repeated calls on the same
 	// engine instance (verifies WASM state is properly reset per call).
 	second, err := svc.encodeFingerprint(ctx, pcm)

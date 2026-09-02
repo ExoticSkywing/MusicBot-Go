@@ -82,7 +82,7 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 	bh.Handle(r.wrapMessage(r.Search), matchCommandFunc(botName, "search"))
 	bh.Handle(r.wrapMessage(r.Lyric), matchCommandFunc(botName, "lyric"))
 	if r.Recognize != nil {
-		bh.Handle(r.wrapMessage(r.Recognize), matchCommandFunc(botName, "recognize"))
+		bh.Handle(r.wrapMessage(r.Recognize), matchRecognizeCommandFunc(botName))
 	}
 	bh.Handle(r.wrapMessage(r.About), matchCommandFunc(botName, "about"))
 	bh.Handle(r.wrapMessage(r.Status), matchCommandFunc(botName, "status"))
@@ -127,10 +127,7 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 
 	if r.Recognize != nil {
 		bh.Handle(r.wrapMessage(r.Recognize), func(ctx context.Context, update telego.Update) bool {
-			if update.Message == nil || update.Message.Voice == nil {
-				return false
-			}
-			return update.Message.Chat.Type == "private"
+			return isPrivateRecognitionMedia(update.Message)
 		})
 	}
 
@@ -526,6 +523,30 @@ func matchCommandFunc(botName, cmd string) th.Predicate {
 		}
 		return command == cmd
 	}
+}
+
+// matchRecognizeCommandFunc also accepts /recognize in a media caption. That
+// makes an explicitly captioned upload work in groups without enabling noisy
+// automatic recognition for every group media message.
+func matchRecognizeCommandFunc(botName string) th.Predicate {
+	textMatcher := matchCommandFunc(botName, "recognize")
+	return func(ctx context.Context, update telego.Update) bool {
+		if textMatcher(ctx, update) {
+			return true
+		}
+		if update.Message == nil || update.Message.Caption == "" {
+			return false
+		}
+		message := *update.Message
+		message.Text = message.Caption
+		message.Entities = message.CaptionEntities
+		update.Message = &message
+		return textMatcher(ctx, update)
+	}
+}
+
+func isPrivateRecognitionMedia(message *telego.Message) bool {
+	return message != nil && message.Chat.Type == telego.ChatTypePrivate && hasRecognitionMedia(message)
 }
 
 func hasSearchPlatformSuffix(text string, manager platform.Manager) bool {
