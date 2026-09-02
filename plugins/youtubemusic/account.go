@@ -10,7 +10,9 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 )
 
-const youtubeMusicCookieCheckVideoID = "dQw4w9WgXcQ"
+// Use an ordinary music result rather than YouTube's ubiquitous test video,
+// which can remain playable even when normal music requests are bot-blocked.
+const youtubeMusicCookieCheckVideoID = "UQ8cXH7qbVU"
 
 func (p *YouTubeMusicPlatform) SupportedLoginMethods() []string {
 	return []string{"status", "check"}

@@ -5,11 +5,8 @@ package youtubemusic
 // a third-party SDK, matching how every other platform plugin in this project
 // implements its own HTTP client.
 //
-// Two client "contexts" are used:
-//   - WEB_REMIX  : music.youtube.com search / metadata / lyrics
-//   - IOS        : the /player call for DOWNLOAD, because the iOS client context
-//     returns adaptiveFormats with DIRECT googlevideo URLs (no signatureCipher),
-//     sidestepping the web client's n-sig / cipher problem entirely.
+// WEB_REMIX is used for search and lyrics. Downloads use a short ordered list of
+// player contexts that return direct googlevideo URLs without JS deciphering.
 const (
 	innerTubeBaseMusic = "https://music.youtube.com/youtubei/v1"
 	innerTubeBaseVideo = "https://www.youtube.com/youtubei/v1"
@@ -21,17 +18,16 @@ const (
 	webRemixClientName    = "WEB_REMIX"
 	webRemixClientVersion = "1.20240101.01.00"
 
-	// ANDROID_VR is the client yt-dlp uses by default for downloads. Crucially,
-	// its googlevideo stream URLs are NOT behind the PO Token wall that the IOS
-	// client's URLs are: on a YouTube-flagged IP the IOS stream only serves the
-	// first ~1 MiB (offset!=0 -> HTTP 403), whereas the ANDROID_VR stream serves
-	// arbitrary byte ranges (verified 206 at any offset). It also returns direct,
-	// un-ciphered URLs (REQUIRE_JS_PLAYER is false for this client), so no
-	// signature/n-sig decipher is needed. Source of truth = yt-dlp master
-	// yt_dlp/extractor/youtube/_base.py INNERTUBE_CLIENTS['android_vr']. When this
-	// goes stale (player 400/“Sign in to confirm you’re not a bot”), re-copy the
-	// clientVersion / userAgent / device fields from yt-dlp.
+	// VISIONOS currently returns direct, un-ciphered audio URLs for ordinary music
+	// videos without requiring a PO token. ANDROID_VR remains the fallback because
+	// YouTube changes the availability of individual InnerTube clients frequently.
+	visionOSClientName    = "VISIONOS"
+	visionOSClientNumber  = "101"
+	visionOSClientVersion = "1.02"
+	visionOSUserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+
 	androidVRClientName    = "ANDROID_VR"
+	androidVRClientNumber  = "28"
 	androidVRClientVersion = "1.62.27"
 	androidVRUserAgent     = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
 
@@ -48,10 +44,10 @@ const (
 
 // innertubeContext is the "context" object every InnerTube request carries.
 type innertubeContext struct {
-	Client     clientInfo       `json:"client"`
-	ThirdParty *thirdPartyInfo  `json:"thirdParty,omitempty"`
-	User       *userInfo        `json:"user,omitempty"`
-	Request    *requestInfo     `json:"request,omitempty"`
+	Client     clientInfo      `json:"client"`
+	ThirdParty *thirdPartyInfo `json:"thirdParty,omitempty"`
+	User       *userInfo       `json:"user,omitempty"`
+	Request    *requestInfo    `json:"request,omitempty"`
 }
 
 type thirdPartyInfo struct {
@@ -78,12 +74,12 @@ type clientInfo struct {
 	OsName            string `json:"osName,omitempty"`
 	OsVersion         string `json:"osVersion,omitempty"`
 	AndroidSDKVersion int    `json:"androidSdkVersion,omitempty"`
-	// UserAgent is carried inside the client context for the ANDROID_VR client,
-	// matching yt-dlp. Omitted for clients that don't set it.
+	// UserAgent is carried inside player client contexts that require it.
 	UserAgent       string `json:"userAgent,omitempty"`
+	TimeZone        string `json:"timeZone,omitempty"`
 	UtcOffsetMinute *int   `json:"utcOffsetMinutes,omitempty"`
-	// VisitorData is the harvested Visitor ID, echoed inside the client context
-	// (in addition to the X-Goog-Visitor-Id header) for ANDROID_VR /player.
+	// VisitorData is echoed inside player client contexts in addition to the
+	// X-Goog-Visitor-Id header.
 	VisitorData string `json:"visitorData,omitempty"`
 }
 
@@ -125,6 +121,10 @@ type browseRequest struct {
 // --- player response (download) ---
 
 type playerResponse struct {
+	// PlayerUserAgent records the client profile that produced this response so
+	// the googlevideo request uses the same identity as the /player request.
+	PlayerUserAgent string `json:"-"`
+
 	PlayabilityStatus struct {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
@@ -152,17 +152,17 @@ type playerResponse struct {
 }
 
 type streamFormat struct {
-	Itag             int    `json:"itag"`
-	URL              string `json:"url"`
-	MimeType         string `json:"mimeType"`
-	Bitrate          int    `json:"bitrate"`
-	AverageBitrate   int    `json:"averageBitrate"`
-	ContentLength    string `json:"contentLength"`
-	AudioQuality     string `json:"audioQuality"`
-	AudioSampleRate  string `json:"audioSampleRate"`
-	AudioChannels    int    `json:"audioChannels"`
-	SignatureCipher  string `json:"signatureCipher"`
-	Quality          string `json:"quality"`
+	Itag            int    `json:"itag"`
+	URL             string `json:"url"`
+	MimeType        string `json:"mimeType"`
+	Bitrate         int    `json:"bitrate"`
+	AverageBitrate  int    `json:"averageBitrate"`
+	ContentLength   string `json:"contentLength"`
+	AudioQuality    string `json:"audioQuality"`
+	AudioSampleRate string `json:"audioSampleRate"`
+	AudioChannels   int    `json:"audioChannels"`
+	SignatureCipher string `json:"signatureCipher"`
+	Quality         string `json:"quality"`
 }
 
 type thumbnail struct {
