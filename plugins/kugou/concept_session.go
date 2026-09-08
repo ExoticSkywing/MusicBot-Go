@@ -20,11 +20,12 @@ type ConceptSessionManager struct {
 		Error(string, ...interface{})
 		Debug(string, ...interface{})
 	}
-	persistFunc func(map[string]string) error
-	client      *ConceptAPIClient
-	state       conceptSession
-	pollCancel  context.CancelFunc
-	pollSeq     uint64
+	persistFunc  func(map[string]string) error
+	client       *ConceptAPIClient
+	verification *conceptVerificationCoordinator
+	state        conceptSession
+	pollCancel   context.CancelFunc
+	pollSeq      uint64
 	// daemonCancel 停止后台自动续期守护协程；nil 表示未运行。受 mu 保护。
 	daemonCancel  context.CancelFunc
 	daemonStarted bool
@@ -42,6 +43,7 @@ func NewConceptSessionManager(logger interface {
 }, persist func(map[string]string) error, initial conceptSession) *ConceptSessionManager {
 	mgr := &ConceptSessionManager{logger: logger, persistFunc: persist, state: initial}
 	mgr.client = NewConceptAPIClient("", mgr)
+	mgr.verification = newConceptVerificationCoordinator(mgr)
 	return mgr
 }
 

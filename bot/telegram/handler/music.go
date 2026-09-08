@@ -835,6 +835,17 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 			h.Logger.Error("failed to send music", "platform", platformName, "trackID", trackID, "error", downloadErrorForLog(err))
 		}
 		text := buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), userVisibleDownloadError(ctx, err))
+		if isVerificationRequiredError(err) {
+			// Verification can be raised before a status message exists for silent
+			// group auto-fetches. Always surface it, and bypass progress-edit
+			// throttling when replacing an existing status message.
+			if status.Message() == nil {
+				status.Upsert(text)
+			} else {
+				status.EditWithMarkup(text, nil)
+			}
+			return
+		}
 		status.Edit(text)
 	}
 	handleInvalidCachedFileID := func(err error, cacheQuality string) bool {
@@ -1017,6 +1028,7 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		info, err = h.loadDownloadInfo(ctx, status, platformName, trackID, quality)
 	}
 	if err != nil {
+		sendFailed(err)
 		return err
 	}
 

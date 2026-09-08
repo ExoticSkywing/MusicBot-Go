@@ -78,5 +78,8 @@ func (m *ConceptSessionManager) StopAutoRefreshDaemon() {
 // Close 实现 io.Closer，供应用关闭或 /reload 丢弃旧实例时停止后台续期协程。
 func (m *ConceptSessionManager) Close() error {
 	m.StopAutoRefreshDaemon()
+	if m.verification != nil {
+		m.verification.Close()
+	}
 	return nil
 }

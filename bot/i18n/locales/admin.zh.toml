@@ -26,6 +26,9 @@ adm_qr_cancel_button = "取消登录"
 adm_qr_timeout = "二维码已超时，请重新执行 /login {{.Platform}} qr"
 adm_sign_usage = "用法: /login sign <platform>"
 adm_qr_poll_cancelled = "已取消登录轮询"
+adm_verify_test_unsupported = "{{.Platform}} 当前不支持验证码流程测试"
+adm_verify_test_failed = "验证码流程测试暂时不可用，请稍后重试"
+adm_verify_test_ready = "这是 {{.Platform}} 验证码流程测试，不会操作账号。请在 10 分钟内打开链接完成验证码；页面显示测试完成后即可关闭。\n{{.URL}}"
 
 # --- usage / help ---
 adm_login_usage = """统一账号命令:
@@ -41,6 +44,7 @@ adm_login_usage = """统一账号命令:
 /login renew - 批量续期所有平台
 /login <platform> auto on|off|status [intervalSec] - 自动续期
 /login auto on|off|status [intervalSec] - 批量设置所有平台自动续期
+/login <platform> verify-test - 测试验证码页面（如支持）
 支持平台: {{.Platforms}}"""
 adm_login_help = "{{.Platform}} 支持: {{.Methods}}\n\n示例:\n{{.Examples}}"
 adm_lang_arg = "语言"

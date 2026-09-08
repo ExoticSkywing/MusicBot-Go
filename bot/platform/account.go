@@ -67,6 +67,15 @@ type LoginMethodProvider interface {
 	SupportedLoginMethods() []string
 }
 
+type VerificationTest struct {
+	URL       string
+	ExpiresAt time.Time
+}
+
+type VerificationTestProvider interface {
+	StartVerificationTest(context.Context) (VerificationTest, error)
+}
+
 type SignInProvider interface {
 	SignIn(ctx context.Context) (string, error)
 }

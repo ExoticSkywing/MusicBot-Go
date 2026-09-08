@@ -19,7 +19,7 @@ import (
 func BuildAccountLoginCommand(manager platform.Manager) admincmd.Command {
 	return admincmd.Command{
 		Name:        "login",
-		Description: "统一账号登录（qr/cookie/sign/check/renew/auto/help）",
+		Description: "统一账号登录（qr/cookie/sign/check/renew/auto/verify-test/help）",
 		RichHandler: func(ctx context.Context, args string) (*admincmd.Response, error) {
 			return handleAccountLogin(ctx, manager, args)
 		},
@@ -86,6 +86,26 @@ func handleAccountLogin(ctx context.Context, manager platform.Manager, args stri
 			message = tr(ctx, "adm_check_unsupported", map[string]any{"Platform": platformDisplayName(ctx, manager, platformName)})
 		}
 		return &admincmd.Response{Text: message}, nil
+	case "verify-test":
+		provider, ok := plat.(platform.VerificationTestProvider)
+		if !ok {
+			return &admincmd.Response{Text: tr(ctx, "adm_verify_test_unsupported", map[string]any{"Platform": platformDisplayName(ctx, manager, platformName)})}, nil
+		}
+		result, err := provider.StartVerificationTest(ctx)
+		if err != nil {
+			return &admincmd.Response{Text: tr(ctx, "adm_verify_test_failed")}, nil
+		}
+		verificationURL := safeVerificationURL(&platform.VerificationRequiredError{
+			URL:       result.URL,
+			ExpiresAt: result.ExpiresAt,
+		}, time.Now())
+		if verificationURL == "" {
+			return &admincmd.Response{Text: tr(ctx, "adm_verify_test_failed")}, nil
+		}
+		return &admincmd.Response{Text: tr(ctx, "adm_verify_test_ready", map[string]any{
+			"Platform": platformDisplayName(ctx, manager, platformName),
+			"URL":      verificationURL,
+		})}, nil
 	case "auto":
 		message, err := handlePlatformAutoRenew(ctx, manager, platformName, payload)
 		if err != nil {
@@ -355,6 +375,9 @@ func buildPlatformLoginHelp(ctx context.Context, manager platform.Manager, plat 
 	if containsLoginMethod(methods, "sign") {
 		examples = append(examples, fmt.Sprintf("/login %s sign", name))
 		examples = append(examples, fmt.Sprintf("/login sign %s", name))
+	}
+	if containsLoginMethod(methods, "verify-test") {
+		examples = append(examples, fmt.Sprintf("/login %s verify-test", name))
 	}
 	if containsLoginMethod(methods, "renew") || implementsRenew(plat) {
 		examples = append(examples, fmt.Sprintf("/login %s renew", name), "/login renew")

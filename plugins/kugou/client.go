@@ -293,6 +293,9 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 		planRetried := false
 		for {
 			refreshForVerification := func(verificationErr error) (bool, error) {
+				if verificationRequired, handled := c.concept.beginVerification(ctx, verificationErr); handled {
+					return false, verificationRequired
+				}
 				if planRetried || deviceRefreshUsed {
 					return false, verificationErr
 				}
@@ -312,7 +315,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 			if errors.Is(err, errConceptDeviceVerification) {
 				retry, refreshErr := refreshForVerification(err)
 				if refreshErr != nil {
-					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+					return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 				}
 				if retry {
 					continue
@@ -333,7 +336,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 				if errors.Is(newErr, errConceptDeviceVerification) {
 					retry, refreshErr := refreshForVerification(newErr)
 					if refreshErr != nil {
-						return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+						return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 					}
 					if retry {
 						continue
@@ -346,7 +349,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 			if errors.Is(responseErr, errConceptDeviceVerification) {
 				retry, refreshErr := refreshForVerification(responseErr)
 				if refreshErr != nil {
-					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+					return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 				}
 				if retry {
 					continue
@@ -720,6 +723,14 @@ func wrapError(source, resource, id string, err error) error {
 	default:
 		return fmt.Errorf("%s: %s %s: %w", source, resource, id, err)
 	}
+}
+
+func wrapKugouVerificationError(trackID string, err error) error {
+	var verificationRequired *platform.VerificationRequiredError
+	if errors.As(err, &verificationRequired) {
+		return err
+	}
+	return wrapError("kugou", "track", trackID, err)
 }
 
 type kugouGatewaySongInfoResponse struct {

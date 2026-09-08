@@ -435,10 +435,12 @@ func (c *ConceptAPIClient) FetchSongURL(ctx context.Context, song *model.Song, p
 	query.Set("key", conceptSignKey(strings.ToLower(strings.TrimSpace(plan.Hash)), query.Get("mid"), query.Get("userid"), query.Get("appid")))
 	query.Set("signature", conceptSignatureAndroid(query, ""))
 	var resp conceptSongURLResponse
-	if err := c.doJSON(ctx, http.MethodGet, kugouConceptGatewayBaseURL+"/v5/url?"+query.Encode(), nil, state, map[string]string{"x-router": kugouConceptRouteTrack}, &resp); err != nil {
+	responseMeta, err := c.doJSONWithMeta(ctx, http.MethodGet, kugouConceptGatewayBaseURL+"/v5/url?"+query.Encode(), nil, state, map[string]string{"x-router": kugouConceptRouteTrack}, &resp)
+	if err != nil {
 		return nil, err
 	}
-	if err := conceptVerificationErrorForDFID(resp.ErrCode, query.Get("dfid"), resp.Error); err != nil {
+	challenge := newConceptVerificationChallenge(responseMeta.SSAEventID, state, song, plan, conceptVerificationPlaybackV5)
+	if err := conceptVerificationErrorForChallenge(resp.ErrCode, query.Get("dfid"), challenge, resp.Error); err != nil {
 		return nil, err
 	}
 	if resp.Status != 1 || len(resp.URL) == 0 || strings.TrimSpace(resp.URL[0]) == "" {
@@ -494,7 +496,8 @@ func (c *ConceptAPIClient) FetchSongURLNew(ctx context.Context, song *model.Song
 	}
 	query.Set("signature", conceptSignatureAndroid(query, string(bodyJSON)))
 	var raw json.RawMessage
-	if err := c.doJSON(ctx, http.MethodPost, "http://tracker.kugou.com/v6/priv_url?"+query.Encode(), bytes.NewReader(bodyJSON), state, map[string]string{"Content-Type": "application/json"}, &raw); err != nil {
+	responseMeta, err := c.doJSONWithMeta(ctx, http.MethodPost, "http://tracker.kugou.com/v6/priv_url?"+query.Encode(), bytes.NewReader(bodyJSON), state, map[string]string{"Content-Type": "application/json"}, &raw)
+	if err != nil {
 		return nil, err
 	}
 	resp := &conceptSongURLNewResponse{Raw: raw}
@@ -510,7 +513,8 @@ func (c *ConceptAPIClient) FetchSongURLNew(ctx context.Context, song *model.Song
 		resp.Error = env.Error
 		resp.Data = env.Data
 	}
-	if err := conceptVerificationErrorForDFID(resp.ErrCode, query.Get("dfid"), resp.Error, string(resp.Data)); err != nil {
+	challenge := newConceptVerificationChallenge(responseMeta.SSAEventID, state, song, plan, conceptVerificationPlaybackV6)
+	if err := conceptVerificationErrorForChallenge(resp.ErrCode, query.Get("dfid"), challenge, resp.Error, string(resp.Data)); err != nil {
 		return resp, err
 	}
 	return resp, nil
@@ -619,16 +623,32 @@ func (c *ConceptAPIClient) registerDevice(ctx context.Context, force bool) (conc
 		decodedText = strings.TrimSpace(string(bodyBytes))
 	}
 	var resp struct {
-		Status int `json:"status"`
-		Data   struct {
-			Dfid string `json:"dfid"`
-		} `json:"data"`
+		conceptBaseResponse
+		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(decodedText), &resp); err != nil {
 		return device, err
 	}
-	dfid := strings.TrimSpace(resp.Data.Dfid)
-	if force && (resp.Status != 1 || dfid == "" || dfid == "-") {
+	if resp.Status != 1 {
+		detail := fmt.Sprintf("status=%d", resp.Status)
+		if resp.ErrCode != 0 {
+			detail += fmt.Sprintf(", errcode=%d", resp.ErrCode)
+		}
+		if resp.Code != 0 {
+			detail += fmt.Sprintf(", code=%d", resp.Code)
+		}
+		return device, fmt.Errorf("kugou concept register device failed (%s)", detail)
+	}
+	var data struct {
+		Dfid string `json:"dfid"`
+	}
+	if len(resp.Data) > 0 && string(resp.Data) != "null" {
+		if err := json.Unmarshal(resp.Data, &data); err != nil {
+			return device, fmt.Errorf("kugou concept register device invalid success data: %w", err)
+		}
+	}
+	dfid := strings.TrimSpace(data.Dfid)
+	if force && (dfid == "" || dfid == "-") {
 		return device, fmt.Errorf("kugou concept register device returned no dfid")
 	}
 	device.Dfid = firstNonEmpty(dfid, device.Dfid, conceptRandomAlphaNum(24))
@@ -651,17 +671,26 @@ func (c *ConceptAPIClient) registerDevice(ctx context.Context, force bool) (conc
 }
 
 func (c *ConceptAPIClient) doJSON(ctx context.Context, method, rawURL string, body io.Reader, state conceptSession, headers map[string]string, out any) error {
-	bodyBytes, err := c.doBytes(ctx, method, rawURL, body, state, headers)
+	_, err := c.doJSONWithMeta(ctx, method, rawURL, body, state, headers, out)
+	return err
+}
+
+type conceptHTTPResponseMeta struct {
+	SSAEventID string
+}
+
+func (c *ConceptAPIClient) doJSONWithMeta(ctx context.Context, method, rawURL string, body io.Reader, state conceptSession, headers map[string]string, out any) (conceptHTTPResponseMeta, error) {
+	bodyBytes, meta, err := c.doBytesWithMeta(ctx, method, rawURL, body, state, headers)
 	if err != nil {
-		return err
+		return conceptHTTPResponseMeta{}, err
 	}
 	if out == nil {
-		return nil
+		return meta, nil
 	}
 	if err := json.Unmarshal(bodyBytes, out); err != nil {
-		return err
+		return conceptHTTPResponseMeta{}, err
 	}
-	return nil
+	return meta, nil
 }
 
 func (c *ConceptAPIClient) doBaseResponse(ctx context.Context, method, rawURL string, body io.Reader, state conceptSession, headers map[string]string) (*conceptBaseResponse, error) {
@@ -677,12 +706,17 @@ func (c *ConceptAPIClient) doBaseResponse(ctx context.Context, method, rawURL st
 }
 
 func (c *ConceptAPIClient) doBytes(ctx context.Context, method, rawURL string, body io.Reader, state conceptSession, headers map[string]string) ([]byte, error) {
+	bodyBytes, _, err := c.doBytesWithMeta(ctx, method, rawURL, body, state, headers)
+	return bodyBytes, err
+}
+
+func (c *ConceptAPIClient) doBytesWithMeta(ctx context.Context, method, rawURL string, body io.Reader, state conceptSession, headers map[string]string) ([]byte, conceptHTTPResponseMeta, error) {
 	if c == nil {
-		return nil, fmt.Errorf("concept client unavailable")
+		return nil, conceptHTTPResponseMeta{}, fmt.Errorf("concept client unavailable")
 	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
-		return nil, err
+		return nil, conceptHTTPResponseMeta{}, err
 	}
 	req.Header.Set("User-Agent", kugouConceptUserAgent)
 	req.Header.Set("kg-rc", "1")
@@ -705,17 +739,18 @@ func (c *ConceptAPIClient) doBytes(ctx context.Context, method, rawURL string, b
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, conceptHTTPResponseMeta{}, err
 	}
 	defer resp.Body.Close()
+	meta := conceptHTTPResponseMeta{SSAEventID: strings.TrimSpace(resp.Header.Get("ssa-code"))}
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, conceptHTTPResponseMeta{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("concept api http %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return nil, conceptHTTPResponseMeta{}, fmt.Errorf("concept api http %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
-	return bodyBytes, nil
+	return bodyBytes, meta, nil
 }
 
 func (c *ConceptAPIClient) defaultQuery(state conceptSession, now time.Time, includeAuth bool) (url.Values, conceptDeviceInfo) {
