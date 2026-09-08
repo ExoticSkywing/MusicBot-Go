@@ -822,6 +822,21 @@ func TestResolveDownloadPreviewBitratePrecedesSafeSuffixMismatchFallback(t *test
 	}
 }
 
+func TestTerminalPreviewErrorUsesIncompleteAudioClassification(t *testing.T) {
+	err := terminalUnavailable(errPreviewMedia, errTrackDurationMismatch)
+	if !errors.Is(err, platform.ErrIncompleteAudio) {
+		t.Fatalf("terminalUnavailable(preview) = %v, want ErrIncompleteAudio", err)
+	}
+	if !errors.Is(err, platform.ErrUnavailable) {
+		t.Fatalf("ErrIncompleteAudio must remain compatible with ErrUnavailable: %v", err)
+	}
+
+	paid := terminalUnavailable(errPaidTrack)
+	if errors.Is(paid, platform.ErrIncompleteAudio) {
+		t.Fatalf("paid-only error misclassified as incomplete audio: %v", paid)
+	}
+}
+
 func TestResolveDownloadOverflowingMobileDurationIsTerminal(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

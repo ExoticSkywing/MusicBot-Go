@@ -2,9 +2,13 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/mymmrac/telego"
@@ -377,11 +381,12 @@ func TestInlineSearchHandler_findCachedSong_ExactMatch(t *testing.T) {
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
-		Platform: "netease",
-		TrackID:  "12345",
-		Quality:  "hires",
-		FileID:   "file123",
-		SongName: "Test Song",
+		AudioValidated: true,
+		Platform:       "netease",
+		TrackID:        "12345",
+		Quality:        "hires",
+		FileID:         "file123",
+		SongName:       "Test Song",
 	}
 	err := repo.Create(ctx, song)
 	if err != nil {
@@ -403,11 +408,12 @@ func TestInlineSearchHandler_findCachedSong_QualityFallback(t *testing.T) {
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
-		Platform: "netease",
-		TrackID:  "12345",
-		Quality:  "lossless",
-		FileID:   "file123",
-		SongName: "Test Song",
+		AudioValidated: true,
+		Platform:       "netease",
+		TrackID:        "12345",
+		Quality:        "lossless",
+		FileID:         "file123",
+		SongName:       "Test Song",
 	}
 	err := repo.Create(ctx, song)
 	if err != nil {
@@ -429,6 +435,7 @@ func TestInlineSearchHandler_findCachedSong_AppleMusicDoesNotCrossQuality(t *tes
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
+		AudioValidated:  true,
 		Platform:        "applemusic",
 		TrackID:         "1509778223",
 		Quality:         "lossless",
@@ -456,12 +463,13 @@ func TestInlineSearchHandler_findCachedSong_NeteaseMusicID(t *testing.T) {
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
-		Platform: "netease",
-		MusicID:  12345,
-		TrackID:  "12345",
-		Quality:  "hires",
-		FileID:   "file123",
-		SongName: "Test Song",
+		AudioValidated: true,
+		Platform:       "netease",
+		MusicID:        12345,
+		TrackID:        "12345",
+		Quality:        "hires",
+		FileID:         "file123",
+		SongName:       "Test Song",
 	}
 	err := repo.Create(ctx, song)
 	if err != nil {
@@ -475,6 +483,140 @@ func TestInlineSearchHandler_findCachedSong_NeteaseMusicID(t *testing.T) {
 	}
 	if got.SongName != "Test Song" {
 		t.Errorf("findCachedSong: SongName = %q, want %q", got.SongName, "Test Song")
+	}
+}
+
+func TestInlineSearchHandler_findCachedSong_RejectsUnvalidatedLegacyMusicID(t *testing.T) {
+	repo := newStubRepo()
+	ctx := context.Background()
+	legacy := &botpkg.SongInfo{
+		Platform: "netease",
+		MusicID:  12345,
+		TrackID:  "12345",
+		Quality:  "hires",
+		FileID:   "legacy-preview-file",
+		SongName: "Legacy Preview",
+	}
+	if err := repo.Create(ctx, legacy); err != nil {
+		t.Fatalf("create legacy song: %v", err)
+	}
+
+	handler := &InlineSearchHandler{Repo: repo}
+	if got := handler.findCachedSong(ctx, "netease", "12345", "standard"); got != nil {
+		t.Fatalf("findCachedSong returned unvalidated legacy FileID: %+v", got)
+	}
+}
+
+func TestInlineSearchHandler_UnvalidatedCacheFallsBackToPendingCommand(t *testing.T) {
+	repo := newStubRepo()
+	legacy := &botpkg.SongInfo{
+		Platform: "netease",
+		MusicID:  12345,
+		TrackID:  "12345",
+		Quality:  "hires",
+		FileID:   "legacy-preview-file",
+		SongName: "Legacy Preview",
+	}
+	if err := repo.Create(context.Background(), legacy); err != nil {
+		t.Fatalf("create legacy song: %v", err)
+	}
+
+	payloads := make(chan map[string]any, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]; method != "answerInlineQuery" {
+			t.Errorf("unexpected Telegram method %q", method)
+			http.Error(w, "unexpected method", http.StatusNotFound)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode Telegram request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		payloads <- payload
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+	}))
+	t.Cleanup(server.Close)
+	b, err := telego.NewBot("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi", telego.WithAPIServer(server.URL))
+	if err != nil {
+		t.Fatalf("new bot: %v", err)
+	}
+
+	handler := &InlineSearchHandler{Repo: repo, DefaultPlatform: "netease", DefaultQuality: "hires"}
+	query := &telego.InlineQuery{ID: "inline-old-cache", From: telego.User{ID: 42}}
+	if handler.inlineCached(zhCtx(), b, query, legacy, "netease", "hires") {
+		t.Fatal("inlineCached accepted an unvalidated FileID")
+	}
+	select {
+	case payload := <-payloads:
+		t.Fatalf("inlineCached sent unvalidated FileID: %+v", payload)
+	default:
+	}
+
+	if !handler.inlineCachedOrCommand(zhCtx(), b, query, "netease", "12345", "hires", 1, "") {
+		t.Fatal("inline cache flow did not handle the track")
+	}
+	payload := <-payloads
+	results, ok := payload["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Fatalf("answerInlineQuery results = %#v", payload["results"])
+	}
+	first, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first result = %#v", results[0])
+	}
+	if first["type"] != telego.ResultTypeArticle {
+		t.Fatalf("first result type = %#v, want pending article", first["type"])
+	}
+	if _, cached := first["document_file_id"]; cached {
+		t.Fatalf("pending result leaked cached document: %#v", first)
+	}
+	resultID, _ := first["id"].(string)
+	if platformName, trackID, _, ok := parseInlinePendingResultID(resultID); !ok || platformName != "netease" || trackID != "12345" {
+		t.Fatalf("first result id = %q, want pending netease track", resultID)
+	}
+}
+
+func TestRunInlineMediaFlow_UnvalidatedCacheFallsBackToPrepare(t *testing.T) {
+	b, recorder := newVerificationTestBot(t)
+	repo := newStubRepo()
+	legacy := &botpkg.SongInfo{
+		Platform: "netease",
+		TrackID:  "12345",
+		Quality:  "hires",
+		FileID:   "legacy-preview-file",
+		SongName: "Legacy Preview",
+	}
+	if err := repo.Create(context.Background(), legacy); err != nil {
+		t.Fatalf("create legacy song: %v", err)
+	}
+	manager := newStubManager()
+	manager.Register(newStubPlatform("netease"))
+	music := &MusicHandler{
+		Repo:            repo,
+		PlatformManager: manager,
+		DefaultQuality:  "hires",
+		ProcessTimeout:  time.Second,
+	}
+
+	runInlineMediaFlow(
+		withDownloadWorkAdmission(zhCtx()),
+		b,
+		inlineMediaFlowDeps{Music: music},
+		"inline-old-cache",
+		42,
+		"tester",
+		"netease",
+		"12345",
+		"hires",
+		0,
+		false,
+	)
+
+	if len(recorder.payloads("editMessageText")) == 0 {
+		t.Fatal("unvalidated cache did not continue into the prepare/download flow")
 	}
 }
 
@@ -524,11 +666,12 @@ func TestInlineSearchHandler_findCachedSong_InvalidFileID(t *testing.T) {
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
-		Platform: "netease",
-		TrackID:  "12345",
-		Quality:  "hires",
-		FileID:   "",
-		SongName: "Test Song",
+		AudioValidated: true,
+		Platform:       "netease",
+		TrackID:        "12345",
+		Quality:        "hires",
+		FileID:         "",
+		SongName:       "Test Song",
 	}
 	err := repo.Create(ctx, song)
 	if err != nil {
@@ -547,11 +690,12 @@ func TestInlineSearchHandler_findCachedSong_InvalidSongName(t *testing.T) {
 	ctx := context.Background()
 
 	song := &botpkg.SongInfo{
-		Platform: "netease",
-		TrackID:  "12345",
-		Quality:  "hires",
-		FileID:   "file123",
-		SongName: "",
+		AudioValidated: true,
+		Platform:       "netease",
+		TrackID:        "12345",
+		Quality:        "hires",
+		FileID:         "file123",
+		SongName:       "",
 	}
 	err := repo.Create(ctx, song)
 	if err != nil {

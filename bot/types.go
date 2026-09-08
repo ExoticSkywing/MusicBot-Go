@@ -39,8 +39,12 @@ type SongInfo struct {
 	EmbPicSize      int
 	BitRate         int
 	Duration        int
-	FileID          string
-	ThumbFileID     string
+	// AudioValidated is true only after the downloaded audio duration has been
+	// checked against the platform catalog duration. Catalog metadata and a
+	// Telegram FileID alone do not establish this flag.
+	AudioValidated bool
+	FileID         string
+	ThumbFileID    string
 	// CoverFileID is the reusable Telegram photo file_id for the standalone
 	// full-size cover message. It is intentionally separate from ThumbFileID:
 	// Telegram audio thumbnails are not a reliable reusable photo source.

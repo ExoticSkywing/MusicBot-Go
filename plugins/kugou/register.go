@@ -37,6 +37,12 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 	manager := NewConceptSessionManager(logger, persist, concept)
 	manager.SetHTTPClient(client.apiHTTPClient)
 	manager.SetBaseURL(cfg.GetPluginString("kugou", "concept_base_url"))
+	if err := manager.SetVerificationRelay(
+		cfg.GetPluginString("kugou", "verification_relay_url"),
+		cfg.GetPluginString("kugou", "verification_relay_secret"),
+	); err != nil {
+		return nil, err
+	}
 	manager.StartAutoRefreshDaemon(context.Background())
 	client.AttachConcept(manager)
 	platform := NewPlatform(client)

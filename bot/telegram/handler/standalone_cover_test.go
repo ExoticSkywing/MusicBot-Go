@@ -131,15 +131,16 @@ func standaloneCoverTestMessage() *telego.Message {
 
 func standaloneCoverTestSong() *botpkg.SongInfo {
 	return &botpkg.SongInfo{
-		Platform:    "spotify",
-		TrackID:     "track-1",
-		Quality:     "high",
-		SongName:    "Song",
-		SongArtists: "Artist",
-		FileID:      "audio-cached",
-		CoverFileID: "cover-cached",
-		CoverURL:    "https://img.example/cover.jpg",
-		Duration:    180,
+		Platform:       "spotify",
+		TrackID:        "track-1",
+		Quality:        "high",
+		SongName:       "Song",
+		SongArtists:    "Artist",
+		FileID:         "audio-cached",
+		CoverFileID:    "cover-cached",
+		CoverURL:       "https://img.example/cover.jpg",
+		Duration:       180,
+		AudioValidated: true,
 	}
 }
 

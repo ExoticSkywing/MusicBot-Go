@@ -3,6 +3,7 @@ package platform
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Common platform errors that can be checked with errors.Is.
@@ -16,6 +17,10 @@ var (
 	// ErrUnavailable is returned when content is not available in the current region or context.
 	ErrUnavailable = errors.New("platform: content unavailable")
 
+	// ErrIncompleteAudio prevents delivery when only a preview is available or
+	// the downloaded audio cannot be verified against the full catalog duration.
+	ErrIncompleteAudio = fmt.Errorf("%w: full audio could not be verified", ErrUnavailable)
+
 	// ErrUnsupported is returned when a feature is not supported by the platform.
 	ErrUnsupported = errors.New("platform: feature not supported")
 
@@ -25,6 +30,23 @@ var (
 	// ErrAuthRequired is returned when authentication is required but not provided.
 	ErrAuthRequired = errors.New("platform: authentication required")
 )
+
+// VerificationRequiredError tells the delivery layer that a user-facing
+// verification flow must be completed before the platform can continue.
+//
+// URL is an intentionally shareable verification URL. ExpiresAt is optional;
+// a zero value means the producer did not provide an expiry. Error deliberately
+// excludes both fields so capability URLs and their tokens cannot leak through
+// routine error logging.
+type VerificationRequiredError struct {
+	URL       string
+	ExpiresAt time.Time
+}
+
+// Error implements error without exposing the verification capability.
+func (e *VerificationRequiredError) Error() string {
+	return "platform: verification required"
+}
 
 // PlatformError wraps an error with additional platform-specific context.
 // This allows checking the underlying error type using errors.Is and errors.As

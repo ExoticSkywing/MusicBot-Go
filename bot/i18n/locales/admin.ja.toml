@@ -26,6 +26,9 @@ adm_qr_cancel_button = "ログインをキャンセル"
 adm_qr_timeout = "QR コードがタイムアウトしました。/login {{.Platform}} qr を再実行してください"
 adm_sign_usage = "使い方: /login sign <platform>"
 adm_qr_poll_cancelled = "ログインのポーリングをキャンセルしました"
+adm_verify_test_unsupported = "{{.Platform}} は確認フローのテストに対応していません"
+adm_verify_test_failed = "確認フローのテストは一時的に利用できません。しばらくしてから再試行してください。"
+adm_verify_test_ready = "これは {{.Platform}} の確認フローテストです。アカウントの操作は行いません。10 分以内にリンクを開いて確認を完了し、ページにテスト完了と表示されたら閉じてください。\n{{.URL}}"
 
 # --- usage / help ---
 adm_login_usage = """統合アカウントコマンド:
@@ -41,6 +44,7 @@ adm_login_usage = """統合アカウントコマンド:
 /login renew - すべてのプラットフォームを一括更新
 /login <platform> auto on|off|status [intervalSec] - 自動更新
 /login auto on|off|status [intervalSec] - すべてのプラットフォームの自動更新を一括設定
+/login <platform> verify-test - 確認ページをテスト（対応している場合）
 対応プラットフォーム: {{.Platforms}}"""
 adm_login_help = "{{.Platform}} 対応: {{.Methods}}\n\n例:\n{{.Examples}}"
 adm_lang_arg = "言語"

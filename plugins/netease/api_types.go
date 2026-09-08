@@ -84,16 +84,25 @@ type SongsURLData struct {
 }
 
 type SongURLData struct {
-	Id        int    `json:"id"`
-	Url       string `json:"url"`
-	Br        int    `json:"br"`
-	Size      int    `json:"size"`
-	Md5       string `json:"md5"`
-	Code      int    `json:"code"`
-	Expi      int    `json:"expi"`
-	Type      string `json:"type"`
-	Level     string `json:"level"`
-	UrlSource int    `json:"urlSource"`
+	Id            int                   `json:"id"`
+	Url           string                `json:"url"`
+	Br            int                   `json:"br"`
+	Size          int                   `json:"size"`
+	Md5           string                `json:"md5"`
+	Code          int                   `json:"code"`
+	Expi          int                   `json:"expi"`
+	Type          string                `json:"type"`
+	Level         string                `json:"level"`
+	UrlSource     int                   `json:"urlSource"`
+	FreeTrialInfo *NeteaseFreeTrialInfo `json:"freeTrialInfo"`
+}
+
+// NeteaseFreeTrialInfo is present when the player URL is only a bounded trial
+// window of the catalog track. Its exact start/end values are descriptive; the
+// presence of the object is the authoritative incomplete-audio signal.
+type NeteaseFreeTrialInfo struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 type SongLyricData struct {

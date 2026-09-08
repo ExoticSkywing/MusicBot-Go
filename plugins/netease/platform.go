@@ -106,6 +106,9 @@ func (n *NeteasePlatform) GetDownloadInfo(ctx context.Context, trackID string, q
 	}
 
 	urlData := songURL.Data[0]
+	if err := validateNeteaseFullAudio(urlData); err != nil {
+		return nil, err
+	}
 
 	format := "mp3"
 	if urlData.Type != "" {
@@ -124,6 +127,13 @@ func (n *NeteasePlatform) GetDownloadInfo(ctx context.Context, trackID string, q
 	}
 
 	return info, nil
+}
+
+func validateNeteaseFullAudio(data SongURLData) error {
+	if data.FreeTrialInfo != nil {
+		return fmt.Errorf("%w: netease returned a free-trial stream", platform.ErrIncompleteAudio)
+	}
+	return nil
 }
 
 // Search searches for tracks matching the given query string.

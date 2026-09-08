@@ -102,11 +102,7 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 		return status, nil
 	}
 	if s.client.CanAccessCoreContent(probeCtx) {
-		status.LoggedIn = s.client.effectiveAPIStrategy() == sodaAPIStrategyLegacy
-		lines := []string{"- 状态: 可用（内容接口正常）", "- 账号资料接口未返回用户信息，但汽水内容接口可访问"}
-		if !status.LoggedIn {
-			lines = []string{"- 状态: 公开内容接口可访问，登录态未确认", "- 账号资料接口未返回用户信息；公开内容不代表 Cookie 有效"}
-		}
+		lines := []string{"- 状态: 公开内容接口可访问，登录态未确认", "- 账号资料接口未返回用户信息；公开试听不代表 Cookie 有效"}
 		if len(core) > 0 {
 			lines = append(lines, "- 关键字段: "+strings.Join(core, ", "))
 		}
@@ -212,14 +208,16 @@ func (c *Client) FetchSelfProfile(ctx context.Context) (*sodaSelfProfileResponse
 	if c == nil {
 		return nil, fmt.Errorf("soda client unavailable")
 	}
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/me")
-	if err == nil {
-		var resp sodaSelfProfileResponse
-		if json.Unmarshal(body, &resp) == nil && resp.StatusCode == 0 && strings.TrimSpace(resp.MyInfo.ID) != "" {
-			return &resp, nil
+	if c.signer != nil {
+		body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/me")
+		if err == nil {
+			var resp sodaSelfProfileResponse
+			if json.Unmarshal(body, &resp) == nil && resp.StatusCode == 0 && strings.TrimSpace(resp.MyInfo.ID) != "" {
+				return &resp, nil
+			}
 		}
 	}
-	body, err = c.getJSONWithHeaders(ctx, "https://www.douyin.com/aweme/v1/web/user/profile/self/", map[string]string{
+	body, err := c.getJSONWithHeaders(ctx, "https://www.douyin.com/aweme/v1/web/user/profile/self/", map[string]string{
 		"Referer": "https://music.douyin.com/",
 	})
 	if err == nil {

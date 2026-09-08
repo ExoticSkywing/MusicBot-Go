@@ -1,10 +1,32 @@
 package netease
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 )
+
+func TestValidateNeteaseFullAudioRejectsFreeTrialInfo(t *testing.T) {
+	var response SongsURLData
+	if err := json.Unmarshal([]byte(`{"data":[{"id":1,"url":"https://cdn.example/trial.mp3","freeTrialInfo":{"start":0,"end":30}}]}`), &response); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(response.Data) != 1 {
+		t.Fatalf("decoded data length = %d", len(response.Data))
+	}
+	if err := validateNeteaseFullAudio(response.Data[0]); !errors.Is(err, platform.ErrIncompleteAudio) {
+		t.Fatalf("validateNeteaseFullAudio() error = %v, want ErrIncompleteAudio", err)
+	}
+
+	if err := json.Unmarshal([]byte(`{"data":[{"id":1,"url":"https://cdn.example/full.mp3","freeTrialInfo":null}]}`), &response); err != nil {
+		t.Fatalf("decode full fixture: %v", err)
+	}
+	if err := validateNeteaseFullAudio(response.Data[0]); err != nil {
+		t.Fatalf("full stream rejected: %v", err)
+	}
+}
 
 // TestName verifies the platform name is "netease".
 func TestName(t *testing.T) {

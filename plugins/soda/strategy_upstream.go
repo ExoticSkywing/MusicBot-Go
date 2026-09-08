@@ -236,7 +236,7 @@ func (c *Client) fetchDownloadInfoUpstream(ctx context.Context, trackID string, 
 		return nil, platform.NewNotFoundError("soda", "track", trackID)
 	}
 	if mediaID, previewID := strings.TrimSpace(resp.TrackPlayer.MediaID), strings.TrimSpace(trackData.Preview.VID); mediaID != "" && previewID != "" && mediaID == previewID {
-		return nil, fmt.Errorf("%w: %w: soda player selected the catalog preview media", platform.ErrUnavailable, errSodaIncompleteAudio)
+		return nil, fmt.Errorf("%w: %w: soda player selected the catalog preview media", platform.ErrIncompleteAudio, errSodaIncompleteAudio)
 	}
 	playerInfoURL := strings.TrimSpace(resp.TrackPlayer.URLPlayerInfo)
 	if playerInfoURL == "" {
@@ -265,7 +265,7 @@ func (c *Client) fetchDownloadInfoUpstream(ctx context.Context, trackID string, 
 		completePlayInfos = append(completePlayInfos, item)
 	}
 	if len(completePlayInfos) == 0 && sawIncompleteDuration {
-		return nil, fmt.Errorf("%w: %w: soda player returned only shorter streams", platform.ErrUnavailable, errSodaIncompleteAudio)
+		return nil, fmt.Errorf("%w: %w: soda player returned only shorter streams", platform.ErrIncompleteAudio, errSodaIncompleteAudio)
 	}
 	playInfos = completePlayInfos
 	playInfo := selectSodaPlayInfo(playInfos, quality)

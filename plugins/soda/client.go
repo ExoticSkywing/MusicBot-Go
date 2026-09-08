@@ -650,7 +650,6 @@ func (c *Client) fetchDownloadInfoLegacy(ctx context.Context, trackID string, qu
 	if playerInfoURL == "" {
 		return nil, fmt.Errorf("soda: player info url missing")
 	}
-	playerInfoURL = strings.TrimSpace(resp.TrackPlayer.URLPlayerInfo)
 	playInfos, err := c.fetchPlayInfos(ctx, playerInfoURL)
 	if err != nil {
 		return nil, fmt.Errorf("soda: fetch play infos: %w", err)
@@ -960,8 +959,7 @@ func (c *Client) doRequest(ctx context.Context, rawURL string, accept string) ([
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("soda: request failed status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("soda: request failed status=%d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

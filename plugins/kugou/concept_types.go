@@ -13,6 +13,7 @@ var errConceptDeviceVerification = errors.New("kugou concept device verification
 type conceptDeviceVerificationError struct {
 	ErrCode      int
 	RejectedDFID string
+	challenge    *conceptVerificationChallenge
 }
 
 func (e *conceptDeviceVerificationError) Error() string {
@@ -31,10 +32,15 @@ func conceptVerificationError(errCode int, messages ...string) error {
 }
 
 func conceptVerificationErrorForDFID(errCode int, rejectedDFID string, messages ...string) error {
+	return conceptVerificationErrorForChallenge(errCode, rejectedDFID, nil, messages...)
+}
+
+func conceptVerificationErrorForChallenge(errCode int, rejectedDFID string, challenge *conceptVerificationChallenge, messages ...string) error {
 	if errCode == 20028 || strings.Contains(strings.Join(messages, " "), "需要验证") {
 		return &conceptDeviceVerificationError{
 			ErrCode:      errCode,
 			RejectedDFID: strings.TrimSpace(rejectedDFID),
+			challenge:    challenge,
 		}
 	}
 	return nil
@@ -46,6 +52,15 @@ func conceptVerificationRejectedDFID(err error) string {
 		return strings.TrimSpace(verificationErr.RejectedDFID)
 	}
 	return ""
+}
+
+func conceptVerificationChallengeFromError(err error) *conceptVerificationChallenge {
+	var verificationErr *conceptDeviceVerificationError
+	if errors.As(err, &verificationErr) && verificationErr.challenge != nil {
+		challenge := *verificationErr.challenge
+		return &challenge
+	}
+	return nil
 }
 
 type conceptJSONText string

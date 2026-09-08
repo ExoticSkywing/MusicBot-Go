@@ -1,0 +1,9 @@
+{
+  "name": "musicbot-kugou-verification",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node --test test.mjs frontend.test.mjs"
+  }
+}

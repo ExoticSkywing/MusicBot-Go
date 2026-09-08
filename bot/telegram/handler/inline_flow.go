@@ -125,8 +125,8 @@ func runInlineMediaFlow(ctx context.Context, b *telego.Bot, deps inlineMediaFlow
 		}
 		retryMarkup := buildInlineSendKeyboard(ctx, platformName, trackID, qualityOverride, userID)
 		editInlineMedia := func(songInfo *botpkg.SongInfo) (bool, error) {
-			if songInfo == nil || strings.TrimSpace(songInfo.FileID) == "" {
-				return false, fmt.Errorf("inline media requires file_id")
+			if songInfo == nil || !songInfo.AudioValidated || strings.TrimSpace(songInfo.FileID) == "" {
+				return false, fmt.Errorf("inline media requires a validated file_id")
 			}
 			media := &telego.InputMediaAudio{
 				Type:      telego.MediaTypeAudio,

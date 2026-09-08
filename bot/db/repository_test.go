@@ -141,6 +141,79 @@ func TestRepositoryCRUD(t *testing.T) {
 	}
 }
 
+func TestRepositoryAudioValidatedPersistence(t *testing.T) {
+	cachePath := t.TempDir() + "/cache.db"
+	dataPath := t.TempDir() + "/data.db"
+	base := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	gormLogger := logpkg.NewGormLogger(base, logger.Silent)
+	repo, err := NewSQLiteRepository(cachePath, dataPath, gormLogger)
+	if err != nil {
+		t.Fatalf("new repo: %v", err)
+	}
+	ctx := context.Background()
+
+	// Recreate the previous schema shape, write a legacy cache row, then reopen
+	// the repository so AutoMigrate adds the new column to existing data.
+	if err := repo.cacheDB.Migrator().DropColumn(&SongInfoModel{}, "AudioValidated"); err != nil {
+		t.Fatalf("drop validation column for legacy fixture: %v", err)
+	}
+	if err := repo.cacheDB.WithContext(ctx).Exec(`
+		INSERT INTO song_infos (created_at, updated_at, platform, track_id, quality, song_name, file_id)
+		VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+	`, "netease", "legacy-audio", "high", "Legacy", "legacy-file").Error; err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close legacy repo: %v", err)
+	}
+	repo, err = NewSQLiteRepository(cachePath, dataPath, gormLogger)
+	if err != nil {
+		t.Fatalf("reopen migrated repo: %v", err)
+	}
+	legacy, err := repo.FindByPlatformTrackID(ctx, "netease", "legacy-audio", "high")
+	if err != nil {
+		t.Fatalf("find legacy row: %v", err)
+	}
+	if legacy.AudioValidated {
+		t.Fatal("legacy row must default to unvalidated audio")
+	}
+
+	validated := &bot.SongInfo{
+		Platform:       "qqmusic",
+		TrackID:        "validated-audio",
+		Quality:        "lossless",
+		SongName:       "Validated",
+		FileID:         "validated-file",
+		AudioValidated: true,
+	}
+	if err := repo.Create(ctx, validated); err != nil {
+		t.Fatalf("create validated row: %v", err)
+	}
+	loaded, err := repo.FindByPlatformTrackID(ctx, validated.Platform, validated.TrackID, validated.Quality)
+	if err != nil {
+		t.Fatalf("find validated row: %v", err)
+	}
+	if !loaded.AudioValidated {
+		t.Fatal("validated audio flag did not round trip")
+	}
+
+	// Create uses an upsert for an existing platform/track/quality key. Ensure
+	// the validation result is refreshed instead of retaining stale trust.
+	validated.ID = 0
+	validated.AudioValidated = false
+	validated.FileID = "replacement-file"
+	if err := repo.Create(ctx, validated); err != nil {
+		t.Fatalf("upsert existing row: %v", err)
+	}
+	loaded, err = repo.FindByPlatformTrackID(ctx, validated.Platform, validated.TrackID, validated.Quality)
+	if err != nil {
+		t.Fatalf("find upserted row: %v", err)
+	}
+	if loaded.AudioValidated || loaded.FileID != "replacement-file" {
+		t.Fatalf("upsert did not refresh validation state: %+v", loaded)
+	}
+}
+
 func TestRepositoryDefaultLyricFlagsPersistence(t *testing.T) {
 	file, err := os.CreateTemp("", "music163bot-*.db")
 	if err != nil {

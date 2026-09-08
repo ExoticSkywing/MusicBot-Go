@@ -293,6 +293,9 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 		planRetried := false
 		for {
 			refreshForVerification := func(verificationErr error) (bool, error) {
+				if verificationRequired, handled := c.concept.beginVerification(ctx, verificationErr); handled {
+					return false, verificationRequired
+				}
 				if planRetried || deviceRefreshUsed {
 					return false, verificationErr
 				}
@@ -312,7 +315,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 			if errors.Is(err, errConceptDeviceVerification) {
 				retry, refreshErr := refreshForVerification(err)
 				if refreshErr != nil {
-					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+					return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 				}
 				if retry {
 					continue
@@ -333,7 +336,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 				if errors.Is(newErr, errConceptDeviceVerification) {
 					retry, refreshErr := refreshForVerification(newErr)
 					if refreshErr != nil {
-						return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+						return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 					}
 					if retry {
 						continue
@@ -346,7 +349,7 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 			if errors.Is(responseErr, errConceptDeviceVerification) {
 				retry, refreshErr := refreshForVerification(responseErr)
 				if refreshErr != nil {
-					return nil, wrapError("kugou", "track", strings.TrimSpace(song.ID), refreshErr)
+					return nil, wrapKugouVerificationError(strings.TrimSpace(song.ID), refreshErr)
 				}
 				if retry {
 					continue
@@ -722,6 +725,14 @@ func wrapError(source, resource, id string, err error) error {
 	}
 }
 
+func wrapKugouVerificationError(trackID string, err error) error {
+	var verificationRequired *platform.VerificationRequiredError
+	if errors.As(err, &verificationRequired) {
+		return err
+	}
+	return wrapError("kugou", "track", trackID, err)
+}
+
 type kugouGatewaySongInfoResponse struct {
 	Status int `json:"status"`
 	Data   [][]struct {
@@ -1037,7 +1048,10 @@ func (c *Client) fetchAlbumSongs(ctx context.Context, albumID string) ([]model.S
 	}
 	results := make([]model.Song, 0, len(resp.Data.Info))
 	for _, item := range resp.Data.Info {
-		primaryHash := firstNonEmpty(item.Hash, item.Hash320, item.SQHash, item.TransParam.Ogg320Hash, item.TransParam.Ogg128Hash, item.TransParam.HashOffset.ClipHash)
+		// hash_offset.clip_hash is Kugou's explicit audition excerpt. A collection
+		// entry with no complete-file hash must stay unavailable rather than become
+		// a callback that resolves the clip as if it were the full track.
+		primaryHash := firstNonEmpty(item.Hash, item.Hash320, item.SQHash, item.TransParam.Ogg320Hash, item.TransParam.Ogg128Hash)
 		if normalizeHash(primaryHash) == "" {
 			continue
 		}

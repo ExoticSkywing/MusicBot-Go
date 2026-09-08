@@ -758,6 +758,13 @@ func buildMusicInfoText(ctx context.Context, songName, songAlbum, fileInfo, suff
 // never breaks the classification.
 func userVisibleDownloadError(ctx context.Context, err error) string {
 	if err != nil {
+		var verificationErr *platform.VerificationRequiredError
+		if errors.As(err, &verificationErr) {
+			if verificationURL := safeVerificationURL(verificationErr, time.Now()); verificationURL != "" {
+				return tr(ctx, "err_verification_required", map[string]any{"URL": verificationURL})
+			}
+			return tr(ctx, "err_verification_link_unavailable")
+		}
 		errText := fmt.Sprintf("%v", err)
 		errLower := strings.ToLower(errText)
 		if strings.Contains(errLower, "md5 verification failed") {
@@ -784,11 +791,38 @@ func userVisibleDownloadError(ctx context.Context, err error) string {
 		if errors.Is(err, platform.ErrAuthRequired) {
 			return tr(ctx, "err_auth_required")
 		}
+		if errors.Is(err, platform.ErrIncompleteAudio) {
+			return tr(ctx, "err_incomplete_audio")
+		}
 		if errors.Is(err, platform.ErrUnavailable) {
 			return tr(ctx, "err_unavailable")
 		}
 	}
 	return tr(ctx, "err_download_failed")
+}
+
+func isVerificationRequiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var verificationErr *platform.VerificationRequiredError
+	return errors.As(err, &verificationErr) && verificationErr != nil
+}
+
+func safeVerificationURL(err *platform.VerificationRequiredError, now time.Time) string {
+	if err == nil || (!err.ExpiresAt.IsZero() && !now.Before(err.ExpiresAt)) {
+		return ""
+	}
+	rawURL := strings.TrimSpace(err.URL)
+	if rawURL == "" || strings.ContainsAny(rawURL, "\r\n\t") {
+		return ""
+	}
+	parsed, parseErr := url.Parse(rawURL)
+	if parseErr != nil || parsed == nil || parsed.Opaque != "" || parsed.User != nil ||
+		!strings.EqualFold(parsed.Scheme, "https") || strings.TrimSpace(parsed.Hostname()) == "" {
+		return ""
+	}
+	return parsed.String()
 }
 
 func userVisibleSearchError(ctx context.Context, err error) string {

@@ -344,7 +344,16 @@ func TestUserVisibleDownloadErrorMappings(t *testing.T) {
 		{name: "upload queue full text", err: errors.New("upload queue is full"), want: "当前发送任务过多，请稍后再试"},
 		{name: "rate limited", err: platform.ErrRateLimited, want: "请求过于频繁，请稍后重试"},
 		{name: "auth required", err: platform.ErrAuthRequired, want: "平台认证已失效，请联系管理员更新凭据"},
+		{
+			name: "verification required",
+			err: &platform.VerificationRequiredError{
+				URL:       "https://verify.example/challenge?token=opaque",
+				ExpiresAt: time.Now().Add(time.Minute),
+			},
+			want: "平台需要进行安全验证。请打开以下链接完成验证，然后回到这里重新点歌：\nhttps://verify.example/challenge?token=opaque",
+		},
 		{name: "unavailable", err: platform.ErrUnavailable, want: "当前歌曲暂不可用，请稍后再试"},
+		{name: "incomplete audio", err: platform.ErrIncompleteAudio, want: "未能获取或确认完整音频，已停止发送试听或不完整文件"},
 	}
 
 	for _, tt := range tests {
@@ -352,6 +361,30 @@ func TestUserVisibleDownloadErrorMappings(t *testing.T) {
 			got := userVisibleDownloadError(zhCtx(), tt.err)
 			if got != tt.want {
 				t.Fatalf("unexpected message: got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUserVisibleDownloadErrorDoesNotExposeUnsafeVerificationURL(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *platform.VerificationRequiredError
+	}{
+		{name: "expired", err: &platform.VerificationRequiredError{URL: "https://verify.example/expired?token=secret", ExpiresAt: time.Now().Add(-time.Minute)}},
+		{name: "plain http", err: &platform.VerificationRequiredError{URL: "http://verify.example/challenge?token=secret"}},
+		{name: "userinfo", err: &platform.VerificationRequiredError{URL: "https://account:secret@verify.example/challenge"}},
+		{name: "line break", err: &platform.VerificationRequiredError{URL: "https://verify.example/challenge\naccount=secret"}},
+	}
+	want := "平台需要进行安全验证，但验证链接当前不可用。请重新点歌以获取新的验证链接。"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := userVisibleDownloadError(zhCtx(), tt.err)
+			if got != want {
+				t.Fatalf("unexpected message: got %q want %q", got, want)
+			}
+			if strings.Contains(got, "secret") || strings.Contains(got, "token=") || strings.Contains(got, "account=") {
+				t.Fatalf("unsafe verification URL leaked to user: %q", got)
 			}
 		})
 	}

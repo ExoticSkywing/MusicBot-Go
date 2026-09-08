@@ -39,7 +39,14 @@ func (k *KugouPlatform) AccountStatus(ctx context.Context) (platform.AccountStat
 }
 
 func (k *KugouPlatform) SupportedLoginMethods() []string {
-	return []string{"qr", "sign", "renew", "auto", "status"}
+	return []string{"qr", "sign", "renew", "auto", "status", "verify-test"}
+}
+
+func (k *KugouPlatform) StartVerificationTest(ctx context.Context) (platform.VerificationTest, error) {
+	if k == nil || k.client == nil || k.client.Concept() == nil {
+		return platform.VerificationTest{}, errConceptVerificationFlow
+	}
+	return k.client.Concept().startVerificationTest(ctx)
 }
 
 func (k *KugouPlatform) SignIn(ctx context.Context) (string, error) {
