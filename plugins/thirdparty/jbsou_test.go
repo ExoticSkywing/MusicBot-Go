@@ -2,6 +2,7 @@ package thirdparty
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,12 @@ import (
 
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 )
+
+type jbsouRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f jbsouRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestJBSouResolveQQTrack(t *testing.T) {
 	const trackID = "002miT7m27YYe9"
@@ -93,6 +100,59 @@ func TestJBSouResolveQQTrack(t *testing.T) {
 	}
 	if homeCalls.Load() != 1 || lookupCalls.Load() != 1 || mediaCalls.Load() != 1 {
 		t.Fatalf("calls home=%d lookup=%d media=%d, want 1 each", homeCalls.Load(), lookupCalls.Load(), mediaCalls.Load())
+	}
+}
+
+func TestJBSouResolveQQTrackFromKnownCrossPlatformCDN(t *testing.T) {
+	const trackID = "003cI52o4daJJL"
+	client := &http.Client{Transport: jbsouRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		response := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}
+		switch {
+		case req.Method == http.MethodGet && req.URL.Host == "www.jbsou.cn" && req.URL.Path == "/":
+			return response, nil
+		case req.Method == http.MethodPost && req.URL.Host == "www.jbsou.cn" && req.URL.Path == "/":
+			response.Header.Set("Content-Type", "application/json")
+			response.Body = io.NopCloser(strings.NewReader(`{"code":200,"data":[{"songid":"` + trackID + `","url":"/api.php?get=url&type=qq&id=` + trackID + `"}]}`))
+			return response, nil
+		case req.Method == http.MethodGet && req.URL.Host == "www.jbsou.cn" && req.URL.Path == "/api.php":
+			response.StatusCode = http.StatusFound
+			response.Header.Set("Location", "https://webfs.kugou.com/full_ap1000_qu320_cross-source.mp3")
+			return response, nil
+		case req.Method == http.MethodGet && req.URL.Host == "webfs.kugou.com":
+			response.StatusCode = http.StatusPartialContent
+			response.Header.Set("Content-Range", "bytes 0-1023/10587098")
+			probe := make([]byte, jbsouProbeBytes)
+			copy(probe, "ID3")
+			response.Body = io.NopCloser(strings.NewReader(string(probe)))
+			return response, nil
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+			return nil, nil
+		}
+	})}
+
+	provider, err := newJBSouProvider(defaultJBSouBaseURL, 2*time.Second, client, nil)
+	if err != nil {
+		t.Fatalf("newJBSouProvider: %v", err)
+	}
+	info, err := provider.Resolve(t.Context(), "qqmusic", trackID, platform.QualityHigh)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	parsed, err := url.Parse(info.URL)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+	if parsed.Hostname() != "webfs.kugou.com" || info.Size != 10587098 || info.Format != "mp3" {
+		t.Fatalf("cross-CDN info = %+v", info)
+	}
+	if err := info.ValidateURL(info.URL); err != nil {
+		t.Fatalf("ValidateURL: %v", err)
 	}
 }
 

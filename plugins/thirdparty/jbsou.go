@@ -101,31 +101,29 @@ func (p *jbsouProvider) Resolve(ctx context.Context, platformName, trackID strin
 	case "qqmusic":
 		requestType = "qq"
 		mediaLabel = "QQ Music"
-		if mediaURLAllowed == nil {
-			mediaURLAllowed = isQQMusicMediaURL
-		}
 	case "kugou":
 		requestType = "kugou"
 		mediaLabel = "Kugou"
 		classifyMedia = classifyKugouMedia
 		equalFoldTrackID = true
 		trackID = normalizeKugouTrackID(trackID)
-		if mediaURLAllowed == nil {
-			mediaURLAllowed = isKugouMediaURL
-		}
 	case "kuwo":
 		requestType = "kuwo"
 		mediaLabel = "Kuwo"
 		classifyMedia = classifyKuwoMedia
-		if mediaURLAllowed == nil {
-			mediaURLAllowed = isKuwoMediaURL
-		}
 	default:
 		return nil, fmt.Errorf("jbsou: unsupported platform %q", platformName)
 	}
 	trackID = strings.TrimSpace(trackID)
 	if trackID == "" {
 		return nil, fmt.Errorf("jbsou: empty or invalid %s track ID", mediaLabel)
+	}
+	// JBSou resolves an exact platform track ID, but the resulting audio may be
+	// served from any of its supported music CDNs. Keep the strict shared CDN
+	// allowlist instead of incorrectly requiring the CDN to match the catalog
+	// platform (for example, a QQ songmid may legitimately resolve to Kugou).
+	if mediaURLAllowed == nil {
+		mediaURLAllowed = isJBSouMediaURL
 	}
 
 	if err := p.establishSession(ctx); err != nil {
