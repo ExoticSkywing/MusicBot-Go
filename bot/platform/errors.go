@@ -17,6 +17,10 @@ var (
 	// ErrUnavailable is returned when content is not available in the current region or context.
 	ErrUnavailable = errors.New("platform: content unavailable")
 
+	// ErrIncompleteAudio prevents delivery when only a preview is available or
+	// the downloaded audio cannot be verified against the full catalog duration.
+	ErrIncompleteAudio = fmt.Errorf("%w: full audio could not be verified", ErrUnavailable)
+
 	// ErrUnsupported is returned when a feature is not supported by the platform.
 	ErrUnsupported = errors.New("platform: feature not supported")
 

@@ -343,6 +343,7 @@ func TestUserVisibleDownloadErrorMappings(t *testing.T) {
 			want: "平台需要进行安全验证。请打开以下链接完成验证，然后回到这里重新点歌：\nhttps://verify.example/challenge?token=opaque",
 		},
 		{name: "unavailable", err: platform.ErrUnavailable, want: "当前歌曲暂不可用，请稍后再试"},
+		{name: "incomplete audio", err: platform.ErrIncompleteAudio, want: "未能获取或确认完整音频，已停止发送试听或不完整文件"},
 	}
 
 	for _, tt := range tests {

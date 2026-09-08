@@ -316,6 +316,8 @@ type preparedArtifact struct {
 
 type preparedSongInfo struct {
 	FileExt         string
+	AudioValidated  bool
+	Duration        int
 	MusicSize       int
 	BitRate         int
 	Quality         string
@@ -1206,7 +1208,7 @@ func needsPreparedAudioQualityVerification(platformName, quality string) bool {
 }
 
 func isReusableCachedSong(cached *botpkg.SongInfo, platformName, quality string) bool {
-	if cached == nil {
+	if cached == nil || !cached.AudioValidated {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(platformName), "applemusic") || !isAppleMusicEnhancedQuality(quality) {
@@ -1239,8 +1241,8 @@ func (h *MusicHandler) trySendCachedTrack(
 	}
 	if !isReusableCachedSong(cached, platformName, cacheQuality) {
 		if h.Logger != nil {
-			h.Logger.Info("applemusic: bypassing cache from an older quality classifier",
-				"trackID", trackID, "quality", cacheQuality, "revision", cached.QualityRevision)
+			h.Logger.Info("bypassing unverified audio cache",
+				"platform", platformName, "trackID", trackID, "quality", cacheQuality)
 		}
 		return botpkg.SongInfo{}, false, nil
 	}
@@ -1449,6 +1451,8 @@ func capturePreparedSongInfo(songInfo *botpkg.SongInfo) preparedSongInfo {
 	}
 	return preparedSongInfo{
 		FileExt:         songInfo.FileExt,
+		AudioValidated:  songInfo.AudioValidated,
+		Duration:        songInfo.Duration,
 		MusicSize:       songInfo.MusicSize,
 		BitRate:         songInfo.BitRate,
 		Quality:         songInfo.Quality,
@@ -1467,6 +1471,8 @@ func applyPreparedSongInfo(songInfo *botpkg.SongInfo, prepared preparedSongInfo)
 		return
 	}
 	songInfo.FileExt = prepared.FileExt
+	songInfo.AudioValidated = prepared.AudioValidated
+	songInfo.Duration = prepared.Duration
 	songInfo.MusicSize = prepared.MusicSize
 	songInfo.BitRate = prepared.BitRate
 	if strings.TrimSpace(prepared.Quality) != "" {
@@ -1999,6 +2005,10 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	if info == nil || info.URL == "" {
 		return "", "", cleanupList, errors.New("download info unavailable")
 	}
+	if track == nil || songInfo == nil || track.Duration <= 0 {
+		return "", "", cleanupList, fmt.Errorf("%w: missing catalog duration", platform.ErrIncompleteAudio)
+	}
+	songInfo.AudioValidated = false
 
 	if info.Format == "" {
 		info.Format = "mp3"
@@ -2130,6 +2140,18 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	cleanupList = append(cleanupList, filePath, finalDir)
 
 	h.embedTrackTags(ctx, plat, track, trackID, info, filePath, embedPicPath)
+
+	// Validate the final bytes, after normalization and tag writers have finished.
+	// Only this file is allowed to establish a reusable audio cache entry.
+	duration, err := download.VerifyFullAudio(ctx, filePath, track.Duration)
+	if err != nil {
+		if cleanupErr := cleanupFiles(cleanupList...); cleanupErr != nil && h.Logger != nil {
+			h.Logger.Warn("failed to clean rejected audio", "error", cleanupErr)
+		}
+		return "", "", cleanupList, err
+	}
+	songInfo.AudioValidated = true
+	songInfo.Duration = int(duration.Round(time.Second) / time.Second)
 
 	return filePath, thumbPicPath, cleanupList, nil
 }
@@ -2767,6 +2789,9 @@ func (h *MusicHandler) updateQueuedStatusText(messageID int, text string) {
 func (h *MusicHandler) sendMusicDirect(ctx context.Context, b *telego.Bot, message *telego.Message, songInfo *botpkg.SongInfo, musicPath, picPath string) (*telego.Message, error) {
 	if songInfo == nil {
 		return nil, errors.New("song info required")
+	}
+	if !songInfo.AudioValidated {
+		return nil, platform.ErrIncompleteAudio
 	}
 	if message == nil {
 		return nil, errors.New("message required")

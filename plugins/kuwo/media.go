@@ -517,7 +517,14 @@ func durationsMatch(actual, expected time.Duration) bool {
 }
 
 func terminalUnavailable(reasons ...error) error {
-	items := []error{platform.ErrUnavailable, errTerminalCandidate}
+	classification := error(platform.ErrUnavailable)
+	for _, reason := range reasons {
+		if errors.Is(reason, errPreviewMedia) {
+			classification = platform.ErrIncompleteAudio
+			break
+		}
+	}
+	items := []error{classification, errTerminalCandidate}
 	items = append(items, reasons...)
 	return errors.Join(items...)
 }

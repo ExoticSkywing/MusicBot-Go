@@ -791,6 +791,9 @@ func userVisibleDownloadError(ctx context.Context, err error) string {
 		if errors.Is(err, platform.ErrAuthRequired) {
 			return tr(ctx, "err_auth_required")
 		}
+		if errors.Is(err, platform.ErrIncompleteAudio) {
+			return tr(ctx, "err_incomplete_audio")
+		}
 		if errors.Is(err, platform.ErrUnavailable) {
 			return tr(ctx, "err_unavailable")
 		}

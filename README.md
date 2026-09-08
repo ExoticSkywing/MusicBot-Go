@@ -2,7 +2,7 @@
 
 多平台音乐下载 / 分享的 Telegram Bot。发链接或搜索即可下载音乐、歌词与封面，带缓存、限流和插件化扩展。
 
-> 基于 [XiaoMengXinX/Music163bot-Go](https://github.com/XiaoMengXinX/Music163bot-Go) 重构，改为插件化架构以支持多平台。许可证 GPL-3.0。
+> 基于 [XiaoMengXinX/Music163bot-Go](https://github.com/XiaoMengXinX/Music163bot-Go) 重构，改为插件化架构以支持多平台。仓库原有代码采用 GPL-3.0；`plugins/musiclib/internal` 中移植的上游代码采用 AGPL-3.0-only，详见下方说明。
 
 ## 支持平台
 
@@ -13,6 +13,11 @@
 | 酷狗音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 酷我音乐 | ✓ | ✓ | ✓ | ✓ | — |
 | 汽水音乐 | ✓ | ✓ | ✓ | ✓ | — |
+| 咪咕音乐 | ✓ | ✓ | ✓ | 依音源 | — |
+| 千千音乐 | ✓ | ✓ | ✓ | 依音源 | — |
+| 5sing | ✓ | ✓ | ✓ | — | — |
+| Jamendo | ✓ | ✓ | — | 依音源 | — |
+| JOOX | 受限 ⁴ | ✓ | ✓ | — | — |
 | 哔哩哔哩 | ✓ | ✓ | ✓ | ✓ ¹ | — |
 | Apple Music | ✓ | ✓ | ✓ | ✓ ² | — |
 | YouTube Music | ✓ | ✓ | ✓ | — | — |
@@ -23,6 +28,13 @@
 ² Apple Music 的 AAC 256k 开箱即用；无损 / Hi-Res / Atmos 需额外的解密服务，见 [Apple Music 无损](#apple-music-无损hi-resatmos)。
 
 ³ Spotify 下载需要 `sp_dc` 加自备的 Widevine L3 设备文件（仓库不内置），上限 AAC 256k；只配 Web API 时仅提供搜索与元数据。
+
+⁴ JOOX 的旧详情接口已失效，插件回退到官网页面解析。当前匿名抽测只获得试听片段，插件会拒绝将其作为完整歌曲；仅在官网明确提供完整音频时返回下载地址，完整下载尚未实测确认。
+
+咪咕、千千、5sing、Jamendo 和 JOOX 的实现移植自
+[guohuiyuan/music-lib](https://github.com/guohuiyuan/music-lib/tree/3b22e851f4fa2f55ceab943fa846a71536fed4f9)，支持歌曲和集合链接；5sing 不提供专辑，Jamendo 上游不提供歌词。这些第三方公开接口、地区限制和账号权益可能变化，表格描述的是当前适配器能力，不代表所有接口或歌曲都已在每个地区实时验证。实现、验证方式和已知限制见 [music-lib 平台移植说明](plugins/musiclib/README.md)。
+
+`plugins/musiclib/internal` 保留上游 AGPL-3.0-only 许可证及来源声明；仓库其余已有文件继续使用各自原许可证。分发或通过网络提供组合程序时，还需遵守该 AGPL 组件适用于组合程序的网络源码提供要求，许可证文本见 [plugins/musiclib/internal/LICENSE](plugins/musiclib/internal/LICENSE)。
 
 ## 快速开始
 
@@ -55,7 +67,7 @@ docker compose up -d --build
 
 ### 裸机运行
 
-需要 Go 1.26+；用 `/recognize` 还需 ffmpeg（识曲指纹编码已用纯 Go 实现，无需 Node.js）。
+需要 Go 1.26+ 和 ffprobe（所有平台发送音频前均需完整性校验）；用 `/recognize` 还需 ffmpeg（识曲指纹编码已用纯 Go 实现，无需 Node.js）。Docker 镜像已内置 ffmpeg / ffprobe。
 
 ```bash
 go build -o MusicBot-Go
@@ -88,11 +100,15 @@ sp_dc    = YOUR_SP_DC_COOKIE       # 下载需要；另需自备 .wvd（见下�
 wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 ```
 
-酷我、汽水、哔哩哔哩和 YouTube Music 匿名即可使用；YouTube Music 配置 Cookie 可解锁 256k 并降低限流概率。
+酷我、汽水、哔哩哔哩和 YouTube Music 支持匿名访问，但不保证每首歌曲均可取得完整音频；YouTube Music 配置 Cookie 可解锁 256k 并降低限流概率。咪咕、千千、5sing、Jamendo 和 JOOX 也允许在各自配置段中填写可选 Cookie，实际可用性取决于地区、歌曲权益和第三方接口状态。
+
+所有平台均拒绝试听片段：已知试听标记会在解析时拦截，下载后还会遍历实际音频包并与目录完整时长对照。时长缺失、明显不符或无法完成校验时停止发送，不会把试听文件作为降级结果。升级前未通过该校验的音频缓存会自动重新下载校验，正常短歌曲不按固定时长拒绝。
 
 完整选项（并发、缓存、限流、代理、日志、各平台细节等）见 `config_example.ini` 的注释，每一项都有说明。
 
-> 多数平台账号也可以不写进配置，改用管理员命令 `/login <平台> cookie <cookie>` 在运行时导入（会回写 `config.ini`）。
+> 支持运行时 Cookie 导入的平台可以使用管理员命令 `/login <平台> cookie <cookie>`（会回写 `config.ini`）。新增的五个 music-lib 平台暂不实现运行时登录；请在对应 `[plugins.<name>]` 段填写 Cookie 后执行 `/reload`。
+>
+> 现有配置只要包含任意 `[plugins.*]` 段，程序便只加载显式列出的插件。升级后需要把希望启用的 `[plugins.migu]`、`[plugins.qianqian]`、`[plugins.fivesing]`、`[plugins.jamendo]`、`[plugins.joox]` 段加入原配置；完整示例见 `config_example.ini`。
 
 ## 命令
 

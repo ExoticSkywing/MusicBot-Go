@@ -18,7 +18,7 @@ import (
 
 func TestAcquirePreparedMediaSharesReadyArtifactUntilAllWaitersRelease(t *testing.T) {
 	cacheDir := t.TempDir()
-	payload := []byte("prepared audio")
+	payload := preparedAudioWAV(t)
 	var downloadCalls atomic.Int32
 
 	service := download.NewDownloadService(download.DownloadServiceOptions{
@@ -27,7 +27,7 @@ func TestAcquirePreparedMediaSharesReadyArtifactUntilAllWaitersRelease(t *testin
 	info := &platform.DownloadInfo{
 		URL:     "test://prepared-artifact",
 		Size:    int64(len(payload)),
-		Format:  "mp3",
+		Format:  "wav",
 		Quality: platform.QualityHigh,
 		Downloader: func(_ context.Context, _ *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 			downloadCalls.Add(1)
@@ -121,6 +121,9 @@ func TestAcquirePreparedMediaSharesReadyArtifactUntilAllWaitersRelease(t *testin
 	if secondPicPath != firstPicPath {
 		t.Fatalf("second acquire picture path = %q, want shared path %q", secondPicPath, firstPicPath)
 	}
+	if !firstInfo.AudioValidated || !secondInfo.AudioValidated || secondInfo.Duration != 1 {
+		t.Fatal("full audio validation was not propagated to all waiters")
+	}
 
 	releaseSecond()
 	if _, err := os.Stat(firstMusicPath); err != nil {
@@ -159,7 +162,7 @@ func TestAcquirePreparedMediaSharesReadyArtifactUntilAllWaitersRelease(t *testin
 
 func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.T) {
 	cacheDir := t.TempDir()
-	payload := []byte("prepared audio")
+	payload := preparedAudioWAV(t)
 	firstDownloadStarted := make(chan struct{})
 	allowFirstDownload := make(chan struct{})
 	firstDownloaderReturned := make(chan struct{})
@@ -171,7 +174,7 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 	info := &platform.DownloadInfo{
 		URL:     "test://prepared-artifact-canceled-generation",
 		Size:    int64(len(payload)),
-		Format:  "mp3",
+		Format:  "wav",
 		Quality: platform.QualityHigh,
 		Downloader: func(_ context.Context, _ *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 			call := downloadCalls.Add(1)

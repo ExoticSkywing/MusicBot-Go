@@ -470,6 +470,27 @@ func TestFetchAlbumSongsSplitsFilenameIntoTitleAndArtist(t *testing.T) {
 	}
 }
 
+func TestFetchAlbumSongsRejectsClipHashOnlyEntry(t *testing.T) {
+	oldClient := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasPrefix(req.URL.String(), "http://mobilecdnbj.kugou.com/api/v3/album/song?") {
+			return nil, fmt.Errorf("unexpected url: %s", req.URL.String())
+		}
+		body := `{"data":{"total":1,"info":[{"filename":"Artist - Preview Only","hash":"","320hash":"","sqhash":"","duration":30,"trans_param":{"ogg_320_hash":"","ogg_128_hash":"","hash_offset":{"clip_hash":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}]}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	defer func() { http.DefaultClient = oldClient }()
+
+	client := NewClient("", nil)
+	songs, total, err := client.fetchAlbumSongs(context.Background(), "960399")
+	if err != nil {
+		t.Fatalf("fetchAlbumSongs() error = %v", err)
+	}
+	if total != 1 || len(songs) != 0 {
+		t.Fatalf("fetchAlbumSongs() total=%d songs=%+v, want catalog total with no downloadable clip entry", total, songs)
+	}
+}
+
 func TestDecodePlaylistGCIDReturnsCollectionAndSpecialIDs(t *testing.T) {
 	oldClient := http.DefaultClient
 	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

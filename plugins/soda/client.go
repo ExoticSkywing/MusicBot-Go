@@ -65,6 +65,7 @@ type sodaTrackV2Response struct {
 	Track       sodaTrack `json:"track"`
 	TrackPlayer struct {
 		URLPlayerInfo string `json:"url_player_info"`
+		MediaID       string `json:"media_id"`
 	} `json:"track_player"`
 	Lyric struct {
 		Content string `json:"content"`
@@ -208,6 +209,11 @@ type sodaTrack struct {
 	AudioInfo struct {
 		PlayInfoList []sodaPlayInfo `json:"play_info_list"`
 	} `json:"audio_info"`
+	Preview struct {
+		Duration int    `json:"duration"`
+		Start    int    `json:"start"`
+		VID      string `json:"vid"`
+	} `json:"preview"`
 }
 
 type sodaPlayInfo struct {
@@ -631,6 +637,9 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 	if strings.TrimSpace(trackData.ID) == "" {
 		return nil, platform.NewNotFoundError("soda", "track", trackID)
 	}
+	if mediaID, previewID := strings.TrimSpace(resp.TrackPlayer.MediaID), strings.TrimSpace(trackData.Preview.VID); mediaID != "" && previewID != "" && mediaID == previewID {
+		return nil, fmt.Errorf("%w: soda player selected the catalog preview media", platform.ErrIncompleteAudio)
+	}
 	playerInfoURL := strings.TrimSpace(resp.TrackPlayer.URLPlayerInfo)
 	if playerInfoURL == "" {
 		return nil, fmt.Errorf("soda: player info url missing")
@@ -648,6 +657,19 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 		}
 		playInfos[i].Quality = strings.ToLower(strings.TrimSpace(playInfos[i].Quality))
 	}
+	completePlayInfos := make([]sodaPlayInfo, 0, len(playInfos))
+	sawIncompleteDuration := false
+	for _, item := range playInfos {
+		if sodaPlayInfoIsShorterThanTrack(trackData.Duration, item.Duration) {
+			sawIncompleteDuration = true
+			continue
+		}
+		completePlayInfos = append(completePlayInfos, item)
+	}
+	if len(completePlayInfos) == 0 && sawIncompleteDuration {
+		return nil, fmt.Errorf("%w: soda player returned only shorter streams", platform.ErrIncompleteAudio)
+	}
+	playInfos = completePlayInfos
 	if c.logger != nil {
 		choices := make([]string, 0, len(playInfos))
 		for _, item := range playInfos {
@@ -690,6 +712,23 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 		Quality:       qualityLevel,
 		Downloader:    c.DownloadAndDecrypt,
 	}, nil
+}
+
+// sodaPlayInfoIsShorterThanTrack compares the selected media's declared
+// duration (seconds) with the catalog duration (milliseconds). It deliberately
+// has no absolute "short song" cutoff: a real short track passes when both
+// sources agree, while a trial window is rejected only when it is materially
+// shorter than that specific track.
+func sodaPlayInfoIsShorterThanTrack(trackDurationMS int, playDurationSeconds float64) bool {
+	if trackDurationMS <= 0 || playDurationSeconds <= 0 {
+		return false
+	}
+	catalogSeconds := float64(trackDurationMS) / 1000
+	tolerance := catalogSeconds * 0.05
+	if tolerance > 3 {
+		tolerance = 3
+	}
+	return catalogSeconds-playDurationSeconds > tolerance
 }
 
 func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {

@@ -897,15 +897,13 @@ func (h *InlineSearchHandler) inlineCachedOrCommand(ctx context.Context, b *tele
 		// An implicit Apple Music request may resolve to Atmos only after the
 		// catalog track is inspected. A cached stereo default must not short-cut
 		// that decision; an exact Atmos cache hit is safe to return immediately.
-		if info := h.findCachedSong(ctx, platformName, trackID, platform.QualityAtmos.String()); info != nil {
-			h.inlineCached(ctx, b, query, info, platformName, platform.QualityAtmos.String())
+		if info := h.findCachedSong(ctx, platformName, trackID, platform.QualityAtmos.String()); info != nil && h.inlineCached(ctx, b, query, info, platformName, platform.QualityAtmos.String()) {
 			return true
 		}
 		h.inlineCommand(ctx, b, query, platformName, trackID, qualityIntent)
 		return true
 	}
-	if info := h.findCachedSong(ctx, platformName, trackID, qualityValue); info != nil {
-		h.inlineCached(ctx, b, query, info, platformName, qualityValue)
+	if info := h.findCachedSong(ctx, platformName, trackID, qualityValue); info != nil && h.inlineCached(ctx, b, query, info, platformName, qualityValue) {
 		return true
 	}
 	h.inlineCommand(ctx, b, query, platformName, trackID, qualityIntent)
@@ -1024,9 +1022,9 @@ func (h *InlineSearchHandler) tryInlineDirectEpisodes(ctx context.Context, b *te
 	return true
 }
 
-func (h *InlineSearchHandler) inlineCached(ctx context.Context, b *telego.Bot, query *telego.InlineQuery, info *botpkg.SongInfo, platformFallback, qualityFallback string) {
-	if info == nil {
-		return
+func (h *InlineSearchHandler) inlineCached(ctx context.Context, b *telego.Bot, query *telego.InlineQuery, info *botpkg.SongInfo, platformFallback, qualityFallback string) bool {
+	if b == nil || query == nil || info == nil || !info.AudioValidated || strings.TrimSpace(info.FileID) == "" {
+		return false
 	}
 	platformName := strings.TrimSpace(info.Platform)
 	if platformName == "" {
@@ -1085,6 +1083,7 @@ func (h *InlineSearchHandler) inlineCached(ctx context.Context, b *telego.Bot, q
 		IsPersonal:    false,
 		CacheTime:     3600,
 	})
+	return true
 }
 
 func (h *InlineSearchHandler) resolveDefaultQuality(ctx context.Context, userID int64) string {
@@ -1217,6 +1216,9 @@ func (h *InlineSearchHandler) findCachedSong(ctx context.Context, platformName, 
 		if id, err := strconv.Atoi(trackID); err == nil {
 			info, err := h.Repo.FindByMusicID(ctx, id)
 			if err == nil && info != nil && info.FileID != "" && info.SongName != "" {
+				if !isReusableCachedSong(info, platformName, info.Quality) {
+					return nil
+				}
 				verifyCachedNeteaseQuality(ctx, h.PlatformManager, h.Repo, nil, info, platformName, trackID, info.Quality)
 				return info
 			}

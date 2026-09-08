@@ -337,6 +337,51 @@ func TestClientFetchDownloadInfoUsesPlayerInfoURL(t *testing.T) {
 	}
 }
 
+func TestClientFetchDownloadInfoRejectsExplicitPreviewMedia(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/luna/h5/seo_track" {
+			t.Fatalf("preview media should be rejected before player request, got %s", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"status_code":0,"seo_track":{"track":{"id":"123456789","duration":180000,"preview":{"duration":30000,"vid":"preview-media"}}},"track_player":{"media_id":"preview-media","url_player_info":"https://media.example.com/player"}}`)
+	}))
+	defer server.Close()
+
+	client := newSodaTestClient(server.URL)
+	info, err := client.FetchDownloadInfo(context.Background(), "123456789", platform.QualityHigh)
+	if info != nil || !errors.Is(err, platform.ErrIncompleteAudio) {
+		t.Fatalf("FetchDownloadInfo() = %#v, %v, want ErrIncompleteAudio", info, err)
+	}
+}
+
+func TestClientFetchDownloadInfoRejectsStreamShorterThanCatalogTrack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/luna/h5/seo_track":
+			_, _ = fmt.Fprint(w, `{"status_code":0,"seo_track":{"track":{"id":"123456789","duration":180000}},"track_player":{"media_id":"full-or-preview","url_player_info":"https://media.example.com/player"}}`)
+		case "/player":
+			_, _ = fmt.Fprint(w, `{"Result":{"Data":{"PlayInfoList":[{"MainPlayUrl":"https://download.example.com/preview.m4a","Size":500000,"Bitrate":128000,"Format":"m4a","Quality":"higher","Duration":30.001}]}}}`)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newSodaTestClient(server.URL)
+	info, err := client.FetchDownloadInfo(context.Background(), "123456789", platform.QualityHigh)
+	if info != nil || !errors.Is(err, platform.ErrIncompleteAudio) {
+		t.Fatalf("FetchDownloadInfo() = %#v, %v, want ErrIncompleteAudio", info, err)
+	}
+}
+
+func TestSodaDurationComparisonAllowsGenuineShortTrack(t *testing.T) {
+	if sodaPlayInfoIsShorterThanTrack(12_000, 12.0) {
+		t.Fatal("matching 12-second track classified as preview")
+	}
+	if !sodaPlayInfoIsShorterThanTrack(180_000, 30.0) {
+		t.Fatal("30-second media for a 180-second track was not classified as incomplete")
+	}
+}
+
 func TestEnsureSodaPlayableLosslessFLAC_RewritesAfterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	srcPath := filepath.Join(tmpDir, "track.mp4")

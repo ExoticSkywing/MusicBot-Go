@@ -33,6 +33,7 @@ type SongInfoModel struct {
 	EmbPicSize      int
 	BitRate         int
 	Duration        int
+	AudioValidated  bool `gorm:"not null;default:false"`
 	FileID          string
 	ThumbFileID     string
 	FromUserID      int64
@@ -86,6 +87,7 @@ func toInternal(model SongInfoModel) *bot.SongInfo {
 		EmbPicSize:      model.EmbPicSize,
 		BitRate:         model.BitRate,
 		Duration:        model.Duration,
+		AudioValidated:  model.AudioValidated,
 		FileID:          model.FileID,
 		ThumbFileID:     model.ThumbFileID,
 		FromUserID:      model.FromUserID,
@@ -125,6 +127,7 @@ func toModel(info *bot.SongInfo) *SongInfoModel {
 		EmbPicSize:      info.EmbPicSize,
 		BitRate:         info.BitRate,
 		Duration:        info.Duration,
+		AudioValidated:  info.AudioValidated,
 		FileID:          info.FileID,
 		ThumbFileID:     info.ThumbFileID,
 		FromUserID:      info.FromUserID,

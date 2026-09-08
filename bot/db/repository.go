@@ -614,6 +614,7 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 				"emb_pic_size",
 				"bit_rate",
 				"duration",
+				"audio_validated",
 				"file_id",
 				"thumb_file_id",
 				"from_user_id",

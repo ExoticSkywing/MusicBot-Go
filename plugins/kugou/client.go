@@ -1048,7 +1048,10 @@ func (c *Client) fetchAlbumSongs(ctx context.Context, albumID string) ([]model.S
 	}
 	results := make([]model.Song, 0, len(resp.Data.Info))
 	for _, item := range resp.Data.Info {
-		primaryHash := firstNonEmpty(item.Hash, item.Hash320, item.SQHash, item.TransParam.Ogg320Hash, item.TransParam.Ogg128Hash, item.TransParam.HashOffset.ClipHash)
+		// hash_offset.clip_hash is Kugou's explicit audition excerpt. A collection
+		// entry with no complete-file hash must stay unavailable rather than become
+		// a callback that resolves the clip as if it were the full track.
+		primaryHash := firstNonEmpty(item.Hash, item.Hash320, item.SQHash, item.TransParam.Ogg320Hash, item.TransParam.Ogg128Hash)
 		if normalizeHash(primaryHash) == "" {
 			continue
 		}

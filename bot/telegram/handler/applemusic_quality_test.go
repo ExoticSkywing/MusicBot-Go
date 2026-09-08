@@ -35,12 +35,13 @@ func TestClassifyPreparedAppleMusicQuality(t *testing.T) {
 }
 
 func TestIsReusableCachedSongInvalidatesLegacyAppleEnhancedCache(t *testing.T) {
-	legacy := &botpkg.SongInfo{Platform: "applemusic", Quality: "hires", QualityVerified: true}
+	legacy := &botpkg.SongInfo{AudioValidated: true, Platform: "applemusic", Quality: "hires", QualityVerified: true}
 	if isReusableCachedSong(legacy, "applemusic", "hires") {
 		t.Fatal("legacy Apple Music enhanced cache should be bypassed")
 	}
 
 	current := &botpkg.SongInfo{
+		AudioValidated:  true,
 		Platform:        "applemusic",
 		Quality:         "hires",
 		QualityVerified: true,

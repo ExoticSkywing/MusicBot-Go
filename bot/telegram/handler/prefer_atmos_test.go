@@ -139,7 +139,8 @@ func TestFindInlineCachedSongPreferAtmosDoesNotUseStereoCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo.platformSongs["applemusic:"+trackID+":lossless"] = &botpkg.SongInfo{
-		Platform: "applemusic", TrackID: trackID, Quality: "lossless", FileID: "stereo",
+		AudioValidated: true,
+		Platform:       "applemusic", TrackID: trackID, Quality: "lossless", FileID: "stereo",
 		QualityVerified: true, QualityRevision: botpkg.AppleMusicQualityRevision,
 	}
 
@@ -152,7 +153,8 @@ func TestFindInlineCachedSongPreferAtmosDoesNotUseStereoCache(t *testing.T) {
 	}
 
 	repo.platformSongs["applemusic:"+trackID+":atmos"] = &botpkg.SongInfo{
-		Platform: "applemusic", TrackID: trackID, Quality: "atmos", FileID: "spatial",
+		AudioValidated: true,
+		Platform:       "applemusic", TrackID: trackID, Quality: "atmos", FileID: "spatial",
 		QualityVerified: true, QualityRevision: botpkg.AppleMusicQualityRevision,
 	}
 	cached, quality, err = h.findInlineCachedSong(ctx, userID, 0, false, "applemusic", trackID, "auto-lossless")
@@ -206,7 +208,8 @@ func TestPrepareInlineSongAutoAtmosFallsBackToBaselineCache(t *testing.T) {
 	}
 	repo.userSettings[userID] = &botpkg.UserSettings{UserID: userID, DefaultQuality: "lossless"}
 	repo.platformSongs["applemusic:track:lossless"] = &botpkg.SongInfo{
-		Platform: "applemusic", TrackID: "track", Quality: "lossless", FileID: "stereo",
+		AudioValidated: true,
+		Platform:       "applemusic", TrackID: "track", Quality: "lossless", FileID: "stereo",
 		QualityVerified: true, QualityRevision: botpkg.AppleMusicQualityRevision,
 	}
 	h := &MusicHandler{Repo: repo, PlatformManager: manager, DefaultQuality: "hires"}
