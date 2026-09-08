@@ -405,8 +405,8 @@ func (q *Qianqian) fetchDownloadURL(tsid string, song *model.Song) (string, erro
 				Size           int64  `json:"size"`
 				Duration       int    `json:"duration"`
 				TrailAudioInfo struct {
-					Path     string `json:"path"`
-					Duration int    `json:"duration"`
+					// Only the preview path is needed; upstream duration may be a string.
+					Path string `json:"path"`
 				} `json:"trail_audio_info"`
 			} `json:"data"`
 		}

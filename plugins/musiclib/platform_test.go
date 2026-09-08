@@ -3,6 +3,7 @@ package musiclib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -152,6 +153,31 @@ func TestQianqianRejectsPreviewAndReportsSelectedQuality(t *testing.T) {
 			}
 			if err != nil || info.Bitrate != 128 || info.Quality != platform.QualityStandard {
 				t.Fatalf("wrong selected quality: %#v, %v", info, err)
+			}
+		})
+	}
+}
+
+func TestQianqianStringPreviewDurationDoesNotDiscardFullTrack(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprint(full), func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/v1/song/info" {
+					return jsonResponse(req, `{"data":[{"title":"深夜书店","duration":260}]}`), nil
+				}
+				path := ""
+				if full {
+					path = `"path":"https://cdn.example/full.flac","format":"flac","duration":260,`
+				}
+				return jsonResponse(req, `{"data":{`+path+`"trail_audio_info":{"path":"https://cdn.example/preview.mp3","duration":"30","start_time":"0"}}}`), nil
+			})}
+			info, err := NewPlatform("qianqian", "", client, time.Second).GetDownloadInfo(context.Background(), "T10038972257", platform.QualityLossless)
+			if full {
+				if err != nil || info == nil || info.Format != "flac" || info.URL != "https://cdn.example/full.flac" {
+					t.Fatalf("full audio discarded: %#v, %v", info, err)
+				}
+			} else if info != nil || !errors.Is(err, platform.ErrIncompleteAudio) {
+				t.Fatalf("preview not rejected: %#v, %v", info, err)
 			}
 		})
 	}
