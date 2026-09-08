@@ -29,6 +29,9 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 		cookie = strings.Trim(cfg.GetPluginString("soda", "cookie"), "`\"'")
 	}
 	client := NewClient(cookie, time.Duration(timeoutSec)*time.Second, logger)
+	if err := client.SetAPIStrategy(cfg.GetPluginString("soda", "api_strategy")); err != nil {
+		return nil, err
+	}
 	client.persistFunc = func(pairs map[string]string) error {
 		if logger != nil {
 			logger.Debug("soda: persist plugin config", "pairs", pairs)
