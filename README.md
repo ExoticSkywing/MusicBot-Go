@@ -90,7 +90,7 @@ wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 
 酷我、汽水、哔哩哔哩和 YouTube Music 匿名即可使用；YouTube Music 配置 Cookie 可解锁 256k 并降低限流概率。
 
-汽水音乐支持两套并行解析链路，可在 `[plugins.soda]` 中通过 `api_strategy` 切换：`legacy` 使用当前 BDMS signer/PC 方案（默认），`upstream` 使用上游公共搜索/H5 方案，`auto` 在 legacy 失败时自动回退到 upstream。两套方案共用 Cookie、代理和下载解密逻辑。
+汽水音乐支持两套并行解析链路，可在 `[plugins.soda]` 中通过 `api_strategy` 切换：`legacy` 使用当前 BDMS signer/PC 方案（默认），`upstream` 使用上游公共搜索/H5 方案，`auto` 优先使用 upstream，在其失败、返回空结果或仅提供试听时自动回退到 legacy。两套方案共用 Cookie、代理和下载解密逻辑。
 
 完整选项（并发、缓存、限流、代理、日志、各平台细节等）见 `config_example.ini` 的注释，每一项都有说明。
 

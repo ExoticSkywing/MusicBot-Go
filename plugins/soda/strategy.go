@@ -66,7 +66,7 @@ func (c *Client) StrategyHighlights() []string {
 	case sodaAPIStrategyAuto:
 		return []string{
 			"API 方案：自动回退",
-			"调用顺序：BDMS signer / PC → 上游公共搜索 / H5",
+			"调用顺序：上游公共搜索 / H5 → BDMS signer / PC",
 		}
 	default:
 		return []string{
@@ -90,7 +90,7 @@ func (c *Client) CanAccessCoreContent(ctx context.Context) bool {
 	case sodaAPIStrategyUpstream:
 		return c.canAccessCoreContentUpstream(ctx)
 	case sodaAPIStrategyAuto:
-		return c.canAccessCoreContentLegacy(ctx) || c.canAccessCoreContentUpstream(ctx)
+		return c.canAccessCoreContentUpstream(ctx) || c.canAccessCoreContentLegacy(ctx)
 	default:
 		return c.canAccessCoreContentLegacy(ctx)
 	}
@@ -100,44 +100,47 @@ func sodaStrategyCanFallback(ctx context.Context) bool {
 	return ctx == nil || ctx.Err() == nil
 }
 
-func (c *Client) logStrategyFallback(operation string, legacyErr, upstreamErr error) {
+func (c *Client) logStrategyFallback(operation string, primary, fallback sodaAPIStrategy, primaryErr, fallbackErr error) {
 	if c == nil || c.logger == nil {
 		return
 	}
-	args := []any{"operation", operation}
-	if legacyErr != nil {
-		args = append(args, "legacy_error", legacyErr)
+	args := []any{"operation", operation, "from", primary, "to", fallback}
+	if primaryErr != nil {
+		args = append(args, "primary_error", primaryErr)
+	} else {
+		args = append(args, "reason", "empty result")
 	}
-	if upstreamErr != nil {
-		args = append(args, "upstream_error", upstreamErr)
+	if fallbackErr != nil {
+		args = append(args, "fallback_error", fallbackErr)
 	}
-	c.logger.Warn("soda: falling back from legacy API strategy to upstream strategy", args...)
+	c.logger.Warn("soda: API strategy fallback", args...)
 }
 
-// Search dispatches to the configured strategy. Auto keeps the tested legacy
-// path first and uses the upstream path only for errors or an empty result.
+// Search dispatches to the configured strategy. Auto tries the lightweight
+// upstream path first and uses the signed legacy path for errors or an empty
+// result.
 func (c *Client) Search(ctx context.Context, keyword string, limit int) ([]platform.Track, error) {
 	switch c.effectiveAPIStrategy() {
 	case sodaAPIStrategyUpstream:
 		return c.searchUpstream(ctx, keyword, limit)
 	case sodaAPIStrategyAuto:
-		tracks, legacyErr := c.searchLegacy(ctx, keyword, limit)
-		if legacyErr == nil && len(tracks) > 0 {
+		tracks, upstreamErr := c.searchUpstream(ctx, keyword, limit)
+		if upstreamErr == nil && len(tracks) > 0 {
 			return tracks, nil
 		}
 		if !sodaStrategyCanFallback(ctx) {
 			return nil, ctx.Err()
 		}
-		upstreamTracks, upstreamErr := c.searchUpstream(ctx, keyword, limit)
-		if upstreamErr == nil {
-			c.logStrategyFallback("search", legacyErr, nil)
-			return upstreamTracks, nil
+		legacyTracks, legacyErr := c.searchLegacy(ctx, keyword, limit)
+		if legacyErr == nil {
+			c.logStrategyFallback("search", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, nil)
+			return legacyTracks, nil
 		}
-		c.logStrategyFallback("search", legacyErr, upstreamErr)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("soda: legacy search failed: %v; upstream search failed: %w", legacyErr, upstreamErr)
+		c.logStrategyFallback("search", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, legacyErr)
+		if upstreamErr != nil {
+			return nil, fmt.Errorf("soda: upstream search failed: %v; legacy search failed: %w", upstreamErr, legacyErr)
 		}
-		return nil, upstreamErr
+		return nil, legacyErr
 	default:
 		return c.searchLegacy(ctx, keyword, limit)
 	}
@@ -149,23 +152,23 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track,
 	case sodaAPIStrategyUpstream:
 		return c.getTrackUpstream(ctx, trackID)
 	case sodaAPIStrategyAuto:
-		track, lyric, legacyErr := c.getTrackLegacy(ctx, trackID)
-		if legacyErr == nil && track != nil {
+		track, lyric, upstreamErr := c.getTrackUpstream(ctx, trackID)
+		if upstreamErr == nil && track != nil {
 			return track, lyric, nil
 		}
 		if !sodaStrategyCanFallback(ctx) {
 			return nil, "", ctx.Err()
 		}
-		upstreamTrack, upstreamLyric, upstreamErr := c.getTrackUpstream(ctx, trackID)
-		if upstreamErr == nil {
-			c.logStrategyFallback("track", legacyErr, nil)
-			return upstreamTrack, upstreamLyric, nil
+		legacyTrack, legacyLyric, legacyErr := c.getTrackLegacy(ctx, trackID)
+		if legacyErr == nil {
+			c.logStrategyFallback("track", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, nil)
+			return legacyTrack, legacyLyric, nil
 		}
-		c.logStrategyFallback("track", legacyErr, upstreamErr)
-		if legacyErr != nil {
-			return nil, "", fmt.Errorf("soda: legacy track failed: %v; upstream track failed: %w", legacyErr, upstreamErr)
+		c.logStrategyFallback("track", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, legacyErr)
+		if upstreamErr != nil {
+			return nil, "", fmt.Errorf("soda: upstream track failed: %v; legacy track failed: %w", upstreamErr, legacyErr)
 		}
-		return nil, "", upstreamErr
+		return nil, "", legacyErr
 	default:
 		return c.getTrackLegacy(ctx, trackID)
 	}
@@ -178,23 +181,23 @@ func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.
 	case sodaAPIStrategyUpstream:
 		return c.getPlaylistUpstream(ctx, playlistID)
 	case sodaAPIStrategyAuto:
-		playlist, legacyErr := c.getPlaylistLegacy(ctx, playlistID)
-		if legacyErr == nil && playlist != nil && (len(playlist.Tracks) > 0 || playlist.TrackCount <= 0) {
+		playlist, upstreamErr := c.getPlaylistUpstream(ctx, playlistID)
+		if upstreamErr == nil && playlist != nil && (len(playlist.Tracks) > 0 || playlist.TrackCount <= 0) {
 			return playlist, nil
 		}
 		if !sodaStrategyCanFallback(ctx) {
 			return nil, ctx.Err()
 		}
-		upstreamPlaylist, upstreamErr := c.getPlaylistUpstream(ctx, playlistID)
-		if upstreamErr == nil {
-			c.logStrategyFallback("playlist", legacyErr, nil)
-			return upstreamPlaylist, nil
+		legacyPlaylist, legacyErr := c.getPlaylistLegacy(ctx, playlistID)
+		if legacyErr == nil {
+			c.logStrategyFallback("playlist", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, nil)
+			return legacyPlaylist, nil
 		}
-		c.logStrategyFallback("playlist", legacyErr, upstreamErr)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("soda: legacy playlist failed: %v; upstream playlist failed: %w", legacyErr, upstreamErr)
+		c.logStrategyFallback("playlist", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, legacyErr)
+		if upstreamErr != nil {
+			return nil, fmt.Errorf("soda: upstream playlist failed: %v; legacy playlist failed: %w", upstreamErr, legacyErr)
 		}
-		return nil, upstreamErr
+		return nil, legacyErr
 	default:
 		return c.getPlaylistLegacy(ctx, playlistID)
 	}
@@ -206,52 +209,53 @@ func (c *Client) SearchPlaylist(ctx context.Context, keyword string, limit int) 
 	case sodaAPIStrategyUpstream:
 		return c.searchPlaylistUpstream(ctx, keyword, limit)
 	case sodaAPIStrategyAuto:
-		playlists, legacyErr := c.searchPlaylistLegacy(ctx, keyword, limit)
-		if legacyErr == nil && len(playlists) > 0 {
+		playlists, upstreamErr := c.searchPlaylistUpstream(ctx, keyword, limit)
+		if upstreamErr == nil && len(playlists) > 0 {
 			return playlists, nil
 		}
 		if !sodaStrategyCanFallback(ctx) {
 			return nil, ctx.Err()
 		}
-		upstreamPlaylists, upstreamErr := c.searchPlaylistUpstream(ctx, keyword, limit)
-		if upstreamErr == nil {
-			c.logStrategyFallback("playlist search", legacyErr, nil)
-			return upstreamPlaylists, nil
+		legacyPlaylists, legacyErr := c.searchPlaylistLegacy(ctx, keyword, limit)
+		if legacyErr == nil {
+			c.logStrategyFallback("playlist search", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, nil)
+			return legacyPlaylists, nil
 		}
-		c.logStrategyFallback("playlist search", legacyErr, upstreamErr)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("soda: legacy playlist search failed: %v; upstream playlist search failed: %w", legacyErr, upstreamErr)
+		c.logStrategyFallback("playlist search", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, legacyErr)
+		if upstreamErr != nil {
+			return nil, fmt.Errorf("soda: upstream playlist search failed: %v; legacy playlist search failed: %w", upstreamErr, legacyErr)
 		}
-		return nil, upstreamErr
+		return nil, legacyErr
 	default:
 		return c.searchPlaylistLegacy(ctx, keyword, limit)
 	}
 }
 
-// FetchDownloadInfo dispatches playback resolution. Auto preserves the
-// current signer/high-quality path first, then tries the upstream H5 path.
+// FetchDownloadInfo dispatches playback resolution. Auto tries the lightweight
+// upstream H5 path first, then uses the signer/high-quality path when upstream
+// returns an error or only exposes a preview stream.
 func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	switch c.effectiveAPIStrategy() {
 	case sodaAPIStrategyUpstream:
 		return c.fetchDownloadInfoUpstream(ctx, trackID, quality)
 	case sodaAPIStrategyAuto:
-		info, legacyErr := c.fetchDownloadInfoLegacy(ctx, trackID, quality)
-		if legacyErr == nil && info != nil && strings.TrimSpace(info.URL) != "" {
+		info, upstreamErr := c.fetchDownloadInfoUpstream(ctx, trackID, quality)
+		if upstreamErr == nil && info != nil && strings.TrimSpace(info.URL) != "" {
 			return info, nil
 		}
 		if !sodaStrategyCanFallback(ctx) {
 			return nil, ctx.Err()
 		}
-		upstreamInfo, upstreamErr := c.fetchDownloadInfoUpstream(ctx, trackID, quality)
-		if upstreamErr == nil {
-			c.logStrategyFallback("download info", legacyErr, nil)
-			return upstreamInfo, nil
+		legacyInfo, legacyErr := c.fetchDownloadInfoLegacy(ctx, trackID, quality)
+		if legacyErr == nil {
+			c.logStrategyFallback("download info", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, nil)
+			return legacyInfo, nil
 		}
-		c.logStrategyFallback("download info", legacyErr, upstreamErr)
-		if legacyErr != nil {
-			return nil, fmt.Errorf("soda: legacy download info failed: %v; upstream download info failed: %w", legacyErr, upstreamErr)
+		c.logStrategyFallback("download info", sodaAPIStrategyUpstream, sodaAPIStrategyLegacy, upstreamErr, legacyErr)
+		if upstreamErr != nil {
+			return nil, fmt.Errorf("soda: upstream download info failed: %v; legacy download info failed: %w", upstreamErr, legacyErr)
 		}
-		return nil, upstreamErr
+		return nil, legacyErr
 	default:
 		return c.fetchDownloadInfoLegacy(ctx, trackID, quality)
 	}

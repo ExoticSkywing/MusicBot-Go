@@ -49,6 +49,9 @@ func TestSodaStrategyHighlights(t *testing.T) {
 	if got := client.StrategyHighlights(); len(got) != 2 || got[0] != "API 方案：自动回退" {
 		t.Fatalf("auto highlights = %#v", got)
 	}
+	if got := client.StrategyHighlights(); got[1] != "调用顺序：上游公共搜索 / H5 → BDMS signer / PC" {
+		t.Fatalf("auto call order = %#v", got)
+	}
 	if err := client.SetAPIStrategy("upstream"); err != nil {
 		t.Fatalf("SetAPIStrategy(upstream) error = %v", err)
 	}
@@ -79,14 +82,14 @@ func TestClientUpstreamStrategyUsesPublicSearch(t *testing.T) {
 	}
 }
 
-func TestClientAutoStrategyFallsBackToUpstreamSearch(t *testing.T) {
+func TestClientAutoStrategyFallsBackToLegacySearch(t *testing.T) {
 	paths := make([]string, 0, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		switch r.URL.Path {
-		case "/luna/pc/search/track":
-			http.Error(w, "retired", http.StatusGone)
 		case "/luna/search/track":
+			http.Error(w, "retired", http.StatusGone)
+		case "/luna/pc/search/track":
 			_, _ = w.Write([]byte(`{"status_code":0,"result_groups":[{"data":[{"entity":{"track":{"id":"fallback-1","name":"Fallback Track","duration":180000}}}]}]}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -105,7 +108,7 @@ func TestClientAutoStrategyFallsBackToUpstreamSearch(t *testing.T) {
 	if len(tracks) != 1 || tracks[0].ID != "fallback-1" {
 		t.Fatalf("Search() tracks = %#v", tracks)
 	}
-	wantPaths := []string{"/luna/pc/search/track", "/luna/search/track"}
+	wantPaths := []string{"/luna/search/track", "/luna/pc/search/track"}
 	if !reflect.DeepEqual(paths, wantPaths) {
 		t.Fatalf("request paths = %#v, want %#v", paths, wantPaths)
 	}
@@ -175,5 +178,55 @@ func TestClientUpstreamStrategyRejectsCatalogPreview(t *testing.T) {
 	info, err := client.FetchDownloadInfo(t.Context(), "track-1", platform.QualityHigh)
 	if info != nil || !errors.Is(err, errSodaIncompleteAudio) || !errors.Is(err, platform.ErrUnavailable) {
 		t.Fatalf("FetchDownloadInfo() = %#v, %v", info, err)
+	}
+}
+
+func TestClientAutoStrategyFallsBackToLegacyForCatalogPreview(t *testing.T) {
+	paths := make([]string, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/luna/h5/seo_track":
+			_, _ = w.Write([]byte(`{
+				"status_code":0,
+				"track_player":{"url_player_info":"https://player.example/preview","media_id":"preview-media"},
+				"seo_track":{"track":{"id":"track-1","name":"Preview Track","duration":180000,"preview":{"vid":"preview-media"}}}
+			}`))
+		case "/luna/pc/track_v2":
+			_, _ = w.Write([]byte(`{
+				"track_info":{"id":"track-1","name":"Full Track","duration":180000},
+				"track_player":{"url_player_info":"https://player.example/legacy-player"}
+			}`))
+		case "/legacy-player":
+			resp := sodaPlayInfoResponse{}
+			resp.Result.Data.PlayInfoList = []sodaPlayInfo{{
+				MainPlayURL: "https://download.example/full.m4a",
+				Size:        7_200_000,
+				Bitrate:     320,
+				Format:      "m4a",
+				Quality:     "highest",
+				Duration:    180,
+			}}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newSodaTestClient(server.URL)
+	if err := client.SetAPIStrategy("auto"); err != nil {
+		t.Fatalf("SetAPIStrategy() error = %v", err)
+	}
+	info, err := client.FetchDownloadInfo(t.Context(), "track-1", platform.QualityHigh)
+	if err != nil {
+		t.Fatalf("FetchDownloadInfo() error = %v", err)
+	}
+	if info == nil || info.URL != "https://download.example/full.m4a" {
+		t.Fatalf("FetchDownloadInfo() = %#v", info)
+	}
+	wantPaths := []string{"/luna/h5/seo_track", "/luna/pc/track_v2", "/legacy-player"}
+	if !reflect.DeepEqual(paths, wantPaths) {
+		t.Fatalf("request paths = %#v, want %#v", paths, wantPaths)
 	}
 }
