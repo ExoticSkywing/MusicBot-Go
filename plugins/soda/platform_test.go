@@ -167,8 +167,9 @@ func TestConvertSodaTrackIncludesArtistURL(t *testing.T) {
 			ID       string `json:"id"`
 			Name     string `json:"name"`
 			URLCover struct {
-				URLs []string `json:"urls"`
-				URI  string   `json:"uri"`
+				URLs           []string `json:"urls"`
+				URI            string   `json:"uri"`
+				TemplatePrefix string   `json:"template_prefix"`
 			} `json:"url_cover"`
 		}{
 			ID:   "323456789",
@@ -278,8 +279,9 @@ func TestConvertSodaArtist(t *testing.T) {
 		Name:       "Artist A",
 		TrackCount: 12,
 		Avatar: struct {
-			URLs []string `json:"urls"`
-			URI  string   `json:"uri"`
+			URLs           []string `json:"urls"`
+			URI            string   `json:"uri"`
+			TemplatePrefix string   `json:"template_prefix"`
 		}{
 			URLs: []string{"https://p3.qishui.com/img/"},
 			URI:  "avatar123",

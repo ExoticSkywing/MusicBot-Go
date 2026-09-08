@@ -48,7 +48,7 @@ func TestClientGetPlaylistHonorsOffsetLimit(t *testing.T) {
 		}
 		requests = append(requests, r.URL.RawQuery)
 		cursor := r.URL.Query().Get("cursor")
-		cnt := r.URL.Query().Get("cnt")
+		cnt := r.URL.Query().Get("count")
 		resp := sodaPlaylistDetailResponse{
 			Playlist: sodaPlaylistMeta{ID: "pl1", Title: "Playlist", CountTracks: 55},
 		}
@@ -256,14 +256,14 @@ func TestSodaAlbumPayloadParsesNumericReleaseDate(t *testing.T) {
 
 func TestClientGetTrackKeepsShareURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/luna/pc/track_v2" {
+		if r.URL.Path != "/luna/h5/seo_track" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(sodaTrackV2Response{
-			TrackInfo: sodaTrack{
+		_ = json.NewEncoder(w).Encode(sodaWebTestResponse{
+			SEOTrack: sodaWebTestTrack{Track: sodaTrack{
 				ID:   "123456789",
 				Name: "Track",
-			},
+			}},
 			TrackPlayer: struct {
 				URLPlayerInfo string `json:"url_player_info"`
 			}{
@@ -292,12 +292,12 @@ func TestClientGetTrackKeepsShareURL(t *testing.T) {
 func TestClientFetchDownloadInfoUsesPlayerInfoURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/luna/pc/track_v2":
-			_ = json.NewEncoder(w).Encode(sodaTrackV2Response{
-				TrackInfo: sodaTrack{
+		case "/luna/h5/seo_track":
+			_ = json.NewEncoder(w).Encode(sodaWebTestResponse{
+				SEOTrack: sodaWebTestTrack{Track: sodaTrack{
 					ID:   "123456789",
 					Name: "Track",
-				},
+				}},
 				TrackPlayer: struct {
 					URLPlayerInfo string `json:"url_player_info"`
 				}{
@@ -782,4 +782,18 @@ func makeAudioSampleEntry(sampleType string, childBoxes []byte) []byte {
 	copy(entry[8:], prefix)
 	copy(entry[8+len(prefix):], childBoxes)
 	return entry
+}
+
+// H5 wraps track metadata separately from its signed player URL.
+type sodaWebTestTrack struct {
+	Track sodaTrack `json:"track"`
+}
+type sodaWebTestResponse struct {
+	SEOTrack    sodaWebTestTrack `json:"seo_track"`
+	TrackPlayer struct {
+		URLPlayerInfo string `json:"url_player_info"`
+	} `json:"track_player"`
+	Lyric struct {
+		Content string `json:"content"`
+	} `json:"lyric"`
 }

@@ -30,7 +30,6 @@ import (
 
 const (
 	sodaUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-	sodaPCChannel = "pc_web"
 	sodaAid       = "386088"
 )
 
@@ -81,6 +80,8 @@ type sodaPlayInfoResponse struct {
 }
 
 type sodaPlaylistDetailResponse struct {
+	NextCursor     string              `json:"next_cursor"`
+	HasMore        *bool               `json:"has_more"`
 	Playlist       sodaPlaylistMeta    `json:"playlist"`
 	MediaResources []sodaPlaylistEntry `json:"media_resources"`
 }
@@ -122,8 +123,9 @@ type sodaAlbumMeta struct {
 		ID   string `json:"id"`
 	} `json:"artists"`
 	URLCover struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 }
 
@@ -161,20 +163,24 @@ type sodaArtistMeta struct {
 	CountTracks int    `json:"count_tracks"`
 	TrackCount  int    `json:"track_count"`
 	URLCover    struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 	Avatar struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar"`
 	AvatarThumb struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar_thumb"`
 	AvatarMedium struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar_medium"`
 }
 
@@ -190,8 +196,9 @@ type sodaTrack struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		URLCover struct {
-			URLs []string `json:"urls"`
-			URI  string   `json:"uri"`
+			URLs           []string `json:"urls"`
+			URI            string   `json:"uri"`
+			TemplatePrefix string   `json:"template_prefix"`
 		} `json:"url_cover"`
 	} `json:"album"`
 	BitRates []struct {
@@ -225,8 +232,9 @@ type sodaPlaylistMeta struct {
 		PublicName string `json:"public_name"`
 	} `json:"owner"`
 	URLCover struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 }
 
@@ -280,11 +288,7 @@ func (c *Client) Search(ctx context.Context, keyword string, limit int) ([]platf
 	params := url.Values{}
 	params.Set("q", keyword)
 	params.Set("cursor", "0")
-	params.Set("search_method", "input")
-	params.Set("aid", sodaAid)
-	params.Set("device_platform", "web")
-	params.Set("channel", sodaPCChannel)
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/search/track?"+params.Encode())
+	body, err := c.getLunaJSON(ctx, "/luna/search/track", params)
 	if err != nil {
 		return nil, err
 	}
@@ -296,14 +300,21 @@ func (c *Client) Search(ctx context.Context, keyword string, limit int) ([]platf
 		return nil, nil
 	}
 	tracks := make([]platform.Track, 0, limit)
-	for _, item := range resp.ResultGroups[0].Data {
-		track := convertSodaTrack(item.Entity.Track)
-		if track.ID == "" {
-			continue
-		}
-		tracks = append(tracks, track)
-		if len(tracks) >= limit {
-			break
+	seen := make(map[string]struct{}, limit)
+	for _, group := range resp.ResultGroups {
+		for _, item := range group.Data {
+			track := convertSodaTrack(item.Entity.Track)
+			if track.ID == "" {
+				continue
+			}
+			if _, exists := seen[track.ID]; exists {
+				continue
+			}
+			seen[track.ID] = struct{}{}
+			tracks = append(tracks, track)
+			if len(tracks) >= limit {
+				return tracks, nil
+			}
 		}
 	}
 	return tracks, nil
@@ -314,19 +325,9 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track,
 	if trackID == "" {
 		return nil, "", platform.NewNotFoundError("soda", "track", trackID)
 	}
-	params := url.Values{}
-	params.Set("track_id", trackID)
-	params.Set("media_type", "track")
-	params.Set("aid", sodaAid)
-	params.Set("device_platform", "web")
-	params.Set("channel", sodaPCChannel)
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/track_v2?"+params.Encode())
+	resp, err := c.fetchTrackWeb(ctx, trackID)
 	if err != nil {
 		return nil, "", err
-	}
-	var resp sodaTrackV2Response
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, "", fmt.Errorf("soda: parse track_v2 response: %w", err)
 	}
 	trackData := resp.TrackInfo
 	if strings.TrimSpace(trackData.ID) == "" {
@@ -350,16 +351,23 @@ func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.
 	}
 	limit := platform.PlaylistLimitFromContext(ctx)
 	const defaultChunkSize = 20
-	cursor := offset
+	cursor := strconv.Itoa(offset)
+	cursorPosition := offset
 	if limit <= 0 {
-		cursor = 0
+		cursor = "0"
+		cursorPosition = 0
 	}
 	var (
 		playlist *platform.Playlist
 		tracks   []platform.Track
 		seen     = map[string]struct{}{}
+		cursors  = map[string]struct{}{}
 	)
 	for {
+		if _, repeated := cursors[cursor]; repeated {
+			break
+		}
+		cursors[cursor] = struct{}{}
 		cnt := defaultChunkSize
 		if limit > 0 {
 			remaining := limit - len(tracks)
@@ -372,12 +380,9 @@ func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.
 		}
 		params := url.Values{}
 		params.Set("playlist_id", playlistID)
-		params.Set("cursor", strconv.Itoa(cursor))
-		params.Set("cnt", strconv.Itoa(cnt))
-		params.Set("aid", sodaAid)
-		params.Set("device_platform", "web")
-		params.Set("channel", sodaPCChannel)
-		body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/playlist/detail?"+params.Encode())
+		params.Set("cursor", cursor)
+		params.Set("count", strconv.Itoa(cnt))
+		body, err := c.getPCPlaylistJSON(ctx, params)
 		if err != nil {
 			return nil, err
 		}
@@ -411,16 +416,30 @@ func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.
 		if playlist == nil {
 			break
 		}
-		cursor += cnt
 		if pageAdded == 0 {
 			break
 		}
 		if limit > 0 && len(tracks) >= limit {
 			break
 		}
-		if playlist.TrackCount > 0 && cursor >= playlist.TrackCount {
+		if resp.HasMore != nil && !*resp.HasMore {
 			break
 		}
+		nextCursor := strings.TrimSpace(resp.NextCursor)
+		nextPosition := cursorPosition + cnt
+		if nextCursor == "" {
+			nextCursor = strconv.Itoa(nextPosition)
+		} else if parsed, parseErr := strconv.Atoi(nextCursor); parseErr == nil {
+			nextPosition = parsed
+		}
+		if nextCursor == cursor {
+			break
+		}
+		if playlist.TrackCount > 0 && nextPosition >= playlist.TrackCount {
+			break
+		}
+		cursor = nextCursor
+		cursorPosition = nextPosition
 	}
 	if playlist == nil {
 		return nil, platform.NewNotFoundError("soda", "playlist", playlistID)
@@ -446,11 +465,7 @@ func (c *Client) SearchPlaylist(ctx context.Context, keyword string, limit int) 
 	params := url.Values{}
 	params.Set("q", keyword)
 	params.Set("cursor", "0")
-	params.Set("search_method", "input")
-	params.Set("aid", sodaAid)
-	params.Set("device_platform", "web")
-	params.Set("channel", sodaPCChannel)
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/search/playlist?"+params.Encode())
+	body, err := c.getLunaJSON(ctx, "/luna/search/playlist", params)
 	if err != nil {
 		return nil, err
 	}
@@ -462,14 +477,16 @@ func (c *Client) SearchPlaylist(ctx context.Context, keyword string, limit int) 
 		return nil, nil
 	}
 	playlists := make([]platform.Playlist, 0, limit)
-	for _, item := range resp.ResultGroups[0].Data {
-		pl := convertSodaPlaylist(item.Entity.Playlist)
-		if pl.ID == "" {
-			continue
-		}
-		playlists = append(playlists, *pl)
-		if len(playlists) >= limit {
-			break
+	for _, group := range resp.ResultGroups {
+		for _, item := range group.Data {
+			pl := convertSodaPlaylist(item.Entity.Playlist)
+			if pl.ID == "" {
+				continue
+			}
+			playlists = append(playlists, *pl)
+			if len(playlists) >= limit {
+				return playlists, nil
+			}
 		}
 	}
 	return playlists, nil
@@ -603,19 +620,9 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 	if trackID == "" {
 		return nil, platform.NewNotFoundError("soda", "track", trackID)
 	}
-	params := url.Values{}
-	params.Set("track_id", trackID)
-	params.Set("media_type", "track")
-	params.Set("aid", sodaAid)
-	params.Set("device_platform", "web")
-	params.Set("channel", sodaPCChannel)
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/track_v2?"+params.Encode())
+	resp, err := c.fetchTrackWeb(ctx, trackID)
 	if err != nil {
 		return nil, err
-	}
-	var resp sodaTrackV2Response
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("soda: parse track_v2 response: %w", err)
 	}
 	trackData := resp.TrackInfo
 	if strings.TrimSpace(trackData.ID) == "" {
@@ -628,23 +635,17 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 	if playerInfoURL == "" {
 		return nil, fmt.Errorf("soda: player info url missing")
 	}
-	playerInfoURL = strings.TrimSpace(resp.TrackPlayer.URLPlayerInfo)
 	playInfos, err := c.fetchPlayInfos(ctx, playerInfoURL)
 	if err != nil {
 		return nil, fmt.Errorf("soda: fetch play infos: %w", err)
-	}
-	if (quality == platform.QualityLossless || quality == platform.QualityHiRes) && len(playInfos) == 1 && strings.EqualFold(strings.TrimSpace(playInfos[0].Quality), "higher") {
-		if c.logger != nil {
-			c.logger.Debug("soda: single higher stream returned for high-tier request, probing signed url directly", "track_id", trackID, "requested_quality", quality.String())
-		}
-		if fallbackInfos, fallbackErr := c.fetchPlayInfosBySignedURL(ctx, playerInfoURL); fallbackErr == nil && len(fallbackInfos) > 0 {
-			playInfos = fallbackInfos
-		}
 	}
 	if len(playInfos) == 0 {
 		return nil, platform.NewUnavailableError("soda", "track", trackID)
 	}
 	for i := range playInfos {
+		if playInfos[i].Bitrate > 10000 {
+			playInfos[i].Bitrate /= 1000
+		}
 		playInfos[i].Quality = strings.ToLower(strings.TrimSpace(playInfos[i].Quality))
 	}
 	if c.logger != nil {
@@ -667,7 +668,7 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 	}
 	bitrate := playInfo.Bitrate
 	if bitrate <= 0 && playInfo.Duration > 0 && playInfo.Size > 0 {
-		bitrate = int(playInfo.Size * 8 / int64(playInfo.Duration) / 1000)
+		bitrate = int(float64(playInfo.Size) * 8 / playInfo.Duration / 1000)
 	}
 	format := strings.TrimSpace(strings.ToLower(playInfo.Format))
 	if format == "" {
@@ -691,45 +692,9 @@ func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality 
 	}, nil
 }
 
-func (c *Client) fetchPlayInfosBySignedURL(ctx context.Context, playerInfoURL string) ([]sodaPlayInfo, error) {
-	parsed, err := url.Parse(strings.TrimSpace(playerInfoURL))
-	if err != nil {
-		return nil, err
-	}
-	query := parsed.Query()
-	videoID := strings.TrimSpace(query.Get("video_id"))
-	if videoID == "" {
-		return nil, fmt.Errorf("soda: video_id missing")
-	}
-	base := url.Values{}
-	base.Set("Action", "GetPlayInfo")
-	base.Set("Version", "2019-03-15")
-	base.Set("aid", query.Get("aid"))
-	base.Set("ssl", query.Get("ssl"))
-	base.Set("stream_type", query.Get("stream_type"))
-	base.Set("video_id", videoID)
-	base.Set("ptoken", query.Get("ptoken"))
-	base.Set("codec_type", "5")
-	base.Set("format_type", "8")
-	raw := parsed.Scheme + "://" + parsed.Host + "/?" + base.Encode()
-	body, err := c.getJSON(ctx, raw)
-	if err != nil {
-		return nil, err
-	}
-	var resp sodaPlayInfoResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("soda: parse forced player info response: %w", err)
-	}
-	list := append([]sodaPlayInfo(nil), resp.Result.Data.PlayInfoList...)
-	if len(list) == 0 {
-		return nil, platform.NewUnavailableError("soda", "track", "")
-	}
-	return list, nil
-}
-
 func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 	if c != nil && c.logger != nil {
-		c.logger.Debug("soda: download begin", "format", info.Format, "url", rawURL)
+		c.logger.Debug("soda: download begin", "format", info.Format, "url", redactSodaURL(rawURL))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -743,7 +708,7 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, redactSodaRequestError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -855,7 +820,9 @@ func (c *Client) fetchPlayInfos(ctx context.Context, playerInfoURL string) ([]so
 	if playerInfoURL == "" {
 		return nil, fmt.Errorf("soda: player info url missing")
 	}
-	body, err := c.getJSON(ctx, playerInfoURL)
+	// The URL carries its own signature; account cookies stay on API hosts.
+	playerClient := &Client{httpClient: c.httpClient}
+	body, err := playerClient.getJSON(ctx, playerInfoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -903,12 +870,11 @@ func (c *Client) doRequest(ctx context.Context, rawURL string, accept string) ([
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactSodaRequestError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("soda: request failed status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("soda: request failed status=%d", resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -983,7 +949,7 @@ func convertSodaTrack(track sodaTrack) platform.Track {
 	}
 	albumID := strings.TrimSpace(track.Album.ID)
 	albumName := strings.TrimSpace(track.Album.Name)
-	coverURL := buildSodaCoverURL(track.Album.URLCover.URLs, track.Album.URLCover.URI)
+	coverURL := buildSodaCoverURL(track.Album.URLCover.URLs, track.Album.URLCover.URI, track.Album.URLCover.TemplatePrefix)
 	var album *platform.Album
 	if albumID != "" || albumName != "" {
 		album = &platform.Album{ID: albumID, Platform: "soda", Title: albumName, Artists: artists, CoverURL: coverURL, URL: buildSodaAlbumURL(albumID)}
@@ -1010,7 +976,7 @@ func convertSodaPlaylist(meta sodaPlaylistMeta) *platform.Playlist {
 		Platform:    "soda",
 		Title:       title,
 		Description: strings.TrimSpace(meta.Desc),
-		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI),
+		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix),
 		Creator:     creator,
 		TrackCount:  trackCount,
 		URL:         buildSodaPlaylistURL(id),
@@ -1038,7 +1004,7 @@ func convertSodaAlbum(meta sodaAlbumMeta) *platform.Album {
 		Platform:    "soda",
 		Title:       title,
 		Artists:     artists,
-		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI),
+		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix),
 		Description: firstNonEmptyString(strings.TrimSpace(meta.Intro), strings.TrimSpace(meta.Desc)),
 		ReleaseDate: releaseDate,
 		TrackCount:  trackCount,
@@ -1084,15 +1050,15 @@ func convertSodaArtist(meta sodaArtistMeta) (*platform.Artist, int) {
 	if id == "" && name == "" {
 		return nil, 0
 	}
-	avatarURL := buildSodaCoverURL(meta.Avatar.URLs, meta.Avatar.URI)
+	avatarURL := buildSodaCoverURL(meta.Avatar.URLs, meta.Avatar.URI, meta.Avatar.TemplatePrefix)
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.AvatarMedium.URLs, meta.AvatarMedium.URI)
+		avatarURL = buildSodaCoverURL(meta.AvatarMedium.URLs, meta.AvatarMedium.URI, meta.AvatarMedium.TemplatePrefix)
 	}
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.AvatarThumb.URLs, meta.AvatarThumb.URI)
+		avatarURL = buildSodaCoverURL(meta.AvatarThumb.URLs, meta.AvatarThumb.URI, meta.AvatarThumb.TemplatePrefix)
 	}
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI)
+		avatarURL = buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix)
 	}
 	trackCount := meta.TrackCount
 	if trackCount <= 0 {
@@ -1107,12 +1073,15 @@ func convertSodaArtist(meta sodaArtistMeta) (*platform.Artist, int) {
 	}, trackCount
 }
 
-func buildSodaCoverURL(urls []string, uri string) string {
+func buildSodaCoverURL(urls []string, uri string, templatePrefix ...string) string {
+	uri = strings.TrimSpace(uri)
+	if len(templatePrefix) > 0 && strings.TrimSpace(templatePrefix[0]) != "" && uri != "" {
+		return "https://p3-luna.douyinpic.com/img/" + uri + "~" + strings.TrimSpace(templatePrefix[0]) + "-resize:960:960.png"
+	}
 	base := ""
 	if len(urls) > 0 {
 		base = strings.TrimSpace(urls[0])
 	}
-	uri = strings.TrimSpace(uri)
 	if base == "" {
 		return ""
 	}

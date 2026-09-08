@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -86,8 +85,7 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 		return status, nil
 	}
 	if s.client.CanAccessCoreContent(probeCtx) {
-		status.LoggedIn = true
-		lines := []string{"- 状态: 可用（内容接口正常）", "- 账号资料接口未返回用户信息，但汽水内容接口可访问"}
+		lines := []string{"- 状态: 公开内容接口可访问，登录态未确认", "- 账号资料接口未返回用户信息；公开试听不代表 Cookie 有效"}
 		if len(core) > 0 {
 			lines = append(lines, "- 关键字段: "+strings.Join(core, ", "))
 		}
@@ -230,18 +228,8 @@ func (c *Client) CanAccessCoreContent(ctx context.Context) bool {
 	if c == nil {
 		return false
 	}
-	params := url.Values{}
-	params.Set("track_id", "7620326800652224539")
-	params.Set("media_type", "track")
-	params.Set("aid", sodaAid)
-	params.Set("device_platform", "web")
-	params.Set("channel", sodaPCChannel)
-	body, err := c.getJSON(ctx, "https://api.qishui.com/luna/pc/track_v2?"+params.Encode())
+	resp, err := c.fetchTrackWeb(ctx, "7620326800652224539")
 	if err != nil {
-		return false
-	}
-	var resp sodaTrackV2Response
-	if err := json.Unmarshal(body, &resp); err != nil {
 		return false
 	}
 	trackData := resp.TrackInfo
@@ -259,7 +247,7 @@ func (c *Client) CanAccessCoreContent(ctx context.Context) bool {
 		return false
 	}
 	best := playInfos[0]
-	return strings.TrimSpace(firstNonEmptyString(best.MainPlayURL, best.BackupPlayURL)) != "" && strings.TrimSpace(best.PlayAuth) != ""
+	return strings.TrimSpace(firstNonEmptyString(best.MainPlayURL, best.BackupPlayURL)) != ""
 }
 
 func (c *Client) getJSONWithHeaders(ctx context.Context, rawURL string, extra map[string]string) ([]byte, error) {
