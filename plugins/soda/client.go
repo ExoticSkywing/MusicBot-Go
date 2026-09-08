@@ -51,6 +51,10 @@ type Client struct {
 	cookie      string
 	logger      bot.Logger
 	persistFunc func(map[string]string) error
+	// apiStrategy selects the Soda API implementation. The default is legacy
+	// so existing production deployments keep the BDMS-signed PC flow until a
+	// newer strategy is explicitly selected in configuration.
+	apiStrategy sodaAPIStrategy
 }
 
 type sodaSearchResponse struct {
@@ -68,6 +72,7 @@ type sodaTrackV2Response struct {
 	Track       sodaTrack `json:"track"`
 	TrackPlayer struct {
 		URLPlayerInfo string `json:"url_player_info"`
+		MediaID       string `json:"media_id"`
 	} `json:"track_player"`
 	Lyric struct {
 		Content string `json:"content"`
@@ -83,6 +88,8 @@ type sodaPlayInfoResponse struct {
 }
 
 type sodaPlaylistDetailResponse struct {
+	NextCursor     string              `json:"next_cursor"`
+	HasMore        *bool               `json:"has_more"`
 	Playlist       sodaPlaylistMeta    `json:"playlist"`
 	MediaResources []sodaPlaylistEntry `json:"media_resources"`
 }
@@ -124,8 +131,9 @@ type sodaAlbumMeta struct {
 		ID   string `json:"id"`
 	} `json:"artists"`
 	URLCover struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 }
 
@@ -163,20 +171,24 @@ type sodaArtistMeta struct {
 	CountTracks int    `json:"count_tracks"`
 	TrackCount  int    `json:"track_count"`
 	URLCover    struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 	Avatar struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar"`
 	AvatarThumb struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar_thumb"`
 	AvatarMedium struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"avatar_medium"`
 }
 
@@ -192,8 +204,9 @@ type sodaTrack struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		URLCover struct {
-			URLs []string `json:"urls"`
-			URI  string   `json:"uri"`
+			URLs           []string `json:"urls"`
+			URI            string   `json:"uri"`
+			TemplatePrefix string   `json:"template_prefix"`
 		} `json:"url_cover"`
 	} `json:"album"`
 	BitRates []struct {
@@ -203,6 +216,11 @@ type sodaTrack struct {
 	AudioInfo struct {
 		PlayInfoList []sodaPlayInfo `json:"play_info_list"`
 	} `json:"audio_info"`
+	Preview struct {
+		Duration int    `json:"duration"`
+		Start    int    `json:"start"`
+		VID      string `json:"vid"`
+	} `json:"preview"`
 }
 
 type sodaPlayInfo struct {
@@ -227,8 +245,9 @@ type sodaPlaylistMeta struct {
 		PublicName string `json:"public_name"`
 	} `json:"owner"`
 	URLCover struct {
-		URLs []string `json:"urls"`
-		URI  string   `json:"uri"`
+		URLs           []string `json:"urls"`
+		URI            string   `json:"uri"`
+		TemplatePrefix string   `json:"template_prefix"`
 	} `json:"url_cover"`
 }
 
@@ -246,9 +265,10 @@ func NewClient(cookie string, timeout time.Duration, logger bot.Logger) *Client 
 		timeout = 15 * time.Second
 	}
 	return &Client{
-		httpClient: &http.Client{Timeout: timeout},
-		cookie:     strings.TrimSpace(cookie),
-		logger:     logger,
+		httpClient:  &http.Client{Timeout: timeout},
+		cookie:      strings.TrimSpace(cookie),
+		logger:      logger,
+		apiStrategy: sodaAPIStrategyLegacy,
 	}
 }
 
@@ -272,7 +292,7 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 	return nil
 }
 
-func (c *Client) Search(ctx context.Context, keyword string, limit int) ([]platform.Track, error) {
+func (c *Client) searchLegacy(ctx context.Context, keyword string, limit int) ([]platform.Track, error) {
 	if strings.TrimSpace(keyword) == "" {
 		return nil, platform.NewNotFoundError("soda", "search", "")
 	}
@@ -311,7 +331,7 @@ func (c *Client) Search(ctx context.Context, keyword string, limit int) ([]platf
 	return tracks, nil
 }
 
-func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track, string, error) {
+func (c *Client) getTrackLegacy(ctx context.Context, trackID string) (*platform.Track, string, error) {
 	trackID = strings.TrimSpace(trackID)
 	if trackID == "" {
 		return nil, "", platform.NewNotFoundError("soda", "track", trackID)
@@ -341,7 +361,7 @@ func (c *Client) GetTrack(ctx context.Context, trackID string) (*platform.Track,
 	return &track, parseSodaLyric(resp.Lyric.Content), nil
 }
 
-func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
+func (c *Client) getPlaylistLegacy(ctx context.Context, playlistID string) (*platform.Playlist, error) {
 	playlistID = strings.TrimSpace(playlistID)
 	if playlistID == "" {
 		return nil, platform.NewNotFoundError("soda", "playlist", playlistID)
@@ -438,7 +458,7 @@ func (c *Client) GetPlaylist(ctx context.Context, playlistID string) (*platform.
 	return playlist, nil
 }
 
-func (c *Client) SearchPlaylist(ctx context.Context, keyword string, limit int) ([]platform.Playlist, error) {
+func (c *Client) searchPlaylistLegacy(ctx context.Context, keyword string, limit int) ([]platform.Playlist, error) {
 	if strings.TrimSpace(keyword) == "" {
 		return nil, nil
 	}
@@ -600,7 +620,7 @@ func (c *Client) DownloadAndDecrypt(ctx context.Context, info *platform.Download
 	return 0, fmt.Errorf("soda: no download url available")
 }
 
-func (c *Client) FetchDownloadInfo(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
+func (c *Client) fetchDownloadInfoLegacy(ctx context.Context, trackID string, quality platform.Quality) (*platform.DownloadInfo, error) {
 	trackID = strings.TrimSpace(trackID)
 	if trackID == "" {
 		return nil, platform.NewNotFoundError("soda", "track", trackID)
@@ -731,7 +751,7 @@ func (c *Client) fetchPlayInfosBySignedURL(ctx context.Context, playerInfoURL st
 
 func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 	if c != nil && c.logger != nil {
-		c.logger.Debug("soda: download begin", "format", info.Format, "url", rawURL)
+		c.logger.Debug("soda: download begin", "format", info.Format, "url", redactSodaURL(rawURL))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -745,7 +765,7 @@ func (c *Client) downloadAndDecryptOnce(ctx context.Context, rawURL string, info
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, redactSodaRequestError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -936,7 +956,7 @@ func (c *Client) doRequest(ctx context.Context, rawURL string, accept string) ([
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactSodaRequestError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1030,7 +1050,7 @@ func convertSodaTrack(track sodaTrack) platform.Track {
 	}
 	albumID := strings.TrimSpace(track.Album.ID)
 	albumName := strings.TrimSpace(track.Album.Name)
-	coverURL := buildSodaCoverURL(track.Album.URLCover.URLs, track.Album.URLCover.URI)
+	coverURL := buildSodaCoverURL(track.Album.URLCover.URLs, track.Album.URLCover.URI, track.Album.URLCover.TemplatePrefix)
 	var album *platform.Album
 	if albumID != "" || albumName != "" {
 		album = &platform.Album{ID: albumID, Platform: "soda", Title: albumName, Artists: artists, CoverURL: coverURL, URL: buildSodaAlbumURL(albumID)}
@@ -1057,7 +1077,7 @@ func convertSodaPlaylist(meta sodaPlaylistMeta) *platform.Playlist {
 		Platform:    "soda",
 		Title:       title,
 		Description: strings.TrimSpace(meta.Desc),
-		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI),
+		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix),
 		Creator:     creator,
 		TrackCount:  trackCount,
 		URL:         buildSodaPlaylistURL(id),
@@ -1085,7 +1105,7 @@ func convertSodaAlbum(meta sodaAlbumMeta) *platform.Album {
 		Platform:    "soda",
 		Title:       title,
 		Artists:     artists,
-		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI),
+		CoverURL:    buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix),
 		Description: firstNonEmptyString(strings.TrimSpace(meta.Intro), strings.TrimSpace(meta.Desc)),
 		ReleaseDate: releaseDate,
 		TrackCount:  trackCount,
@@ -1131,15 +1151,15 @@ func convertSodaArtist(meta sodaArtistMeta) (*platform.Artist, int) {
 	if id == "" && name == "" {
 		return nil, 0
 	}
-	avatarURL := buildSodaCoverURL(meta.Avatar.URLs, meta.Avatar.URI)
+	avatarURL := buildSodaCoverURL(meta.Avatar.URLs, meta.Avatar.URI, meta.Avatar.TemplatePrefix)
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.AvatarMedium.URLs, meta.AvatarMedium.URI)
+		avatarURL = buildSodaCoverURL(meta.AvatarMedium.URLs, meta.AvatarMedium.URI, meta.AvatarMedium.TemplatePrefix)
 	}
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.AvatarThumb.URLs, meta.AvatarThumb.URI)
+		avatarURL = buildSodaCoverURL(meta.AvatarThumb.URLs, meta.AvatarThumb.URI, meta.AvatarThumb.TemplatePrefix)
 	}
 	if avatarURL == "" {
-		avatarURL = buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI)
+		avatarURL = buildSodaCoverURL(meta.URLCover.URLs, meta.URLCover.URI, meta.URLCover.TemplatePrefix)
 	}
 	trackCount := meta.TrackCount
 	if trackCount <= 0 {
@@ -1154,12 +1174,15 @@ func convertSodaArtist(meta sodaArtistMeta) (*platform.Artist, int) {
 	}, trackCount
 }
 
-func buildSodaCoverURL(urls []string, uri string) string {
+func buildSodaCoverURL(urls []string, uri string, templatePrefix ...string) string {
+	uri = strings.TrimSpace(uri)
+	if len(templatePrefix) > 0 && strings.TrimSpace(templatePrefix[0]) != "" && uri != "" {
+		return "https://p3-luna.douyinpic.com/img/" + uri + "~" + strings.TrimSpace(templatePrefix[0]) + "-resize:960:960.png"
+	}
 	base := ""
 	if len(urls) > 0 {
 		base = strings.TrimSpace(urls[0])
 	}
-	uri = strings.TrimSpace(uri)
 	if base == "" {
 		return ""
 	}

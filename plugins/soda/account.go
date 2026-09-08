@@ -63,6 +63,7 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 		status.Summary = "- 状态: 插件未初始化"
 		return status, nil
 	}
+	status.Highlights = s.client.StrategyHighlights()
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	fields := s.client.CookieMap()
@@ -101,8 +102,11 @@ func (s *SodaPlatform) AccountStatus(ctx context.Context) (platform.AccountStatu
 		return status, nil
 	}
 	if s.client.CanAccessCoreContent(probeCtx) {
-		status.LoggedIn = true
+		status.LoggedIn = s.client.effectiveAPIStrategy() == sodaAPIStrategyLegacy
 		lines := []string{"- 状态: 可用（内容接口正常）", "- 账号资料接口未返回用户信息，但汽水内容接口可访问"}
+		if !status.LoggedIn {
+			lines = []string{"- 状态: 公开内容接口可访问，登录态未确认", "- 账号资料接口未返回用户信息；公开内容不代表 Cookie 有效"}
+		}
 		if len(core) > 0 {
 			lines = append(lines, "- 关键字段: "+strings.Join(core, ", "))
 		}
@@ -248,7 +252,7 @@ func (c *Client) FetchSelfProfile(ctx context.Context) (*sodaSelfProfileResponse
 	return result, nil
 }
 
-func (c *Client) CanAccessCoreContent(ctx context.Context) bool {
+func (c *Client) canAccessCoreContentLegacy(ctx context.Context) bool {
 	if c == nil {
 		return false
 	}

@@ -266,6 +266,7 @@ func TestClientGetTrackKeepsShareURL(t *testing.T) {
 			},
 			TrackPlayer: struct {
 				URLPlayerInfo string `json:"url_player_info"`
+				MediaID       string `json:"media_id"`
 			}{
 				URLPlayerInfo: "https://media.example.com/player?video_id=abc",
 			},
@@ -300,6 +301,7 @@ func TestClientFetchDownloadInfoUsesPlayerInfoURL(t *testing.T) {
 				},
 				TrackPlayer: struct {
 					URLPlayerInfo string `json:"url_player_info"`
+					MediaID       string `json:"media_id"`
 				}{
 					URLPlayerInfo: "https://media.example.com/player?video_id=abc",
 				},
