@@ -59,6 +59,20 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 		return
 	}
 	r.BotName = botName
+	bh.Use(func(ctx *th.Context, update telego.Update) error {
+		if r.isOwnInlineMessage(update.Message) {
+			return ctx.Next(update)
+		}
+		if r.Whitelist != nil && update.Message != nil {
+			userID, chatID := downloadRequestIdentity(update.Message)
+			if !r.Whitelist.IsAllowed(chatID, userID) {
+				return ctx.Next(update)
+			}
+		}
+		typingCtx, stop := startSilentLinkTyping(ctx, ctx.Bot(), update.Message)
+		defer stop()
+		return ctx.WithContext(typingCtx).Next(update)
+	})
 
 	// Channel posts auto-forwarded into a linked discussion group arrive as a
 	// plain message with IsAutomaticForward set; Telegram strips the inline
@@ -370,6 +384,8 @@ func (r *Router) wrapMessage(handler MessageHandler) th.Handler {
 		}
 		bot := ctx.Bot()
 		r.submitEvent(reqCtx, "message", func(runCtx context.Context) {
+			runCtx, stop := startSilentLinkTyping(runCtx, bot, update.Message)
+			defer stop()
 			handler.Handle(runCtx, bot, &update)
 		})
 		return nil

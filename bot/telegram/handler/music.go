@@ -811,6 +811,8 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 	}
 
 	ctx = withAudioRetagAttempts(ctx)
+	ctx, stopTyping := startSilentLinkTyping(ctx, b, message)
+	defer stopTyping()
 	var songInfo botpkg.SongInfo
 	status := newStatusSession(ctx, b, h.RateLimiter, message.Chat.ID, threadID, replyParams)
 
@@ -2287,6 +2289,7 @@ func (h *MusicHandler) embedTrackTags(ctx context.Context, plat platform.Platfor
 }
 
 func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *telego.Message, message *telego.Message, songInfo *botpkg.SongInfo, musicPath, picPath string, cleanup []string, cleanupDone func(), platformName, trackID string) error {
+	stopSilentLinkTyping(ctx)
 	if h == nil {
 		return errors.New("music handler not configured")
 	}
