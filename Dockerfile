@@ -51,7 +51,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 #   - 编码: flac（soda 无损重写）、libmp3lame（识曲转 MP3）、pcm_f32le（识曲 f32le）、
 #           pcm_s16le（-f null 校验默认重编码）
 #   - 复用: flac / mov+ipod（m4a 重封装）/ mp3 / pcm_f32le（注意 -f f32le 的 configure
-#           组件名是 pcm_f32le 而非 f32le）/ null
+#           组件名是 pcm_f32le 而非 f32le）/ null / hash（缓存音频改标签前后校验）
 #   - 滤镜: aresample/aformat/anull/abuffer/abuffersink（-ac/-ar/编码格式转换会自动插入）
 #   - bsf: aac_adtstoasc（ADTS AAC 重封装进 mp4/m4a 必需）
 FROM alpine:${ALPINE_TAG} AS ffmpeg-builder
@@ -89,7 +89,7 @@ RUN ./configure \
       --enable-libmp3lame \
       --enable-decoder=flac,alac,aac,aac_latm,mp3,mp3float,opus,vorbis,pcm_s16le,pcm_s16be,pcm_f32le,pcm_s24le,pcm_u8 \
       --enable-encoder=flac,libmp3lame,pcm_s16le,pcm_f32le \
-      --enable-muxer=flac,mov,ipod,mp3,pcm_f32le,null \
+      --enable-muxer=flac,mov,ipod,mp3,pcm_f32le,null,hash \
       --enable-demuxer=flac,mov,matroska,aac,mp3,ogg,wav,pcm_s16le \
       --enable-parser=flac,aac,opus,vorbis,mpegaudio \
       --enable-bsf=aac_adtstoasc \
@@ -139,4 +139,3 @@ RUN mkdir -p /app/workdir
 # 在 config.ini 中用 `wrapper_host = wrapper` 让 bot 指向它。
 ENTRYPOINT ["/app/MusicBot-Go"]
 CMD ["-c", "/app/config.ini"]
-

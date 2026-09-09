@@ -14,6 +14,9 @@ type Track struct {
 	// Platform is the source platform name (e.g., "netease", "spotify").
 	Platform string `json:"platform"`
 
+	// MetadataLanguage is the bot language used for localized catalog names.
+	MetadataLanguage string `json:"metadata_language,omitempty"`
+
 	// Title is the track name.
 	Title string `json:"title"`
 

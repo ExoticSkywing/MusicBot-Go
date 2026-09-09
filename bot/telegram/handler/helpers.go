@@ -1749,6 +1749,7 @@ func fillSongInfoFromTrack(songInfo *botpkg.SongInfo, track *platform.Track, pla
 
 	songInfo.Duration = int(track.Duration.Seconds())
 	songInfo.SongName = track.Title
+	songInfo.MetadataLanguage = track.MetadataLanguage
 
 	artistNames := make([]string, 0, len(track.Artists))
 	artistIDs := make([]string, 0, len(track.Artists))

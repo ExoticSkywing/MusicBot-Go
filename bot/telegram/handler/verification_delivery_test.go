@@ -42,6 +42,8 @@ func newVerificationTestBot(t *testing.T) (*telego.Bot, *verificationTelegramRec
 
 		w.Header().Set("Content-Type", "application/json")
 		switch method {
+		case "sendChatAction":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
 		case "sendMessage", "editMessageText", "editMessageReplyMarkup":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok": true,

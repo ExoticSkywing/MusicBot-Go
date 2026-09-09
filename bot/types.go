@@ -52,7 +52,7 @@ type SongInfo struct {
 	CoverURL    string
 	// CoverLocalPath is a transient path to the original downloaded artwork.
 	// It exists only while a preparation task is alive and is never persisted.
-	CoverLocalPath string
+	CoverLocalPath string `json:"-"`
 	FromUserID     int64
 	FromUserName   string
 	FromChatID     int64
@@ -60,6 +60,20 @@ type SongInfo struct {
 	// LyricsAvailable is nil when unknown. When false, the platform explicitly
 	// reported that this track has no lyrics.
 	LyricsAvailable *bool
+
+	MetadataLanguage string // language used for the cached title/artist/album metadata
+	AudioLanguage    string // language embedded in the cached audio file's tags
+}
+
+// LocalizedSongMetadata stores one immutable metadata snapshot for a track and
+// language. Audio identifiers and lyrics deliberately remain in SongInfo.
+type LocalizedSongMetadata struct {
+	Platform    string
+	TrackID     string
+	Language    string
+	SongName    string
+	SongArtists string
+	SongAlbum   string
 }
 
 // Favorite scope constants identify whether a favorite belongs to a single user

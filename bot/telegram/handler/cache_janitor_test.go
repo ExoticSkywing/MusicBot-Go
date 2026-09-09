@@ -202,3 +202,20 @@ func assertJanitorTestMissing(t *testing.T, path string) {
 		t.Fatalf("expected %q to be removed, stat err = %v", path, err)
 	}
 }
+
+func TestCleanupStaleRetagDirectory(t *testing.T) {
+	dir := t.TempDir()
+	generated, err := os.MkdirTemp(dir, "1774808140730337-*.retag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(generated, "song.m4a"), []byte("stale"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CleanupStaleCacheEntries(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(generated); !os.IsNotExist(err) {
+		t.Fatalf("stale retag directory remains: %v", err)
+	}
+}

@@ -183,14 +183,16 @@ type MusicHandler struct {
 	uploadTaskSeq     uint64
 	activeUploads     map[uint64]uploadTask
 	// queueMu protects queuedStatus/statusDirty state.
-	queueMu           sync.RWMutex
-	queuedStatus      []queuedStatus
-	statusDirty       bool
-	trackFetchGroup   singleflight.Group
-	downloadInfoGroup singleflight.Group
+	queueMu             sync.RWMutex
+	queuedStatus        []queuedStatus
+	statusDirty         bool
+	trackFetchGroup     singleflight.Group
+	downloadInfoGroup   singleflight.Group
+	localizedAudioGroup singleflight.Group
 	// prepareMu protects preparedInFlight and prepareShuttingDown.
 	prepareMu           sync.Mutex
 	preparedInFlight    map[string]*preparedArtifactState
+	audioRetags         map[*audioRetagJob]struct{}
 	prepareShuttingDown bool
 	prepareWG           sync.WaitGroup
 	// inlineMu protects inlineInFlight map only.
@@ -322,6 +324,7 @@ type preparedArtifact struct {
 }
 
 type preparedSongInfo struct {
+	AudioLanguage   string
 	FileExt         string
 	AudioValidated  bool
 	Duration        int
@@ -815,6 +818,9 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		silent = false
 	}
 
+	ctx = withAudioRetagAttempts(ctx)
+	ctx, stopTyping := startSilentLinkTyping(ctx, b, message)
+	defer stopTyping()
 	var songInfo botpkg.SongInfo
 	status := newStatusSession(ctx, b, h.RateLimiter, message.Chat.ID, threadID, replyParams)
 
@@ -828,13 +834,13 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		if h.Repo == nil {
 			return nil, errors.New("repo not configured")
 		}
-		cached, err := h.Repo.FindByPlatformTrackID(ctx, platform, trackID, quality)
+		cached, err := findLanguageAudio(ctx, h.Repo, platform, trackID, quality)
 		// Do not memoize legacy Apple enhanced records that the current quality
 		// classifier intentionally invalidates. A request waiting on Apple's
 		// serial download gate must query the DB again after the first waiter has
 		// refreshed that row, instead of repeatedly decrypting the same track from
 		// its request-local stale pointer.
-		if err == nil && cached != nil && isReusableCachedSong(cached, platform, quality) {
+		if err == nil && cached != nil && isReusableCachedSong(cached, platform, quality) && (!isAppleMusicPlatform(platform) || cached.AudioLanguage == i18n.From(ctx).Lang()) {
 			cacheMap[key] = cached
 		}
 		return cached, err
@@ -865,9 +871,10 @@ func (h *MusicHandler) processMusic(ctx context.Context, b *telego.Bot, message 
 		if h.Logger != nil {
 			h.Logger.Warn("cached telegram file id invalid, fallback to redownload", "platform", platformName, "trackID", trackID, "quality", cacheQuality, "error", err)
 		}
-		if h.Repo != nil {
+		if h.Repo != nil && !isAppleMusicPlatform(platformName) {
 			_ = h.Repo.DeleteByPlatformTrackID(ctx, platformName, trackID, cacheQuality)
 		}
+		delete(cacheMap, platformName+":"+trackID+":"+cacheQuality)
 		songInfo.FileID = ""
 		songInfo.ThumbFileID = ""
 		return true
@@ -1255,22 +1262,44 @@ func (h *MusicHandler) trySendCachedTrack(
 		return botpkg.SongInfo{}, false, nil
 	}
 	if cached.FileID == "" {
-		_ = h.Repo.DeleteByPlatformTrackID(ctx, platformName, trackID, cacheQuality)
+		if isAppleMusicPlatform(platformName) {
+			invalidateLanguageAudio(ctx, h.Repo, cached)
+		} else {
+			_ = h.Repo.DeleteByPlatformTrackID(ctx, platformName, trackID, cacheQuality)
+		}
 		return botpkg.SongInfo{}, false, nil
 	}
 
 	songInfo := *cached
 	if h != nil {
 		h.refreshCachedSongLinks(ctx, &songInfo)
+		localizeCachedSong(ctx, h.PlatformManager, h.Repo, &songInfo)
 		verifyCachedNeteaseQuality(ctx, h.PlatformManager, h.Repo, h.Logger, &songInfo, platformName, trackID, cacheQuality)
 		if h.EnableStandaloneCover && resolveStandaloneCoverEnabled(ctx, h.Repo, message) {
 			h.refreshCachedCoverSource(ctx, &songInfo)
 		}
 	}
+	musicPath := ""
+	var releaseLocalized func()
+	if needsLocalizedAudio(ctx, &songInfo) {
+		if !silent {
+			status.Upsert(buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), tr(ctx, "downloading")))
+		}
+		musicPath, releaseLocalized, err = h.prepareLocalizedAudio(ctx, b, cached, &songInfo)
+		if err != nil {
+			return botpkg.SongInfo{}, false, nil
+		}
+	}
 	if !silent {
 		status.Upsert(buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), tr(ctx, "hit_cache")))
 	}
-	if err := h.sendMusic(ctx, b, status.Message(), message, &songInfo, "", "", nil, nil, platformName, trackID); err != nil {
+	if err := h.sendMusic(ctx, b, status.Message(), message, &songInfo, musicPath, "", nil, releaseLocalized, platformName, trackID); err != nil {
+		if releaseLocalized != nil {
+			releaseLocalized()
+		}
+		if isTelegramFileIDInvalid(err) && musicPath == "" {
+			invalidateLanguageAudio(ctx, h.Repo, cached)
+		}
 		if onInvalidCachedFileID != nil && onInvalidCachedFileID(err, cacheQuality) {
 			return songInfo, false, nil
 		}
@@ -1416,6 +1445,7 @@ func (h *MusicHandler) getTrackSingleflight(ctx context.Context, platformName, t
 		return nil, errors.New("platform manager not configured")
 	}
 	key := fmt.Sprintf("track:%s:%s", platformName, trackID)
+	key = metadataRequestKey(ctx, platformName, key)
 
 	value, err, _ := h.trackFetchGroup.Do(key, func() (interface{}, error) {
 		plat := h.PlatformManager.Get(platformName)
@@ -1487,6 +1517,7 @@ func capturePreparedSongInfo(songInfo *botpkg.SongInfo) preparedSongInfo {
 		return preparedSongInfo{}
 	}
 	return preparedSongInfo{
+		AudioLanguage:   songInfo.AudioLanguage,
 		FileExt:         songInfo.FileExt,
 		AudioValidated:  songInfo.AudioValidated,
 		Duration:        songInfo.Duration,
@@ -1508,6 +1539,7 @@ func applyPreparedSongInfo(songInfo *botpkg.SongInfo, prepared preparedSongInfo)
 	if songInfo == nil {
 		return
 	}
+	songInfo.AudioLanguage = prepared.AudioLanguage
 	songInfo.FileExt = prepared.FileExt
 	songInfo.AudioValidated = prepared.AudioValidated
 	songInfo.Duration = prepared.Duration
@@ -1647,6 +1679,7 @@ func (h *MusicHandler) acquirePreparedMedia(
 		ctx = context.Background()
 	}
 	key := fmt.Sprintf("prepared:%s:%s:%s", strings.TrimSpace(platformName), strings.TrimSpace(trackID), strings.TrimSpace(quality))
+	key = metadataRequestKey(ctx, platformName, key)
 
 	var sharedCtx context.Context
 	var sharedCancel context.CancelFunc
@@ -2180,6 +2213,16 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	cleanupList = append(cleanupList, filePath, finalDir)
 
 	h.embedTrackTags(ctx, plat, track, trackID, info, filePath, embedPicPath)
+	songInfo.AudioLanguage = ""
+	if isAppleMusicPlatform(songInfo.Platform) && songInfo.MetadataLanguage != "" {
+		if h.ID3Service == nil {
+			return "", "", cleanupList, errors.New("tag service unavailable")
+		}
+		if err := h.ID3Service.RewriteLocalizedNames(filePath, songInfo.SongName, songInfo.SongArtists, songInfo.SongAlbum); err != nil {
+			return "", "", cleanupList, err
+		}
+		songInfo.AudioLanguage = songInfo.MetadataLanguage
+	}
 
 	// Validate the final bytes, after normalization and tag writers have finished.
 	// Only this file is allowed to establish a reusable audio cache entry.
@@ -2286,6 +2329,7 @@ func (h *MusicHandler) embedTrackTags(ctx context.Context, plat platform.Platfor
 }
 
 func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *telego.Message, message *telego.Message, songInfo *botpkg.SongInfo, musicPath, picPath string, cleanup []string, cleanupDone func(), platformName, trackID string) error {
+	stopSilentLinkTyping(ctx)
 	if h == nil {
 		return errors.New("music handler not configured")
 	}
@@ -2346,6 +2390,9 @@ func (h *MusicHandler) sendMusic(ctx context.Context, b *telego.Bot, statusMsg *
 			}
 			if result.coverAttempted {
 				songCopy.CoverFileID = result.coverFileID
+			}
+			if result.err != nil && isTelegramFileIDInvalid(result.err) && musicPath == "" {
+				invalidateLanguageAudio(cleanupCtx, h.Repo, &songCopy)
 			}
 			if h.Repo != nil && result.err == nil && songCopy.FileID != "" {
 				if err := h.Repo.Create(cleanupCtx, &songCopy); err != nil {
@@ -2526,7 +2573,10 @@ func (h *MusicHandler) BeginUploadShutdown() {
 queueDrained:
 	h.prepareMu.Lock()
 	h.prepareShuttingDown = true
-	prepareCancels := make([]context.CancelFunc, 0, len(h.preparedInFlight))
+	prepareCancels := make([]context.CancelFunc, 0, len(h.preparedInFlight)+len(h.audioRetags))
+	for job := range h.audioRetags {
+		prepareCancels = append(prepareCancels, job.cancel)
+	}
 	for _, state := range h.preparedInFlight {
 		if state != nil && state.cancel != nil {
 			prepareCancels = append(prepareCancels, state.cancel)
@@ -3419,7 +3469,7 @@ func (h *MusicHandler) findInlineCachedSong(ctx context.Context, userID, chatID 
 	if preferAppleMusicAtmosEnabled(ctx, h.Repo, h.PlatformManager, scopeType, scopeID, platformName, explicit) && qualityValue != platform.QualityAtmos.String() {
 		cacheQuality = platform.QualityAtmos.String()
 	}
-	cached, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, cacheQuality)
+	cached, err := findLanguageAudio(ctx, h.Repo, platformName, trackID, cacheQuality)
 	if err != nil {
 		return nil, cacheQuality, err
 	}
@@ -3430,6 +3480,10 @@ func (h *MusicHandler) findInlineCachedSong(ctx context.Context, userID, chatID 
 		return nil, cacheQuality, nil
 	}
 	copy := *cached
+	localizeCachedSong(ctx, h.PlatformManager, h.Repo, &copy)
+	if needsLocalizedAudio(ctx, &copy) {
+		return nil, cacheQuality, nil
+	}
 	return &copy, cacheQuality, nil
 }
 
@@ -3447,6 +3501,7 @@ func (h *MusicHandler) prepareInlineSong(
 	if h == nil {
 		return nil, errors.New("music handler not configured")
 	}
+	ctx = withAudioRetagAttempts(ctx)
 	_, explicitQuality := qualityIntentValue(qualityOverride)
 	baselineQualityValue := h.resolveInlineQualityValueForScope(ctx, userID, chatID, isGroup, platformName, qualityOverride)
 	baselineQuality := platform.QualityHigh
@@ -3462,14 +3517,19 @@ func (h *MusicHandler) prepareInlineSong(
 		if h.Repo == nil {
 			return nil, nil
 		}
-		cached, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, qualityValue)
+		cached, err := findLanguageAudio(ctx, h.Repo, platformName, trackID, qualityValue)
 		if err != nil || cached == nil || strings.TrimSpace(cached.FileID) == "" {
 			return nil, err
 		}
 		if !isReusableCachedSong(cached, platformName, qualityValue) {
 			return nil, nil
 		}
-		return cached, nil
+		copy := *cached
+		localizeCachedSong(ctx, h.PlatformManager, h.Repo, &copy)
+		if needsLocalizedAudio(ctx, &copy) {
+			return nil, nil
+		}
+		return &copy, nil
 	}
 
 	if preferAtmos {
@@ -3504,6 +3564,13 @@ func (h *MusicHandler) prepareInlineSong(
 		defer releaseAdmission()
 	}
 
+	retagQuality := qualityValue
+	if preferAtmos {
+		retagQuality = platform.QualityAtmos.String()
+	}
+	if localized, retagErr := h.tryLocalizedInlineAudio(ctx, b, platformName, trackID, retagQuality, progress); retagErr != nil || localized != nil {
+		return localized, retagErr
+	}
 	if h.PlatformManager == nil {
 		if preferAtmos {
 			if cached, _ := findCached(); cached != nil {
@@ -3552,11 +3619,15 @@ func (h *MusicHandler) prepareInlineSong(
 		return &copy, nil
 	}
 
+	if localized, retagErr := h.tryLocalizedInlineAudio(ctx, b, platformName, trackID, qualityValue, progress); retagErr != nil || localized != nil {
+		return localized, retagErr
+	}
 	intentKey := "strict"
 	if autoSelected {
 		intentKey = "auto"
 	}
 	key := fmt.Sprintf("inline:%s:%s:%s:%s:%s", strings.TrimSpace(platformName), strings.TrimSpace(trackID), strings.TrimSpace(qualityValue), intentKey, baselineQuality.String())
+	key = metadataRequestKey(ctx, platformName, key)
 	h.inlineMu.Lock()
 	if h.inlineInFlight == nil {
 		h.inlineInFlight = make(map[string]*inlineProcessCall)
@@ -3659,6 +3730,11 @@ func (h *MusicHandler) prepareInlineSong(
 		return &copy, nil
 	}
 
+	if localized, retagErr := h.tryLocalizedInlineAudio(ctx, b, platformName, trackID, qualityValue, progress); retagErr != nil || localized != nil {
+		call.song = localized
+		call.err = retagErr
+		return localized, retagErr
+	}
 	var songInfo botpkg.SongInfo
 	fillSongInfoFromTrack(&songInfo, track, platformName, trackID, &telego.Message{})
 	if userID != 0 {
@@ -3718,64 +3794,9 @@ func (h *MusicHandler) prepareInlineSong(
 		}
 	}()
 
-	uploadChatID := h.InlineUploadChatID
-	if uploadChatID == 0 {
-		call.err = errors.New("InlineUploadChatID not configured")
-		return nil, call.err
-	}
-
-	if progress != nil {
-		progress(buildMusicInfoText(ctx, songInfo.SongName, songInfo.SongAlbum, formatFileInfo(songInfo.FileExt, songInfo.MusicSize), tr(ctx, "uploading")))
-	}
-
-	uploadBot := b
-	if h.UploadBot != nil {
-		uploadBot = h.UploadBot
-	}
-	file, err := os.Open(musicPath)
-	if err != nil {
+	if err := h.uploadInlineAudio(ctx, b, &songInfo, musicPath, picPath, progress); err != nil {
 		call.err = err
 		return nil, err
-	}
-	defer file.Close()
-	caption := buildMusicCaption(ctx, h.PlatformManager, &songInfo, h.BotName)
-	params := &telego.SendAudioParams{
-		ChatID:    telego.ChatID{ID: uploadChatID},
-		Audio:     telego.InputFile{File: file},
-		Caption:   caption,
-		ParseMode: telego.ModeHTML,
-		Title:     songInfo.SongName,
-		Performer: songInfo.SongArtists,
-		Duration:  songInfo.Duration,
-	}
-	if strings.TrimSpace(picPath) != "" {
-		if thumbStat, thumbErr := os.Stat(picPath); thumbErr == nil && thumbStat.Size() > 0 {
-			if thumbFile, thumbOpenErr := os.Open(picPath); thumbOpenErr == nil {
-				defer thumbFile.Close()
-				params.Thumbnail = &telego.InputFile{File: thumbFile}
-			}
-		}
-	}
-	var uploaded *telego.Message
-	if h.RateLimiter != nil {
-		uploaded, err = telegram.SendAudioWithRetry(ctx, h.RateLimiter, uploadBot, params)
-	} else {
-		uploaded, err = uploadBot.SendAudio(ctx, params)
-	}
-	if err != nil || uploaded == nil || uploaded.Audio == nil || strings.TrimSpace(uploaded.Audio.FileID) == "" {
-		if err == nil {
-			err = errors.New("upload failed")
-		}
-		call.err = err
-		return nil, err
-	}
-	songInfo.FileID = uploaded.Audio.FileID
-	if uploaded.Audio.Thumbnail != nil {
-		songInfo.ThumbFileID = uploaded.Audio.Thumbnail.FileID
-	}
-
-	if h.Repo != nil {
-		_ = h.Repo.Create(ctx, &songInfo)
 	}
 	copy := songInfo
 	call.song = &copy
@@ -3803,7 +3824,14 @@ func (h *MusicHandler) prepareInlineSongWithTimeoutFor(
 	progress func(text string),
 	onQueued func(),
 ) (*botpkg.SongInfo, error) {
-	processCtx, cancel := h.processContext(detachContext(ctx))
+	// submitInlineDownloadWork already detached the Telegram update lifetime and
+	// attached the user-tracked /cancel context. Preserve that cancellation for
+	// admitted work; direct callers retain the historical detached lifetime.
+	baseCtx := ctx
+	if !hasDownloadWorkAdmission(ctx) {
+		baseCtx = detachContext(ctx)
+	}
+	processCtx, cancel := h.processContext(baseCtx)
 	defer cancel()
 	return h.prepareInlineSong(processCtx, b, userID, chatID, isGroup, userName, platformName, trackID, qualityOverride, progress, onQueued)
 }

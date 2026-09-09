@@ -72,7 +72,12 @@ func (p *AppleMusicPlatform) Search(ctx context.Context, query string, limit int
 	if p == nil || p.client == nil {
 		return nil, platform.NewUnavailableError("applemusic", "search", query)
 	}
-	return p.client.Search(ctx, query, limit)
+	tracks, err := p.client.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	p.localizeTrackList(ctx, tracks)
+	return tracks, nil
 }
 
 func (p *AppleMusicPlatform) GetLyrics(ctx context.Context, trackID string) (*platform.Lyrics, error) {
@@ -111,6 +116,9 @@ func (p *AppleMusicPlatform) GetTrack(ctx context.Context, trackID string) (*pla
 	if track == nil {
 		return nil, platform.NewNotFoundError("applemusic", "track", trackID)
 	}
+	if localized, localizeErr := p.LocalizeTrack(ctx, track); localizeErr == nil && localized != nil {
+		track = localized
+	}
 	return track, nil
 }
 
@@ -143,6 +151,9 @@ func (p *AppleMusicPlatform) GetAlbum(ctx context.Context, albumID string) (*pla
 }
 
 func (p *AppleMusicPlatform) GetPlaylist(ctx context.Context, playlistID string) (*platform.Playlist, error) {
+	if p == nil || p.client == nil {
+		return nil, platform.NewUnavailableError("applemusic", "playlist", playlistID)
+	}
 	isAlbum, rawID := parseCollectionID(playlistID)
 	if isAlbum {
 		album, tracks, err := p.client.GetAlbum(ctx, rawID)
@@ -152,7 +163,7 @@ func (p *AppleMusicPlatform) GetPlaylist(ctx context.Context, playlistID string)
 		if album == nil {
 			return nil, platform.NewNotFoundError("applemusic", "album", rawID)
 		}
-		return &platform.Playlist{
+		playlist := &platform.Playlist{
 			ID:         playlistID,
 			Platform:   "applemusic",
 			Title:      album.Title,
@@ -161,12 +172,18 @@ func (p *AppleMusicPlatform) GetPlaylist(ctx context.Context, playlistID string)
 			TrackCount: max(album.TrackCount, len(tracks)),
 			Tracks:     tracks,
 			URL:        album.URL,
-		}, nil
+		}
+		p.localizeTrackList(ctx, playlist.Tracks)
+		return playlist, nil
 	}
-	if p == nil || p.client == nil {
-		return nil, platform.NewUnavailableError("applemusic", "playlist", playlistID)
+	playlist, err := p.client.GetPlaylist(ctx, playlistID)
+	if err != nil {
+		return nil, err
 	}
-	return p.client.GetPlaylist(ctx, playlistID)
+	if playlist != nil {
+		p.localizeTrackList(ctx, playlist.Tracks)
+	}
+	return playlist, nil
 }
 
 func joinArtistNames(artists []platform.Artist) string {

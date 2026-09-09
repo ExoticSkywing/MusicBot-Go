@@ -129,7 +129,7 @@ func cacheTopLevelPath(root, name string) (string, error) {
 func isCacheJanitorEntry(name string, info os.FileInfo) bool {
 	if info.IsDir() {
 		return isMusicCacheTimestamp(name) ||
-			(strings.HasSuffix(name, ".parts") && hasMusicTimestampPrefix(name))
+			((strings.HasSuffix(name, ".parts") || strings.HasSuffix(name, ".retag")) && hasMusicTimestampPrefix(name))
 	}
 	if !info.Mode().IsRegular() {
 		return false
