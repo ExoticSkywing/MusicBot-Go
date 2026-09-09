@@ -138,12 +138,16 @@ wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 | `/login <平台> check` · `/login check` | 检查单个 / 全部平台账号 |
 | `/login <平台> renew` · `/login renew` | 手动续期 |
 | `/login <平台> auto on\|off\|status [秒]` | 自动续期开关 |
-| `/login applemusic lang [语言]` | 查看 / 设置 Apple Music 元数据语言 |
+| `/login applemusic lang [语言]` | 查看 / 设置 Apple Music 账号目录的回退语言 |
 | `/reload` | 重载配置与动态脚本插件 |
 | `/rmcache <平台>\|all` | 清除 Telegram 文件 ID 缓存（不操作临时媒体目录） |
 | `/wl add\|del\|list [chatID]` | 白名单管理（需 `EnableWhitelist = true`） |
 
 ## Apple Music 无损（Hi-Res/Atmos）
+
+Apple Music 歌曲的歌名、歌手和专辑名优先跟随机器人当前语言（中文、英语、日语、俄语），从对应地区的公开目录查询等价歌曲；无需额外地区账号或会员。找不到匹配时保留原信息。播放 ID、下载账号和歌词请求不变。
+
+音频缓存也按语言保存：已有目标语言版本时直接复用；目标语言元数据与原文件缓存的歌名、歌手、专辑完全一致时，只补充缓存语言标记并复用原 FileID，不取回或上传文件。名称有变化时，优先从 Telegram 取回音频，只重写歌名、歌手和专辑标签，再上传为新的语言版本。取回或校验失败才从 Apple 重新下载。原语言版本保留，歌词、封面和其他标签不改动，不转码；重写前后会校验时长和音频数据哈希。旧缓存按需处理，不会批量重下载。
 
 Apple Music 的解密分两档：
 

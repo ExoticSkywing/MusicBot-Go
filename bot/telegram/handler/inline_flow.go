@@ -189,6 +189,9 @@ func runInlineMediaFlow(ctx context.Context, b *telego.Bot, deps inlineMediaFlow
 				}
 				return
 			}
+			if isTelegramFileIDInvalid(err) {
+				invalidateLanguageAudio(ctx, music.Repo, cachedSong)
+			}
 			if music.Logger != nil {
 				music.Logger.Warn("failed to edit cached inline media, fallback to prepare", "platform", platformName, "trackID", trackID, "error", err)
 			}

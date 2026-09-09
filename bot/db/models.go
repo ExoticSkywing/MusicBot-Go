@@ -41,6 +41,41 @@ type SongInfoModel struct {
 	FromChatID      int64
 	FromChatName    string
 	LyricsAvailable *bool
+
+	MetadataLanguage string
+	AudioLanguage    string `gorm:"not null;default:''"`
+}
+
+// LocalizedSongMetadataModel keeps metadata variants separate from the audio
+// cache row, whose key also includes quality.
+type LocalizedSongMetadataModel struct {
+	gorm.Model
+	Platform    string `gorm:"not null;index:idx_localized_song_metadata,unique"`
+	TrackID     string `gorm:"not null;index:idx_localized_song_metadata,unique"`
+	Language    string `gorm:"not null;index:idx_localized_song_metadata,unique"`
+	SongName    string
+	SongArtists string
+	SongAlbum   string
+}
+
+func (LocalizedSongMetadataModel) TableName() string {
+	return "localized_song_metadata"
+}
+
+// LocalizedAudioModel preserves reusable Apple Music audio files whose tags
+// were written in different bot languages while the primary cache row changes.
+type LocalizedAudioModel struct {
+	gorm.Model
+	Platform     string `gorm:"not null;index:idx_localized_audio,unique"`
+	TrackID      string `gorm:"not null;index:idx_localized_audio,unique"`
+	Quality      string `gorm:"not null;index:idx_localized_audio,unique"`
+	Language     string `gorm:"not null;index:idx_localized_audio,unique"`
+	FileID       string `gorm:"not null;index"`
+	SongInfoJSON []byte `gorm:"not null"`
+}
+
+func (LocalizedAudioModel) TableName() string {
+	return "localized_audio"
 }
 
 func (SongInfoModel) TableName() string {
@@ -95,6 +130,9 @@ func toInternal(model SongInfoModel) *bot.SongInfo {
 		FromChatID:      model.FromChatID,
 		FromChatName:    model.FromChatName,
 		LyricsAvailable: model.LyricsAvailable,
+
+		MetadataLanguage: model.MetadataLanguage,
+		AudioLanguage:    model.AudioLanguage,
 	}
 }
 
@@ -135,6 +173,9 @@ func toModel(info *bot.SongInfo) *SongInfoModel {
 		FromChatID:      info.FromChatID,
 		FromChatName:    info.FromChatName,
 		LyricsAvailable: info.LyricsAvailable,
+
+		MetadataLanguage: info.MetadataLanguage,
+		AudioLanguage:    info.AudioLanguage,
 	}
 
 	if info.ID != 0 {

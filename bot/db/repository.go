@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -109,7 +110,7 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface, 
 		return nil, fmt.Errorf("data migration failed: %w", err)
 	}
 
-	if err := cacheDB.AutoMigrate(&SongInfoModel{}); err != nil {
+	if err := cacheDB.AutoMigrate(&SongInfoModel{}, &LocalizedSongMetadataModel{}, &LocalizedAudioModel{}); err != nil {
 		return nil, err
 	}
 	if err := dataDB.AutoMigrate(&UserSettingsModel{}, &BotStatModel{}, &GroupSettingsModel{}, &PluginSettingModel{}, &FavoriteModel{}); err != nil {
@@ -572,10 +573,19 @@ func reusableRandomCacheQuery(query *gorm.DB) *gorm.DB {
 func (r *Repository) FindByFileID(ctx context.Context, fileID string) (*bot.SongInfo, error) {
 	var model SongInfoModel
 	err := r.cacheDB.WithContext(ctx).Where("file_id = ?", fileID).First(&model).Error
+	if err == nil {
+		return toInternal(model), nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	var localized LocalizedAudioModel
+	err = r.cacheDB.WithContext(ctx).Where("file_id = ?", fileID).Order("updated_at DESC").First(&localized).Error
 	if err != nil {
 		return nil, err
 	}
-	return toInternal(model), nil
+	return localizedAudioToSong(localized)
 }
 
 // Create inserts a new song record.
@@ -585,6 +595,9 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 	}
 	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		model := toModel(song)
+		if err := snapshotExistingLocalizedAudio(tx, "platform = ? AND track_id = ? AND quality = ?", model.Platform, model.TrackID, model.Quality); err != nil {
+			return err
+		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "platform"},
@@ -604,6 +617,7 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 				"song_artists",
 				"song_artists_ids",
 				"song_album",
+				"metadata_language",
 				"album_id",
 				"track_url",
 				"album_url",
@@ -622,6 +636,7 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 				"from_chat_id",
 				"from_chat_name",
 				"lyrics_available",
+				"audio_language",
 			}),
 		}).Create(model).Error; err != nil {
 			return err
@@ -632,7 +647,10 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 		song.ID = model.ID
 		song.CreatedAt = model.CreatedAt
 		song.UpdatedAt = model.UpdatedAt
-		return nil
+		if err := saveLocalizedSongMetadata(tx, localizedMetadataFromSong(song)); err != nil {
+			return err
+		}
+		return saveLocalizedAudio(tx, toInternal(*model))
 	})
 }
 
@@ -640,8 +658,250 @@ func (r *Repository) Create(ctx context.Context, song *bot.SongInfo) error {
 func (r *Repository) Update(ctx context.Context, song *bot.SongInfo) error {
 	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		model := toModel(song)
-		return tx.Save(model).Error
+		if model.ID != 0 {
+			if err := snapshotExistingLocalizedAudio(tx, "id = ?", model.ID); err != nil {
+				return err
+			}
+		} else if err := snapshotExistingLocalizedAudio(tx, "platform = ? AND track_id = ? AND quality = ?", model.Platform, model.TrackID, model.Quality); err != nil {
+			return err
+		}
+		if err := tx.Save(model).Error; err != nil {
+			return err
+		}
+		if err := saveLocalizedSongMetadata(tx, localizedMetadataFromSong(song)); err != nil {
+			return err
+		}
+		return saveLocalizedAudio(tx, toInternal(*model))
 	})
+}
+
+// FindLocalizedAudio returns an exact Apple Music audio-language variant.
+// Missing variants are reported as (nil, nil).
+func (r *Repository) FindLocalizedAudio(ctx context.Context, platformName, trackID, quality, language string) (*bot.SongInfo, error) {
+	if r == nil || r.cacheDB == nil {
+		return nil, errors.New("repository not configured")
+	}
+	platformName = strings.TrimSpace(platformName)
+	trackID = strings.TrimSpace(trackID)
+	quality = strings.TrimSpace(quality)
+	language = strings.TrimSpace(language)
+	if platformName == "" || trackID == "" || quality == "" {
+		return nil, nil
+	}
+	var model LocalizedAudioModel
+	err := r.cacheDB.WithContext(ctx).
+		Where("platform = ? AND track_id = ? AND quality = ? AND language = ?", platformName, trackID, quality, language).
+		First(&model).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return localizedAudioToSong(model)
+}
+
+// FindCachedAudioSource returns the most recently stored language variant for
+// a track and quality. Callers use it as a source after the primary row is gone.
+func (r *Repository) FindCachedAudioSource(ctx context.Context, platformName, trackID, quality string) (*bot.SongInfo, error) {
+	if r == nil || r.cacheDB == nil {
+		return nil, errors.New("repository not configured")
+	}
+	platformName = strings.TrimSpace(platformName)
+	trackID = strings.TrimSpace(trackID)
+	quality = strings.TrimSpace(quality)
+	if platformName == "" || trackID == "" || quality == "" {
+		return nil, nil
+	}
+	var model LocalizedAudioModel
+	err := r.cacheDB.WithContext(ctx).
+		Where("platform = ? AND track_id = ? AND quality = ?", platformName, trackID, quality).
+		Order("updated_at DESC").
+		First(&model).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return localizedAudioToSong(model)
+}
+
+// SaveLocalizedAudio stores a reusable Apple Music audio variant. A newer
+// verified file replaces the same track/quality/language entry.
+func (r *Repository) SaveLocalizedAudio(ctx context.Context, song *bot.SongInfo) error {
+	if r == nil || r.cacheDB == nil {
+		return errors.New("repository not configured")
+	}
+	return saveLocalizedAudio(r.cacheDB.WithContext(ctx), song)
+}
+
+// DeleteCachedAudioFile invalidates all language aliases of an unusable file.
+// Other files for the same track remain available as retrieval sources.
+func (r *Repository) DeleteCachedAudioFile(ctx context.Context, fileID string) error {
+	if r == nil || r.cacheDB == nil {
+		return errors.New("repository not configured")
+	}
+	if strings.TrimSpace(fileID) == "" {
+		return nil
+	}
+	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("file_id = ?", fileID).Delete(&SongInfoModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Where("file_id = ?", fileID).Delete(&LocalizedAudioModel{}).Error
+	})
+}
+
+// DeleteLocalizedAudio invalidates one exact audio-language variant.
+func (r *Repository) DeleteLocalizedAudio(ctx context.Context, platformName, trackID, quality, language string) error {
+	if r == nil || r.cacheDB == nil {
+		return errors.New("repository not configured")
+	}
+	platformName = strings.TrimSpace(platformName)
+	trackID = strings.TrimSpace(trackID)
+	quality = strings.TrimSpace(quality)
+	language = strings.TrimSpace(language)
+	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&SongInfoModel{},
+			"platform = ? AND track_id = ? AND quality = ? AND COALESCE(audio_language, '') = ?",
+			platformName, trackID, quality, language).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&LocalizedAudioModel{},
+			"platform = ? AND track_id = ? AND quality = ? AND language = ?",
+			platformName, trackID, quality, language).Error
+	})
+}
+
+func snapshotExistingLocalizedAudio(tx *gorm.DB, query string, args ...any) error {
+	var existing SongInfoModel
+	err := tx.Where(query, args...).First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return saveLocalizedAudio(tx, toInternal(existing))
+}
+
+func saveLocalizedAudio(db *gorm.DB, song *bot.SongInfo) error {
+	if db == nil || song == nil || !strings.EqualFold(strings.TrimSpace(song.Platform), "applemusic") ||
+		strings.TrimSpace(song.TrackID) == "" || strings.TrimSpace(song.Quality) == "" ||
+		strings.TrimSpace(song.FileID) == "" || !song.AudioValidated {
+		return nil
+	}
+	snapshot := *song
+	snapshot.ID = 0
+	snapshot.CreatedAt = time.Time{}
+	snapshot.UpdatedAt = time.Time{}
+	snapshot.DeletedAt = nil
+	payload, err := json.Marshal(&snapshot)
+	if err != nil {
+		return err
+	}
+	model := &LocalizedAudioModel{
+		Platform:     strings.TrimSpace(song.Platform),
+		TrackID:      strings.TrimSpace(song.TrackID),
+		Quality:      strings.TrimSpace(song.Quality),
+		Language:     strings.TrimSpace(song.AudioLanguage),
+		FileID:       strings.TrimSpace(song.FileID),
+		SongInfoJSON: payload,
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "platform"}, {Name: "track_id"}, {Name: "quality"}, {Name: "language"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"deleted_at", "updated_at", "file_id", "song_info_json",
+		}),
+	}).Create(model).Error
+}
+
+func localizedAudioToSong(model LocalizedAudioModel) (*bot.SongInfo, error) {
+	var song bot.SongInfo
+	if err := json.Unmarshal(model.SongInfoJSON, &song); err != nil {
+		return nil, fmt.Errorf("decode localized audio cache: %w", err)
+	}
+	song.ID = 0
+	song.CreatedAt = time.Time{}
+	song.UpdatedAt = time.Time{}
+	song.DeletedAt = nil
+	return &song, nil
+}
+
+// FindLocalizedSongMetadata returns a language-specific metadata snapshot for
+// a track. A missing snapshot is reported as (nil, nil).
+func (r *Repository) FindLocalizedSongMetadata(ctx context.Context, platformName, trackID, language string) (*bot.LocalizedSongMetadata, error) {
+	if r == nil || r.cacheDB == nil {
+		return nil, errors.New("repository not configured")
+	}
+	platformName = strings.TrimSpace(platformName)
+	trackID = strings.TrimSpace(trackID)
+	language = strings.TrimSpace(language)
+	if platformName == "" || trackID == "" || language == "" {
+		return nil, nil
+	}
+
+	var model LocalizedSongMetadataModel
+	err := r.cacheDB.WithContext(ctx).
+		Where("platform = ? AND track_id = ? AND language = ?", platformName, trackID, language).
+		First(&model).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &bot.LocalizedSongMetadata{
+		Platform:    model.Platform,
+		TrackID:     model.TrackID,
+		Language:    model.Language,
+		SongName:    model.SongName,
+		SongArtists: model.SongArtists,
+		SongAlbum:   model.SongAlbum,
+	}, nil
+}
+
+// SaveLocalizedSongMetadata stores the first metadata snapshot seen for a
+// track/language pair. Later writes for the same pair are ignored so a cache
+// update in another language cannot replace it.
+func (r *Repository) SaveLocalizedSongMetadata(ctx context.Context, metadata *bot.LocalizedSongMetadata) error {
+	if r == nil || r.cacheDB == nil {
+		return errors.New("repository not configured")
+	}
+	return saveLocalizedSongMetadata(r.cacheDB.WithContext(ctx), metadata)
+}
+
+func localizedMetadataFromSong(song *bot.SongInfo) *bot.LocalizedSongMetadata {
+	if song == nil {
+		return nil
+	}
+	return &bot.LocalizedSongMetadata{
+		Platform:    song.Platform,
+		TrackID:     song.TrackID,
+		Language:    song.MetadataLanguage,
+		SongName:    song.SongName,
+		SongArtists: song.SongArtists,
+		SongAlbum:   song.SongAlbum,
+	}
+}
+
+func saveLocalizedSongMetadata(db *gorm.DB, metadata *bot.LocalizedSongMetadata) error {
+	if db == nil || metadata == nil {
+		return nil
+	}
+	model := &LocalizedSongMetadataModel{
+		Platform:    strings.TrimSpace(metadata.Platform),
+		TrackID:     strings.TrimSpace(metadata.TrackID),
+		Language:    strings.TrimSpace(metadata.Language),
+		SongName:    metadata.SongName,
+		SongArtists: metadata.SongArtists,
+		SongAlbum:   metadata.SongAlbum,
+	}
+	if model.Platform == "" || model.TrackID == "" || model.Language == "" {
+		return nil
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(model).Error
 }
 
 // VerifyAndUpdateQuality reconciles a cached track's stored quality label with
@@ -698,9 +958,16 @@ func (r *Repository) DeleteAll(ctx context.Context) error {
 	if r == nil || r.cacheDB == nil {
 		return errors.New("repository not configured")
 	}
-	return r.cacheDB.WithContext(ctx).
-		Session(&gorm.Session{AllowGlobalUpdate: true}).
-		Delete(&SongInfoModel{}).Error
+	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		global := tx.Session(&gorm.Session{AllowGlobalUpdate: true})
+		if err := global.Delete(&SongInfoModel{}).Error; err != nil {
+			return err
+		}
+		if err := global.Unscoped().Delete(&LocalizedSongMetadataModel{}).Error; err != nil {
+			return err
+		}
+		return global.Unscoped().Delete(&LocalizedAudioModel{}).Error
+	})
 }
 
 // DeleteAllByPlatform clears cached songs for a specific platform.
@@ -708,21 +975,36 @@ func (r *Repository) DeleteAllByPlatform(ctx context.Context, platform string) e
 	if r == nil || r.cacheDB == nil {
 		return errors.New("repository not configured")
 	}
-	return r.cacheDB.WithContext(ctx).
-		Where("platform = ?", platform).
-		Delete(&SongInfoModel{}).Error
+	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("platform = ?", platform).Delete(&SongInfoModel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Where("platform = ?", platform).Delete(&LocalizedSongMetadataModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Where("platform = ?", platform).Delete(&LocalizedAudioModel{}).Error
+	})
 }
 
 // DeleteByPlatformTrackID removes a song by platform, track ID and quality.
 func (r *Repository) DeleteByPlatformTrackID(ctx context.Context, platform, trackID, quality string) error {
 	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Delete(&SongInfoModel{}, "platform = ? AND track_id = ? AND quality = ?", platform, trackID, quality).Error
+		if err := tx.Delete(&SongInfoModel{}, "platform = ? AND track_id = ? AND quality = ?", platform, trackID, quality).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&LocalizedAudioModel{}, "platform = ? AND track_id = ? AND quality = ?", platform, trackID, quality).Error
 	})
 }
 
 func (r *Repository) DeleteAllQualitiesByPlatformTrackID(ctx context.Context, platform, trackID string) error {
 	return r.cacheDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return tx.Delete(&SongInfoModel{}, "platform = ? AND track_id = ?", platform, trackID).Error
+		if err := tx.Delete(&SongInfoModel{}, "platform = ? AND track_id = ?", platform, trackID).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Delete(&LocalizedSongMetadataModel{}, "platform = ? AND track_id = ?", platform, trackID).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&LocalizedAudioModel{}, "platform = ? AND track_id = ?", platform, trackID).Error
 	})
 }
 

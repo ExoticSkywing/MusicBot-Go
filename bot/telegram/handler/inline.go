@@ -357,6 +357,9 @@ func (h *InlineSearchHandler) inlineSearch(ctx context.Context, b *telego.Bot, q
 
 	searchWithFallback := func(keyword string) ([]platform.Track, string, error) {
 		cacheKey := inlineSearchCacheKey(platformName, fallbackPlatform, keyword, biliFilter)
+		if isAppleMusicPlatform(platformName) || isAppleMusicPlatform(fallbackPlatform) {
+			cacheKey = metadataRequestKey(ctx, "applemusic", cacheKey)
+		}
 		if cached, ok := inlineSearchCache.Load(cacheKey); ok {
 			// A hit means no upstream call, so it must not spend the user's
 			// search quota either. Paging is the common case here: every page
@@ -491,9 +494,9 @@ func (h *InlineSearchHandler) inlineCommand(ctx context.Context, b *telego.Bot, 
 	inlineMsgs = append(inlineMsgs, buildInlineSearchHeader(ctx, h, platformName, qualityValue))
 	params := &telego.AnswerInlineQueryParams{
 		InlineQueryID: query.ID,
-		IsPersonal:    false,
+		IsPersonal:    true,
 		Results:       inlineMsgs,
-		CacheTime:     60,
+		CacheTime:     1,
 	}
 	_ = b.AnswerInlineQuery(ctx, params)
 }
@@ -1048,6 +1051,10 @@ func (h *InlineSearchHandler) inlineCached(ctx context.Context, b *telego.Bot, q
 		trackID = fmt.Sprintf("%d", info.MusicID)
 	}
 	songInfo := *info
+	localizeCachedSong(ctx, h.PlatformManager, h.Repo, &songInfo)
+	if needsLocalizedAudio(ctx, &songInfo) {
+		return false
+	}
 	if strings.TrimSpace(songInfo.TrackURL) == "" && platformName == "netease" && trackID != "" {
 		songInfo.TrackURL = fmt.Sprintf("https://music.163.com/song?id=%s", trackID)
 	}
@@ -1080,8 +1087,8 @@ func (h *InlineSearchHandler) inlineCached(ctx context.Context, b *telego.Bot, q
 	_ = b.AnswerInlineQuery(ctx, &telego.AnswerInlineQueryParams{
 		InlineQueryID: query.ID,
 		Results:       []telego.InlineQueryResult{newAudio},
-		IsPersonal:    false,
-		CacheTime:     3600,
+		IsPersonal:    true,
+		CacheTime:     1,
 	})
 	return true
 }
@@ -1203,7 +1210,7 @@ func (h *InlineSearchHandler) findCachedSong(ctx context.Context, platformName, 
 		qualityCandidates = []string{strings.TrimSpace(quality)}
 	}
 	for _, q := range qualityCandidates {
-		info, err := h.Repo.FindByPlatformTrackID(ctx, platformName, trackID, q)
+		info, err := findLanguageAudio(ctx, h.Repo, platformName, trackID, q)
 		if err == nil && info != nil && info.FileID != "" && info.SongName != "" {
 			if !isReusableCachedSong(info, platformName, q) {
 				continue
