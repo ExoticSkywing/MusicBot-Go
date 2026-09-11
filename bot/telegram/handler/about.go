@@ -34,8 +34,8 @@ func (h *AboutHandler) Handle(ctx context.Context, b *telego.Bot, update *telego
 	// Structural markdown (bold title, links) lives in code; only labels are
 	// localized. Dynamic values are pre-escaped, so the whole result is MarkdownV2.
 	msg := "*ℹ️ " + esc("about_title") + "*\n" +
-		esc("about_version") + "：" + versionText + "\n" +
-		esc("about_source") + "：https://github\\.com/liuran001/MusicBot\\-Go\n\n" +
+		esc("about_version") + "：" + versionText + "\n\n" +
+		// esc("about_source") + "：https://github\\.com/liuran001/MusicBot\\-Go\n\n" +
 		"🧩 " + esc("about_plugins") + "\n" + pluginText + "\n\n" +
 		"🛠 " + esc("about_build") + "\n" +
 		esc("about_build_env") + "：" + runtimeText + "\n" +
@@ -70,12 +70,14 @@ func formatVersionLink(binVersion, commitSHA string) string {
 		label = fmt.Sprintf("%s - %s", binVersion, shortCommit)
 	}
 	escapedLabel := mdV2Replacer.Replace(label)
-	if strings.TrimSpace(commitSHA) == "" {
-		return escapedLabel
-	}
-	commitURL := fmt.Sprintf("https://github.com/liuran001/MusicBot-Go/commit/%s", commitSHA)
-	escapedURL := mdV2Replacer.Replace(commitURL)
-	return fmt.Sprintf("[%s](%s)", escapedLabel, escapedURL)
+	// Keep version information visible without linking to the upstream repository.
+	// if strings.TrimSpace(commitSHA) == "" {
+	// 	return escapedLabel
+	// }
+	// commitURL := fmt.Sprintf("https://github.com/liuran001/MusicBot-Go/commit/%s", commitSHA)
+	// escapedURL := mdV2Replacer.Replace(commitURL)
+	// return fmt.Sprintf("[%s](%s)", escapedLabel, escapedURL)
+	return escapedLabel
 }
 
 func (h *AboutHandler) pluginSummary(ctx context.Context) string {
@@ -96,9 +98,9 @@ func (h *AboutHandler) pluginSummary(ctx context.Context) string {
 		if strings.TrimSpace(plugin.Version) != "" {
 			line += " " + mdV2Replacer.Replace("("+plugin.Version+")")
 		}
-		if strings.TrimSpace(plugin.URL) != "" {
-			line += " " + mdV2Replacer.Replace(plugin.URL)
-		}
+		// if strings.TrimSpace(plugin.URL) != "" {
+		// 	line += " " + mdV2Replacer.Replace(plugin.URL)
+		// }
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
