@@ -600,11 +600,11 @@ func TestSearchHandler_cleanupSearchStateLocked(t *testing.T) {
 	now := time.Now()
 	oldState := &searchState{
 		keyword:   "old",
-		updatedAt: now.Add(-20 * time.Minute),
+		updatedAt: now.Add(-(searchCacheTTL + time.Hour)),
 	}
 	recentState := &searchState{
 		keyword:   "recent",
-		updatedAt: now.Add(-5 * time.Minute),
+		updatedAt: now.Add(-time.Hour),
 	}
 
 	handler.searchMu.Lock()
