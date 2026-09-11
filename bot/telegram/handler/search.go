@@ -28,7 +28,7 @@ type SearchHandler struct {
 }
 
 const (
-	searchCacheTTL        = 10 * time.Minute
+	searchCacheTTL        = 7 * 24 * time.Hour
 	searchCacheMaxEntries = 256
 	defaultSearchLimit    = 48
 	neteaseSearchLimit    = 48
