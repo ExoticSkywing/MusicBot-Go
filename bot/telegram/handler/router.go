@@ -50,7 +50,8 @@ type Router struct {
 	BotName                  string
 	// Repo resolves the persisted per-user/group language override. Optional;
 	// when nil the router falls back to client-language auto-detection only.
-	Repo botpkg.SongRepository
+	Repo     botpkg.SongRepository
+	Activity *UserActivityTracker
 }
 
 // Register registers all handlers to the bot handler.
@@ -324,6 +325,7 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 				reqCtx := r.localize(ctx, update)
 				bot := ctx.Bot()
 				r.submitEvent(reqCtx, "guest_message", func(runCtx context.Context) {
+					r.recordUserActivity(runCtx, update)
 					r.GuestMode.Handle(runCtx, bot, update)
 				})
 			}
@@ -381,6 +383,7 @@ func (r *Router) wrapMessage(handler MessageHandler) th.Handler {
 		}
 		bot := ctx.Bot()
 		r.submitEvent(reqCtx, "message", func(runCtx context.Context) {
+			r.recordUserActivity(runCtx, &update)
 			runCtx, stop := startSilentLinkTyping(runCtx, bot, update.Message)
 			defer stop()
 			handler.Handle(runCtx, bot, &update)
@@ -432,6 +435,7 @@ func (r *Router) wrapInline(handler InlineHandler) th.Handler {
 		}
 		bot := ctx.Bot()
 		r.submitEvent(reqCtx, "inline", func(runCtx context.Context) {
+			r.recordUserActivity(runCtx, &update)
 			handler.Handle(runCtx, bot, &update)
 		})
 		return nil
@@ -446,6 +450,7 @@ func (r *Router) wrapCallback(handler CallbackHandler) th.Handler {
 		reqCtx := r.localize(ctx, &update)
 		bot := ctx.Bot()
 		r.submitEvent(reqCtx, "callback", func(runCtx context.Context) {
+			r.recordUserActivity(runCtx, &update)
 			handler.Handle(runCtx, bot, &update)
 		})
 		return nil
@@ -466,6 +471,7 @@ func (r *Router) wrapChosenInline(handler ChosenInlineHandler) th.Handler {
 		}
 		bot := ctx.Bot()
 		r.submitEvent(reqCtx, "chosen_inline", func(runCtx context.Context) {
+			r.recordUserActivity(runCtx, &update)
 			handler.Handle(runCtx, bot, &update)
 		})
 		return nil

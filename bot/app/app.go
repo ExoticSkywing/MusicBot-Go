@@ -453,6 +453,7 @@ func (a *App) Start(ctx context.Context) error {
 		adminCommands = append(adminCommands, BuildWhitelistCommand(whitelist))
 	}
 	adminCommands = append(adminCommands, a.AdminCommands...)
+	adminCommands = append(adminCommands, handler.BuildUserActivityCommands(a.DB, a.adminSet, rateLimiter)...)
 	adminCommandNames := make([]string, 0, len(adminCommands))
 	for _, cmd := range adminCommands {
 		if strings.TrimSpace(cmd.Name) == "" {
@@ -612,6 +613,7 @@ func (a *App) Start(ctx context.Context) error {
 		Logger:                   a.Logger,
 		Repo:                     a.DB,
 		Pool:                     a.Pool,
+		Activity:                 handler.NewUserActivityTracker(a.DB),
 	}
 
 	a.dropStaleBacklog(ctx)
@@ -796,24 +798,10 @@ func (a *App) pushBotProfile(ctx context.Context, langCode, profileLang string) 
 func (a *App) registerLocalizedCommands(ctx context.Context, enableRecognize bool) {
 	client := a.Telegram.Client()
 
-	buildCommands := func(loc *i18n.Localizer) []telego.BotCommand {
-		out := make([]telego.BotCommand, 0, len(botCommandSpecs))
-		for _, spec := range botCommandSpecs {
-			if spec.recognize && !enableRecognize {
-				continue
-			}
-			out = append(out, telego.BotCommand{
-				Command:     spec.command,
-				Description: loc.T(spec.descKey),
-			})
-		}
-		return out
-	}
-
 	// Apply one (scope=default) catalog per language. The fallback language is
 	// also written with an empty language_code so it becomes the default table.
 	apply := func(langCode, profileLang string) {
-		params := &telego.SetMyCommandsParams{Commands: buildCommands(i18n.For(profileLang))}
+		params := &telego.SetMyCommandsParams{Commands: buildLocalizedCommands(i18n.For(profileLang), enableRecognize, false)}
 		if langCode != "" {
 			params.LanguageCode = langCode
 		}
@@ -829,6 +817,7 @@ func (a *App) registerLocalizedCommands(ctx context.Context, enableRecognize boo
 	for _, lang := range i18n.SupportedLanguages {
 		apply(lang, lang)
 	}
+	a.registerAdminCommands(ctx, nil, enableRecognize)
 }
 
 func BuildWhitelistCommand(wl *handler.Whitelist) admincmd.Command {
@@ -905,8 +894,10 @@ func (a *App) ReloadAll(ctx context.Context) error {
 	a.Config = conf
 	// 重建 admin 集合并原子发布：所有 handler 共享 a.adminSet，Replace 后立即对它们生效，
 	// 且不与并发读冲突（handler 通过 AdminSet 的 atomic 快照读取，不再触碰 a.AdminIDs）。
+	previousAdmins := a.AdminIDs
 	a.AdminIDs = parseIDSet(conf.GetString("BotAdmin"))
 	a.adminSet.Replace(a.AdminIDs)
+	a.registerAdminCommands(ctx, previousAdmins, conf.GetBool("EnableRecognize"))
 
 	if dm, ok := a.PlatformManager.(*platform.DefaultManager); ok {
 		dm.Reset()
