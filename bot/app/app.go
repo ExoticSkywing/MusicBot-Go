@@ -613,7 +613,7 @@ func (a *App) Start(ctx context.Context) error {
 		Logger:                   a.Logger,
 		Repo:                     a.DB,
 		Pool:                     a.Pool,
-		Activity:                 handler.NewUserActivityTracker(a.DB),
+		Activity:                 handler.NewUserActivityTracker(a.DB, a.adminSet),
 	}
 
 	a.dropStaleBacklog(ctx)

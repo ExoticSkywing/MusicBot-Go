@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,10 +22,11 @@ import (
 )
 
 type activityTestRepo struct {
-	writes atomic.Int64
-	reads  atomic.Int64
-	fail   atomic.Bool
-	page   atomic.Int64
+	writes   atomic.Int64
+	reads    atomic.Int64
+	fail     atomic.Bool
+	page     atomic.Int64
+	excluded atomic.Pointer[[]int64]
 }
 
 func (r *activityTestRepo) RecordUserActivity(context.Context, int64, string, string, time.Time) error {
@@ -34,14 +36,16 @@ func (r *activityTestRepo) RecordUserActivity(context.Context, int64, string, st
 	}
 	return nil
 }
-func (r *activityTestRepo) GetUserActivityStats(context.Context, time.Time) (botpkg.UserActivityStats, error) {
+func (r *activityTestRepo) GetUserActivityStats(_ context.Context, _ time.Time, excludedUserIDs ...int64) (botpkg.UserActivityStats, error) {
+	r.excluded.Store(&excludedUserIDs)
 	r.reads.Add(1)
 	if r.fail.Load() {
 		return botpkg.UserActivityStats{}, errors.New("private database failure")
 	}
 	return botpkg.UserActivityStats{TotalUsers: 9, ActiveToday: 2, Active7Days: 5}, nil
 }
-func (r *activityTestRepo) ListUserActivity(_ context.Context, page, _ int) (botpkg.UserActivityPage, error) {
+func (r *activityTestRepo) ListUserActivity(_ context.Context, page, _ int, excludedUserIDs ...int64) (botpkg.UserActivityPage, error) {
+	r.excluded.Store(&excludedUserIDs)
 	r.reads.Add(1)
 	r.page.Store(int64(page))
 	if r.fail.Load() {
@@ -59,7 +63,7 @@ func activityTestUpdate() *telego.Update {
 
 func TestUserActivityTrackerDeduplicatesAndRetriesFailure(t *testing.T) {
 	repo := &activityTestRepo{}
-	router := &Router{Activity: NewUserActivityTracker(repo)}
+	router := &Router{Activity: NewUserActivityTracker(repo, nil)}
 	update := activityTestUpdate()
 	var wg sync.WaitGroup
 	for range 32 {
@@ -103,7 +107,7 @@ func TestUserActivityTrackerIgnoresNonUsersAndDisallowedRequests(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &activityTestRepo{}
-			router := &Router{Activity: NewUserActivityTracker(repo), BotName: "music_bot"}
+			router := &Router{Activity: NewUserActivityTracker(repo, nil), BotName: "music_bot"}
 			u := activityTestUpdate()
 			tc.change(u)
 			router.recordUserActivity(context.Background(), u)
@@ -113,13 +117,33 @@ func TestUserActivityTrackerIgnoresNonUsersAndDisallowedRequests(t *testing.T) {
 		})
 	}
 	repo := &activityTestRepo{}
-	router := &Router{Activity: NewUserActivityTracker(repo), Whitelist: NewWhitelist(true, nil, nil, "")}
+	router := &Router{Activity: NewUserActivityTracker(repo, nil), Whitelist: NewWhitelist(true, nil, nil, "")}
 	query := &telego.CallbackQuery{ID: "callback", From: telego.User{ID: 42}, Message: activityTestUpdate().Message}
 	for _, u := range []*telego.Update{activityTestUpdate(), {CallbackQuery: query}, {GuestMessage: activityTestUpdate().Message}} {
 		router.recordUserActivity(context.Background(), u)
 	}
 	if repo.writes.Load() != 0 {
 		t.Fatal("non-whitelisted requests were counted")
+	}
+}
+
+func TestUserActivityTrackerUsesReloadedAdminSet(t *testing.T) {
+	repo := &activityTestRepo{}
+	admins := NewAdminSet(nil)
+	router := &Router{Activity: NewUserActivityTracker(repo, admins)}
+	update := activityTestUpdate()
+	router.recordUserActivity(context.Background(), update)
+	admins.Replace(map[int64]struct{}{42: {}})
+	update.Message.MessageID++
+	router.recordUserActivity(context.Background(), update)
+	if got := repo.writes.Load(); got != 1 {
+		t.Fatalf("promoted admin was still counted: %d", got)
+	}
+	admins.Replace(nil)
+	update.Message.MessageID++
+	router.recordUserActivity(context.Background(), update)
+	if got := repo.writes.Load(); got != 2 {
+		t.Fatalf("former admin did not resume counting: %d", got)
 	}
 }
 
@@ -172,6 +196,9 @@ func TestUserActivityCommandsOnlyDiscloseInAdminPrivateChat(t *testing.T) {
 					t.Fatalf("database read allowed = %v, want %v", got, tc.allowed)
 				}
 				if tc.allowed {
+					if excluded := repo.excluded.Load(); excluded == nil || !slices.Equal(*excluded, []int64{42}) {
+						t.Fatal("command did not exclude admin records")
+					}
 					texts := strings.Join(telegramRecordedText(calls), "\n")
 					want := "累计用户：9 人"
 					if command == "/users" {
@@ -215,6 +242,9 @@ func TestUserActivityCallbacksRecheckPermissionAndPagination(t *testing.T) {
 				t.Fatalf("queried private data = %v", got)
 			}
 			if tc.allowed {
+				if excluded := repo.excluded.Load(); excluded == nil || !slices.Equal(*excluded, []int64{42}) {
+					t.Fatal("callback did not exclude admin records")
+				}
 				if repo.page.Load() != 2 {
 					t.Fatal("page not forwarded")
 				}
@@ -260,9 +290,37 @@ func TestUserActivityCommandsTimezoneErrorsAndHelp(t *testing.T) {
 	}
 }
 
+func TestUserActivityCommandsUseReloadedAdminFilter(t *testing.T) {
+	repo := &activityTestRepo{}
+	admins := NewAdminSet(map[int64]struct{}{42: {}})
+	h := &userActivityCommands{repo: repo, admins: admins, now: time.Now}
+	ctx := admincmd.WithChatID(zhCtx(), 42)
+	for _, ids := range [][]int64{{42}, {42, 99}} {
+		set := make(map[int64]struct{})
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		admins.Replace(set)
+		for _, handle := range []func(context.Context, string) (*admincmd.Response, error){h.stats, h.users} {
+			if _, err := handle(ctx, ""); err != nil {
+				t.Fatal(err)
+			}
+			excluded := repo.excluded.Load()
+			if excluded == nil {
+				t.Fatal("no admin filter forwarded")
+			}
+			got := slices.Clone(*excluded)
+			slices.Sort(got)
+			if !slices.Equal(got, ids) {
+				t.Fatalf("stale admin filter: %v, want %v", got, ids)
+			}
+		}
+	}
+}
+
 type activityLongNameRepo struct{ activityTestRepo }
 
-func (*activityLongNameRepo) ListUserActivity(context.Context, int, int) (botpkg.UserActivityPage, error) {
+func (*activityLongNameRepo) ListUserActivity(context.Context, int, int, ...int64) (botpkg.UserActivityPage, error) {
 	page := botpkg.UserActivityPage{TotalUsers: 8, Page: 1, TotalPages: 1}
 	for i := range 8 {
 		page.Users = append(page.Users, botpkg.UserActivity{UserID: int64(i + 1), DisplayName: strings.Repeat("🎵", 128), Username: strings.Repeat("x", 64), FirstSeenAt: time.Now(), LastSeenAt: time.Now(), RequestCount: 12345})
@@ -290,10 +348,20 @@ type activityNoopHandler struct{ calls atomic.Int64 }
 func (h *activityNoopHandler) Handle(context.Context, *telego.Bot, *telego.Update) { h.calls.Add(1) }
 
 func TestUserActivityRouterTracksDispatchedRequestsOnly(t *testing.T) {
+	t.Run("nonadmin counted", func(t *testing.T) { testUserActivityRouterTracking(t, false) })
+	t.Run("admin excluded", func(t *testing.T) { testUserActivityRouterTracking(t, true) })
+}
+
+func testUserActivityRouterTracking(t *testing.T, excludeAdmin bool) {
+	t.Helper()
 	b, _ := newActivityTestBot(t)
 	repo := &activityTestRepo{}
 	h := &activityNoopHandler{}
-	router := &Router{Music: h, Search: h, Callback: h, Inline: h, ChosenInline: h, GuestMode: h, Activity: NewUserActivityTracker(repo)}
+	admins := NewAdminSet(nil)
+	if excludeAdmin {
+		admins.Replace(map[int64]struct{}{42: {}})
+	}
+	router := &Router{Music: h, Search: h, Callback: h, Inline: h, ChosenInline: h, GuestMode: h, Activity: NewUserActivityTracker(repo, admins)}
 	updates := make(chan telego.Update, 8)
 	bhandler, err := th.NewBotHandler(b, updates)
 	if err != nil {
@@ -316,8 +384,12 @@ func TestUserActivityRouterTracksDispatchedRequestsOnly(t *testing.T) {
 	if err := bhandler.StopWithContext(stopCtx); err != nil {
 		t.Fatal(err)
 	}
-	if got := repo.writes.Load(); got != 6 {
-		t.Fatalf("recorded %d requests, want 6 dispatched interactions", got)
+	wantWrites := int64(6)
+	if excludeAdmin {
+		wantWrites = 0
+	}
+	if got := repo.writes.Load(); got != wantWrites {
+		t.Fatalf("recorded %d requests, want %d", got, wantWrites)
 	}
 	if got := h.calls.Load(); got != 6 {
 		t.Fatalf("handled %d requests, want 6", got)

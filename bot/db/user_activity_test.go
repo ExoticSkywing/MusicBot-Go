@@ -121,3 +121,48 @@ func TestUserActivityCalendarWindowsAndPagination(t *testing.T) {
 		}
 	}
 }
+
+func TestUserActivityExcludesAdminsBeforeTotalsAndPagination(t *testing.T) {
+	repo := newTempRepo(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	times := []time.Time{now, now.Add(-time.Hour), now.AddDate(0, 0, -2), now.AddDate(0, 0, -3), now.AddDate(0, 0, -8)}
+	for i, at := range times {
+		if err := repo.RecordUserActivity(ctx, int64(i+1), "", "", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Admins include both today's most recent record and a record from this week.
+	excluded := []int64{1, 3}
+	stats, err := repo.GetUserActivityStats(ctx, now, excluded...)
+	if err != nil || stats.TotalUsers != 3 || stats.ActiveToday != 1 || stats.Active7Days != 2 {
+		t.Fatalf("admins included in statistics: %+v, %v", stats, err)
+	}
+	page, err := repo.ListUserActivity(ctx, 1, 2, excluded...)
+	if err != nil || page.TotalUsers != 3 || page.TotalPages != 2 || len(page.Users) != 2 || page.Users[0].UserID != 2 || page.Users[1].UserID != 4 {
+		t.Fatalf("filtered first page: %+v, %v", page, err)
+	}
+	page, err = repo.ListUserActivity(ctx, 999, 2, excluded...)
+	if err != nil || page.Page != 2 || len(page.Users) != 1 || page.Users[0].UserID != 5 {
+		t.Fatalf("filtered last page: %+v, %v", page, err)
+	}
+	// If every recorded user is an admin, both views must be empty.
+	all := []int64{1, 2, 3, 4, 5}
+	stats, err = repo.GetUserActivityStats(ctx, now, all...)
+	if err != nil || stats != (bot.UserActivityStats{}) {
+		t.Fatalf("all-admin statistics: %+v, %v", stats, err)
+	}
+	page, err = repo.ListUserActivity(ctx, 999, 2, all...)
+	if err != nil || page.TotalUsers != 0 || page.Page != 1 || page.TotalPages != 1 || len(page.Users) != 0 {
+		t.Fatalf("all-admin list: %+v, %v", page, err)
+	}
+	// Exclusions are per-query, not destructive or retained across reloads.
+	stats, err = repo.GetUserActivityStats(ctx, now)
+	if err != nil || stats.TotalUsers != 5 || stats.ActiveToday != 2 || stats.Active7Days != 4 {
+		t.Fatalf("existing activity was lost: %+v, %v", stats, err)
+	}
+	page, err = repo.ListUserActivity(ctx, 1, 8, 2)
+	if err != nil || page.TotalUsers != 4 || len(page.Users) != 4 || page.Users[0].UserID != 1 || page.Users[0].RequestCount != 1 {
+		t.Fatalf("changed admin exclusions not honored: %+v, %v", page, err)
+	}
+}

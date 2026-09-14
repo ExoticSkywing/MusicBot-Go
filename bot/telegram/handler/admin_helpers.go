@@ -4,7 +4,7 @@ import "sync/atomic"
 
 // AdminSet is a concurrency-safe, hot-reloadable set of admin user IDs.
 //
-// Multiple handlers hold the same *AdminSet pointer. Reads (Contains) happen
+// Multiple handlers hold the same *AdminSet pointer. Reads (Contains/IDs) happen
 // from many handler goroutines concurrently, while Replace is called from the
 // /reload goroutine. Internally it uses copy-on-write over an immutable map
 // guarded by atomic.Pointer, so reads never race with a reload and all handlers
@@ -22,7 +22,7 @@ func NewAdminSet(ids map[int64]struct{}) *AdminSet {
 }
 
 // Replace atomically swaps in a fresh snapshot of ids. Safe to call while other
-// goroutines are calling Contains.
+// goroutines are calling Contains or IDs.
 func (s *AdminSet) Replace(ids map[int64]struct{}) {
 	if s == nil {
 		return
@@ -46,6 +46,22 @@ func (s *AdminSet) Contains(userID int64) bool {
 	}
 	_, ok := (*m)[userID]
 	return ok
+}
+
+// IDs returns a detached snapshot, safe to iterate while Replace runs.
+func (s *AdminSet) IDs() []int64 {
+	if s == nil {
+		return nil
+	}
+	m := s.ids.Load()
+	if m == nil {
+		return nil
+	}
+	ids := make([]int64, 0, len(*m))
+	for id := range *m {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // isBotAdmin reports whether userID belongs to the admin set.

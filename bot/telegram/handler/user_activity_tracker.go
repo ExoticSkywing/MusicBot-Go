@@ -13,12 +13,13 @@ import (
 // UserActivityTracker observes dispatched requests, not successful downloads.
 // Its bounded, in-memory deduplication cache is not an activity-history table.
 type UserActivityTracker struct {
-	Repo botpkg.UserActivityRepository
-	seen *ttlStore[struct{}]
+	Repo   botpkg.UserActivityRepository
+	seen   *ttlStore[struct{}]
+	admins *AdminSet
 }
 
-func NewUserActivityTracker(repo botpkg.UserActivityRepository) *UserActivityTracker {
-	return &UserActivityTracker{Repo: repo, seen: newTTLStoreWithCap[struct{}](24*time.Hour, 16384)}
+func NewUserActivityTracker(repo botpkg.UserActivityRepository, admins *AdminSet) *UserActivityTracker {
+	return &UserActivityTracker{Repo: repo, seen: newTTLStoreWithCap[struct{}](24*time.Hour, 16384), admins: admins}
 }
 
 // Called only at router dispatch boundaries. Nested handlers (e.g. recognition
@@ -28,7 +29,7 @@ func (r *Router) recordUserActivity(ctx context.Context, update *telego.Update) 
 		return
 	}
 	user, chatID, key := activityIdentity(update)
-	if user == nil || user.ID <= 0 || user.IsBot || key == "" {
+	if user == nil || user.ID <= 0 || user.IsBot || key == "" || isBotAdmin(r.Activity.admins, user.ID) {
 		return
 	}
 	if r.isOwnInlineMessage(update.Message) || r.isOwnInlineMessage(update.GuestMessage) || !r.Whitelist.IsAllowed(chatID, user.ID) {

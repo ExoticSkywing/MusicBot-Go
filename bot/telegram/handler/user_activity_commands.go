@@ -53,7 +53,7 @@ func (h *userActivityCommands) stats(ctx context.Context, args string) (*admincm
 		return activityText(ctx, "activity_unavailable"), nil
 	}
 	now := h.now()
-	stats, err := h.repo.GetUserActivityStats(ctx, now)
+	stats, err := h.repo.GetUserActivityStats(ctx, now, h.admins.IDs()...)
 	if err != nil {
 		return activityText(ctx, "activity_unavailable"), nil
 	}
@@ -82,7 +82,7 @@ func (h *userActivityCommands) renderUsers(ctx context.Context, page int) *admin
 	if h.repo == nil {
 		return activityText(ctx, "activity_unavailable")
 	}
-	result, err := h.repo.ListUserActivity(ctx, page, userActivityPageSize)
+	result, err := h.repo.ListUserActivity(ctx, page, userActivityPageSize, h.admins.IDs()...)
 	if err != nil {
 		return activityText(ctx, "activity_unavailable")
 	}

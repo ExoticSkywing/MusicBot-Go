@@ -60,13 +60,13 @@ func (r *Repository) RecordUserActivity(ctx context.Context, userID int64, usern
 
 // Calendar windows use the supplied server-local time, stored/computed in UTC.
 // The last seven days means today plus the preceding six calendar days.
-func (r *Repository) GetUserActivityStats(ctx context.Context, now time.Time) (bot.UserActivityStats, error) {
+func (r *Repository) GetUserActivityStats(ctx context.Context, now time.Time, excludedUserIDs ...int64) (bot.UserActivityStats, error) {
 	var result bot.UserActivityStats
 	if r == nil || r.dataDB == nil {
 		return result, errors.New("activity repository not configured")
 	}
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	err := r.dataDB.WithContext(ctx).Model(&userActivityModel{}).Select(
+	err := userActivityQuery(r.dataDB.WithContext(ctx), excludedUserIDs).Select(
 		`COUNT(*) AS total_users,
 		 COALESCE(SUM(CASE WHEN last_seen_at >= ? AND last_seen_at <= ? THEN 1 ELSE 0 END), 0) AS active_today,
 		 COALESCE(SUM(CASE WHEN last_seen_at >= ? AND last_seen_at <= ? THEN 1 ELSE 0 END), 0) AS active7_days`,
@@ -75,20 +75,20 @@ func (r *Repository) GetUserActivityStats(ctx context.Context, now time.Time) (b
 	return result, err
 }
 
-func (r *Repository) ListUserActivity(ctx context.Context, page, pageSize int) (bot.UserActivityPage, error) {
+func (r *Repository) ListUserActivity(ctx context.Context, page, pageSize int, excludedUserIDs ...int64) (bot.UserActivityPage, error) {
 	result := bot.UserActivityPage{Page: max(page, 1), TotalPages: 1}
 	if r == nil || r.dataDB == nil {
 		return result, errors.New("activity repository not configured")
 	}
 	pageSize = min(max(pageSize, 1), 50)
 	err := r.dataDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&userActivityModel{}).Count(&result.TotalUsers).Error; err != nil {
+		if err := userActivityQuery(tx, excludedUserIDs).Count(&result.TotalUsers).Error; err != nil {
 			return err
 		}
 		result.TotalPages = max(1, int((result.TotalUsers+int64(pageSize)-1)/int64(pageSize)))
 		result.Page = min(result.Page, result.TotalPages)
 		var rows []userActivityModel
-		if err := tx.Order("last_seen_at DESC, user_id ASC").Limit(pageSize).Offset((result.Page - 1) * pageSize).Find(&rows).Error; err != nil {
+		if err := userActivityQuery(tx, excludedUserIDs).Order("last_seen_at DESC, user_id ASC").Limit(pageSize).Offset((result.Page - 1) * pageSize).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, row := range rows {
@@ -100,4 +100,14 @@ func (r *Repository) ListUserActivity(ctx context.Context, page, pageSize int) (
 		return nil
 	})
 	return result, err
+}
+
+// Keep existing rows intact; applying the same filter before COUNT and LIMIT
+// avoids inflated totals or partially empty pages when admins have old records.
+func userActivityQuery(tx *gorm.DB, excludedUserIDs []int64) *gorm.DB {
+	query := tx.Model(&userActivityModel{})
+	if len(excludedUserIDs) > 0 {
+		query = query.Where("user_id NOT IN ?", excludedUserIDs)
+	}
+	return query
 }

@@ -32,6 +32,7 @@ type UserActivityPage struct {
 // do not need to know about optional administrative analytics.
 type UserActivityRepository interface {
 	RecordUserActivity(context.Context, int64, string, string, time.Time) error
-	GetUserActivityStats(context.Context, time.Time) (UserActivityStats, error)
-	ListUserActivity(context.Context, int, int) (UserActivityPage, error)
+	// Optional excluded IDs are filtered before aggregation and pagination.
+	GetUserActivityStats(context.Context, time.Time, ...int64) (UserActivityStats, error)
+	ListUserActivity(context.Context, int, int, ...int64) (UserActivityPage, error)
 }

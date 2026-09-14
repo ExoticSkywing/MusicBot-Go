@@ -28,6 +28,7 @@ func TestAdminSetConcurrentReplaceAndContains(t *testing.T) {
 				default:
 					_ = isBotAdmin(set, 1)
 					_ = set.Contains(99)
+					_ = set.IDs()
 				}
 			}
 		}()
@@ -70,4 +71,23 @@ func TestAdminSetNilSafe(t *testing.T) {
 	}
 	// Replace on nil receiver must not panic.
 	set.Replace(map[int64]struct{}{1: {}})
+	if len(set.IDs()) != 0 || len((&AdminSet{}).IDs()) != 0 {
+		t.Fatal("nil/zero admin set must return no IDs")
+	}
+}
+
+func TestAdminSetIDsReturnsDetachedSnapshot(t *testing.T) {
+	set := NewAdminSet(map[int64]struct{}{42: {}})
+	ids := set.IDs()
+	if len(ids) != 1 || ids[0] != 42 {
+		t.Fatalf("unexpected IDs: %v", ids)
+	}
+	ids[0] = 99
+	if !set.Contains(42) || set.Contains(99) {
+		t.Fatal("mutating the returned slice changed membership")
+	}
+	set.Replace(map[int64]struct{}{7: {}})
+	if ids = set.IDs(); len(ids) != 1 || ids[0] != 7 {
+		t.Fatalf("snapshot not refreshed: %v", ids)
+	}
 }
