@@ -44,6 +44,7 @@ func TestJBSouResolveQQTrack(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte{0xef, 0xbb, 0xbf})
 			_ = json.NewEncoder(w).Encode(jbsouResponse{
 				Code: http.StatusOK,
 				Data: []jbsouTrack{{SongID: trackID, URL: "/api.php?get=url&type=qq&id=" + trackID}},
@@ -100,6 +101,43 @@ func TestJBSouResolveQQTrack(t *testing.T) {
 	}
 	if homeCalls.Load() != 1 || lookupCalls.Load() != 1 || mediaCalls.Load() != 1 {
 		t.Fatalf("calls home=%d lookup=%d media=%d, want 1 each", homeCalls.Load(), lookupCalls.Load(), mediaCalls.Load())
+	}
+}
+
+func TestJBSouLookupEncoding(t *testing.T) {
+	const payload = `{"code":200,"data":[{"songid":"track","url":"/api.php?get=url"}]}`
+	for _, tc := range []struct {
+		name, body string
+		wantError  bool
+	}{
+		{"plain", payload, false},
+		{"bom", "\xef\xbb\xbf" + payload, false},
+		{"bom and whitespace", "\xef\xbb\xbf\n\t " + payload, false},
+		{"empty", "", true},
+		{"bom only", "\xef\xbb\xbf", true},
+		{"truncated bom", "\xef\xbb", true},
+		{"html", "\xef\xbb\xbf<html>blocked</html>", true},
+		{"malformed", "\xef\xbb\xbf{broken}", true},
+		{"body limit", strings.Repeat(" ", maxJBSouBodyBytes) + payload, true},
+	} {
+		for _, source := range []string{"qq", "kugou", "kuwo"} {
+			t.Run(source+"/"+tc.name, func(t *testing.T) {
+				client := &http.Client{Transport: jbsouRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header), Request: req}, nil
+				})}
+				p, err := newJBSouProvider(defaultJBSouBaseURL, time.Second, client, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				track, err := p.lookupTrack(t.Context(), source, "track", source == "kugou")
+				if (err != nil) != tc.wantError {
+					t.Fatalf("error = %v, wantError = %v", err, tc.wantError)
+				}
+				if !tc.wantError && (track == nil || track.SongID != "track") {
+					t.Fatalf("unexpected track: %+v", track)
+				}
+			})
+		}
 	}
 }
 

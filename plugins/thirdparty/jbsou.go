@@ -1,6 +1,8 @@
 package thirdparty
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -205,7 +207,13 @@ func (p *jbsouProvider) lookupTrack(ctx context.Context, requestType, trackID st
 		return nil, fmt.Errorf("jbsou: lookup returned HTTP %d", resp.StatusCode)
 	}
 	var payload jbsouResponse
-	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxJBSouBodyBytes))
+	reader := bufio.NewReader(io.LimitReader(resp.Body, maxJBSouBodyBytes))
+	// Some JBSou responses prefix otherwise valid JSON with a UTF-8 BOM.
+	// Only tolerate this encoding marker; malformed/HTML responses still fail.
+	if prefix, _ := reader.Peek(3); bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+		_, _ = reader.Discard(3)
+	}
+	decoder := json.NewDecoder(reader)
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, fmt.Errorf("jbsou: decode lookup response: %w", err)
 	}
