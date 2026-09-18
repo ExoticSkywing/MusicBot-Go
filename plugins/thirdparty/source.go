@@ -102,18 +102,26 @@ func NewChain(names []string, timeout time.Duration, logger bot.Logger) (*Chain,
 	}
 	providers := make([]provider, 0, len(names))
 	for _, name := range names {
+		var item provider
+		var err error
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "jbsou":
-			item, err := newJBSouProvider(defaultJBSouBaseURL, timeout, nil, nil)
-			if err != nil {
-				return nil, err
-			}
-			providers = append(providers, item)
+			item, err = newJBSouProvider(defaultJBSouBaseURL, timeout, nil, nil)
+		case "qqovo":
+			item, err = newQQOVOProvider("https://qqovo.top", timeout, nil)
+		case "lzmhhh":
+			item, err = newLZMHHHProvider("https://music.lzmhhh.com", timeout, nil)
+		case "nxinxz":
+			item, err = newNXINXZProvider("https://music.nxinxz.com", timeout, nil)
 		case "":
 			continue
 		default:
 			return nil, fmt.Errorf("unknown third-party provider %q", name)
 		}
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, item)
 	}
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("at least one third-party provider is required")
