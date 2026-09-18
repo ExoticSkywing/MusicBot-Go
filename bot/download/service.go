@@ -97,7 +97,7 @@ func NewDownloadService(opts DownloadServiceOptions) *DownloadService {
 	}
 
 	client := &http.Client{
-		Transport: transport,
+		Transport: newGoogleVideoTransport(transport),
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if policy, ok := req.Context().Value(downloadPolicyContextKey{}).(downloadPolicy); ok {

@@ -20,10 +20,13 @@ import (
 
 // Client talks to YouTube's InnerTube API. It is safe for concurrent use.
 type Client struct {
-	httpClient *http.Client
-	cookie     string
-	logger     bot.Logger
-	preferIPv6 bool
+	httpClient       *http.Client
+	cookie           string
+	logger           bot.Logger
+	preferIPv6       bool
+	apiProxyEnabled  bool
+	searchIPv4Client *http.Client
+	searchIPv6Client *http.Client
 
 	// visitorData is harvested from a youtube.com/watch page and sent as the
 	// X-Goog-Visitor-Id header on ANDROID_VR /player requests. Without it the
@@ -39,9 +42,11 @@ func NewClient(cookie string, timeout time.Duration, logger bot.Logger) *Client 
 		timeout = 20 * time.Second
 	}
 	return &Client{
-		httpClient: newYouTubeMusicDirectHTTPClient(timeout, false),
-		cookie:     strings.TrimSpace(cookie),
-		logger:     logger,
+		httpClient:       newYouTubeMusicDirectHTTPClient(timeout, false),
+		cookie:           strings.TrimSpace(cookie),
+		logger:           logger,
+		searchIPv4Client: newYouTubeMusicFamilyHTTPClient(timeout, "tcp4"),
+		searchIPv6Client: newYouTubeMusicFamilyHTTPClient(timeout, "tcp6"),
 	}
 }
 
@@ -54,6 +59,9 @@ func (c *Client) SetPreferIPv6(enabled bool) {
 		return
 	}
 	c.preferIPv6 = enabled
+	if c.apiProxyEnabled {
+		return
+	}
 	timeout := 20 * time.Second
 	if c.httpClient != nil && c.httpClient.Timeout > 0 {
 		timeout = c.httpClient.Timeout
@@ -76,6 +84,7 @@ func (c *Client) SetAPIProxy(cfg httpproxy.Config) error {
 	if err != nil {
 		return err
 	}
+	c.apiProxyEnabled = cfg.Enabled
 	if proxied == nil {
 		c.httpClient = newYouTubeMusicDirectHTTPClient(timeout, c.preferIPv6)
 		return nil
@@ -189,6 +198,13 @@ func (c *Client) post(ctx context.Context, base, endpoint string, payload any, u
 	if c == nil || c.httpClient == nil {
 		return nil, platform.ErrUnavailable
 	}
+	return c.postWithClient(ctx, c.httpClient, base, endpoint, payload, userAgent, extraHeaders)
+}
+
+func (c *Client) postWithClient(ctx context.Context, client *http.Client, base, endpoint string, payload any, userAgent string, extraHeaders map[string]string) ([]byte, error) {
+	if c == nil || client == nil {
+		return nil, platform.ErrUnavailable
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -214,7 +230,7 @@ func (c *Client) post(ctx context.Context, base, endpoint string, payload any, u
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +258,13 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]platfor
 	if limit <= 0 {
 		limit = 20
 	}
+	return c.searchWithIPFallback(ctx, query, limit)
+}
+
+func (c *Client) searchOnce(ctx context.Context, client *http.Client, query string, limit int) ([]platform.Track, error) {
 	// params "EgWKAQIIAWoMEAMQBBAJEAoQBRAV" restricts results to Songs.
 	payload := searchRequest{Context: webContext(), Query: query, Params: "EgWKAQIIAWoMEAMQBBAJEAoQBRAV"}
-	data, err := c.post(ctx, innerTubeBaseMusic, "search", payload, defaultUserAgent, nil)
+	data, err := c.postWithClient(ctx, client, innerTubeBaseMusic, "search", payload, defaultUserAgent, nil)
 	if err != nil {
 		return nil, err
 	}
