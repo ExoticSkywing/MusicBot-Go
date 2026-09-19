@@ -442,10 +442,11 @@ func (c *Client) player(ctx context.Context, videoID string) (*playerResponse, e
 	visitor := c.getVisitorData(ctx, false)
 	var metadataResponse, lastResponse *playerResponse
 	var lastErr error
+	ipRetryUsed := false
 	for attempt := 0; attempt < 2; attempt++ {
 		sawBotFlag := false
 		for _, profile := range playerClientProfiles() {
-			pr, err := c.playerOnce(ctx, videoID, visitor, profile)
+			pr, err := c.playerOnceWithIPFallback(ctx, videoID, visitor, profile, &ipRetryUsed)
 			if err != nil {
 				lastErr = err
 				continue
@@ -484,6 +485,10 @@ func (c *Client) player(ctx context.Context, videoID string) (*playerResponse, e
 
 // playerOnce performs one /player call with a concrete client profile.
 func (c *Client) playerOnce(ctx context.Context, videoID, visitor string, profile playerClientProfile) (*playerResponse, error) {
+	return c.playerOnceWithClient(ctx, c.httpClient, videoID, visitor, profile)
+}
+
+func (c *Client) playerOnceWithClient(ctx context.Context, client *http.Client, videoID, visitor string, profile playerClientProfile) (*playerResponse, error) {
 	playerCtx := profile.context()
 	if visitor != "" {
 		playerCtx.Client.VisitorData = visitor
@@ -510,7 +515,7 @@ func (c *Client) playerOnce(ctx context.Context, videoID, visitor string, profil
 	if visitor != "" {
 		headers["X-Goog-Visitor-Id"] = visitor
 	}
-	data, err := c.post(ctx, innerTubeBaseVideo, "player", payload, profile.userAgent, headers)
+	data, err := c.postWithClient(ctx, client, innerTubeBaseVideo, "player", payload, profile.userAgent, headers)
 	if err != nil {
 		return nil, err
 	}

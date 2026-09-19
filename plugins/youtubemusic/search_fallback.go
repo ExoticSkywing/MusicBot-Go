@@ -27,7 +27,13 @@ func newYouTubeMusicFamilyHTTPClient(timeout time.Duration, network string) *htt
 // Only direct searches may use a second direct route. Respect both the plugin
 // proxy and the primary transport's proxy (including HTTP(S)_PROXY/NO_PROXY).
 func (c *Client) directSearchFallbackAllowed() bool {
-	if c.apiProxyEnabled {
+	return c.directFallbackAllowed(innerTubeBaseMusic + "/search")
+}
+
+// ProxyFromEnvironment can differ between music.youtube.com and www.youtube.com
+// (NO_PROXY). Check the actual endpoint before trying a direct alternate route.
+func (c *Client) directFallbackAllowed(endpoint string) bool {
+	if c == nil || c.httpClient == nil || c.apiProxyEnabled {
 		return false
 	}
 	transport := c.httpClient.Transport
@@ -35,7 +41,10 @@ func (c *Client) directSearchFallbackAllowed() bool {
 		transport = http.DefaultTransport
 	}
 	if direct, ok := transport.(*http.Transport); ok && direct.Proxy != nil {
-		req, _ := http.NewRequest(http.MethodPost, innerTubeBaseMusic+"/search", nil)
+		req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+		if err != nil {
+			return false
+		}
 		proxyURL, err := direct.Proxy(req)
 		return err == nil && proxyURL == nil
 	}
