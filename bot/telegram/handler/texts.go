@@ -34,7 +34,13 @@ func buildHelpText(ctx context.Context, manager platform.Manager, isAdmin bool, 
 
 	text := "*🎵 MusicBot\\-Go*\n\n" + esc("help_intro") + "\n"
 	if isPrivateChat {
-		text += esc("help_private_hint") + "\n"
+		text += "*" + esc("help_private_hint") + "*\n" +
+			"\n*" + esc("help_section_direct_examples") + "*\n" +
+			"`" + tr(ctx, "help_example_song") + "`\n" +
+			"`" + tr(ctx, "help_example_music") + "`\n" +
+			"`" + tr(ctx, "help_example_song_artist") + "`\n" +
+			"`https://music.163.com/song/1859603835`\n\n" +
+			esc("help_result_buttons_hint") + "\n"
 	}
 	text += "\n*" + esc("help_section_commands") + "*\n" +
 		"`/music` " + argTrack + " \\[" + esc("help_platform_label") + "\\] \\[" + esc("help_quality_label") + "\\] \\- " + esc("help_cmd_music") + "\n" +
@@ -47,13 +53,13 @@ func buildHelpText(ctx context.Context, manager platform.Manager, isAdmin bool, 
 		"`/status` \\- " + esc("help_cmd_status") + "\n" +
 		"`/queue` \\- " + esc("help_cmd_queue") + "\n" +
 		"`/about` \\- " + esc("help_cmd_about") + "\n" +
-		"\n*" + esc("help_section_params") + "*\n" +
-		esc("help_quality_label") + "：" + qualityOptions + "\n" +
-		platformBlock +
-		"\n*" + esc("help_section_examples") + "*\n" +
+		"\n" + esc("help_section_examples") + "\n" +
 		"`/music " + tr(ctx, "help_example_music") + "`\n" +
 		"`/music https://music.163.com/song/1859603835`\n" +
-		"`/search " + tr(ctx, "help_example_search") + "`"
+		"`/search " + tr(ctx, "help_example_search") + "`\n" +
+		"\n*" + esc("help_section_params") + "*\n" +
+		esc("help_quality_label") + "：" + qualityOptions + "\n" +
+		platformBlock
 	adminText := buildAdminHelp(ctx, adminCommands)
 	if isAdmin && adminText != "" {
 		text += "\n\n*" + esc("help_section_admin") + "*\n" + adminText
