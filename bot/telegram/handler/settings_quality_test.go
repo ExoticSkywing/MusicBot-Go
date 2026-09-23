@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -70,5 +71,32 @@ func TestQualitySelectableForPlatform(t *testing.T) {
 	}
 	if !qualitySelectableForPlatform(manager, "netease", "hires") {
 		t.Fatal("existing stereo quality tiers must remain selectable")
+	}
+}
+
+type linkOnlyStubPlatform struct {
+	*stubPlatform
+}
+
+func (p *linkOnlyStubPlatform) SupportsSearch() bool { return false }
+
+func TestDefaultPlatformChoicesSkipLinkOnlyPlatforms(t *testing.T) {
+	manager := newStubManager()
+	manager.Register(newStubPlatform("netease"))
+	manager.Register(&linkOnlyStubPlatform{stubPlatform: newStubPlatform("douyin")})
+	manager.Register(newStubPlatform("soda"))
+
+	choices := defaultPlatformChoices(manager)
+	sorted := append([]string(nil), choices...)
+	sort.Strings(sorted) // the stub manager lists platforms in map order
+	if strings.Join(sorted, ",") != "netease,soda" {
+		t.Fatalf("default platform choices = %v, want [netease soda]", choices)
+	}
+
+	handler := &SettingsHandler{PlatformManager: manager}
+	settings := &botpkg.UserSettings{UserID: 1, DefaultPlatform: "netease", DefaultQuality: "hires"}
+	keyboard := handler.buildSettingsKeyboard(zhCtx(), "private", settings, nil, choices)
+	if button := findSettingsCallbackButton(keyboard, "settings platform douyin"); button != nil {
+		t.Fatalf("link-only platform offered as default: %+v", button)
 	}
 }

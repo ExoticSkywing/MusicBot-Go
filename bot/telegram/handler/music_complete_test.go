@@ -43,7 +43,7 @@ func preparedAudioWAV(t *testing.T) []byte {
 var completeAudioPlatforms = []string{
 	"netease", "qqmusic", "kugou", "kuwo", "soda", "bilibili",
 	"applemusic", "spotify", "youtubemusic",
-	"migu", "qianqian", "fivesing", "jamendo", "joox",
+	"migu", "qianqian", "fivesing", "jamendo", "joox", "douyin",
 }
 
 func TestPrepareRejectsPreviewForEveryPlatform(t *testing.T) {

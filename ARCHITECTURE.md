@@ -54,6 +54,7 @@ MusicBot-Go/
     ├── kugou/                   # 酷狗音乐（含概念版扫码登录）
     ├── kuwo/                    # 酷我音乐（多档位实测校验）
     ├── soda/                    # 汽水音乐
+    ├── douyin/                  # 抖音原声（仅链接解析）
     ├── bilibili/                # 哔哩哔哩（Dash FLAC / Dolby）
     ├── applemusic/              # Apple Music（Widevine 原生解密 + 可选 FairPlay wrapper）
     ├── youtubemusic/            # YouTube Music（InnerTube）
