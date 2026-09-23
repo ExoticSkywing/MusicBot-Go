@@ -63,7 +63,7 @@ func (h *SettingsHandler) Handle(ctx context.Context, b *telego.Bot, update *tel
 		return
 	}
 
-	platforms := h.PlatformManager.List()
+	platforms := defaultPlatformChoices(h.PlatformManager)
 
 	chatType := string(message.Chat.Type)
 	text := h.buildSettingsText(ctx, chatType, settings, groupSettings, platforms)
@@ -163,6 +163,23 @@ func (h *SettingsHandler) buildSettingsText(ctx context.Context, chatType string
 	sb.WriteString("\n" + tr(ctx, "set_tap_to_modify"))
 
 	return sb.String()
+}
+
+// defaultPlatformChoices lists the platforms a user or group may pick as their
+// default. The default platform drives keyword search, so link-only platforms
+// (e.g. Douyin original sounds) are left out.
+func defaultPlatformChoices(manager platform.Manager) []string {
+	if manager == nil {
+		return nil
+	}
+	names := manager.List()
+	choices := make([]string, 0, len(names))
+	for _, name := range names {
+		if plat := manager.Get(name); plat != nil && plat.SupportsSearch() {
+			choices = append(choices, name)
+		}
+	}
+	return choices
 }
 
 func (h *SettingsHandler) buildSettingsKeyboard(ctx context.Context, chatType string, settings *botpkg.UserSettings, groupSettings *botpkg.GroupSettings, platforms []string) *telego.InlineKeyboardMarkup {
@@ -632,7 +649,7 @@ func (h *SettingsCallbackHandler) handleLyricMenuNavigation(ctx context.Context,
 		text = h.SettingsHandler.buildLyricFormatMenuText(ctx, chatType, settings, groupSettings)
 		keyboard = h.SettingsHandler.buildLyricFormatMenuKeyboard(ctx, chatType, settings, groupSettings)
 	} else {
-		platforms := h.PlatformManager.List()
+		platforms := defaultPlatformChoices(h.PlatformManager)
 		text = h.SettingsHandler.buildSettingsText(ctx, chatType, settings, groupSettings, platforms)
 		keyboard = h.SettingsHandler.buildSettingsKeyboard(ctx, chatType, settings, groupSettings, platforms)
 	}
@@ -738,7 +755,7 @@ func (h *SettingsCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 
 	switch settingType {
 	case "platform":
-		platforms := h.PlatformManager.List()
+		platforms := defaultPlatformChoices(h.PlatformManager)
 		validPlatform := false
 		for _, p := range platforms {
 			if p == settingValue {
@@ -994,7 +1011,7 @@ func (h *SettingsCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 				text = h.SettingsHandler.buildLyricFormatMenuText(ctx, chatType, settings, groupSettings)
 				keyboard = h.SettingsHandler.buildLyricFormatMenuKeyboard(ctx, chatType, settings, groupSettings)
 			} else {
-				platforms := h.PlatformManager.List()
+				platforms := defaultPlatformChoices(h.PlatformManager)
 				text = h.SettingsHandler.buildSettingsText(ctx, chatType, settings, groupSettings, platforms)
 				keyboard = h.SettingsHandler.buildSettingsKeyboard(ctx, chatType, settings, groupSettings, platforms)
 			}

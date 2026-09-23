@@ -2239,6 +2239,21 @@ func (h *MusicHandler) downloadAndPrepareFromPlatform(ctx context.Context, plat 
 	return filePath, thumbPicPath, cleanupList, nil
 }
 
+// coverFileName derives a local file name from a cover URL. Query strings
+// (Douyin's "?from=...") and CDN transform suffixes containing ':' (Soda's
+// "~tplv-...-resize:960:960.png") are not valid in Windows file names.
+func coverFileName(coverURL string) string {
+	name := coverURL
+	if parsed, err := url.Parse(coverURL); err == nil {
+		name = parsed.Path
+	}
+	name = path.Base(name)
+	if name == "." || name == "/" {
+		return "cover"
+	}
+	return sanitizeFileName(name)
+}
+
 func (h *MusicHandler) prepareCoverFiles(ctx context.Context, track *platform.Track, trackID string, stamp int64, songInfo *botpkg.SongInfo, cleanupList *[]string) (string, string) {
 	if h == nil || track == nil || h.DownloadService == nil {
 		return "", ""
@@ -2253,7 +2268,7 @@ func (h *MusicHandler) prepareCoverFiles(ctx context.Context, track *platform.Tr
 		return "", ""
 	}
 
-	picPath := filepath.Join(h.CacheDir, fmt.Sprintf("%d-%s", stamp, path.Base(coverURL)))
+	picPath := filepath.Join(h.CacheDir, fmt.Sprintf("%d-%s", stamp, coverFileName(coverURL)))
 	if _, err := h.DownloadService.Download(ctx, &platform.DownloadInfo{URL: coverURL, Size: 0}, picPath, nil); err != nil {
 		_ = os.Remove(picPath)
 		if h.Logger != nil {

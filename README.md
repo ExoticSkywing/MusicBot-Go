@@ -22,6 +22,7 @@
 | Apple Music | ✓ | ✓ | ✓ | ✓ ² | — |
 | YouTube Music | ✓ | ✓ | ✓ | — | — |
 | Spotify | ✓ ³ | ✓ | ✓ | — | — |
+| 抖音原声 | ✓ ⁵ | — | — | — | — |
 
 ¹ 哔哩哔哩取 Dash 流里的 FLAC / Dolby 音轨（音频 id 30251 / 30250 / 30280），视稿件是否提供。
 
@@ -30,6 +31,8 @@
 ³ Spotify 下载需要 `sp_dc` 加自备的 Widevine L3 设备文件（仓库不内置），上限 AAC 256k；只配 Web API 时仅提供搜索与元数据。
 
 ⁴ JOOX 的旧详情接口已失效，插件回退到官网页面解析。当前匿名抽测只获得试听片段，插件会拒绝将其作为完整歌曲；仅在官网明确提供完整音频时返回下载地址，完整下载尚未实测确认。
+
+⁵ 抖音仅支持原声链接（`www.douyin.com/music/<id>`、`iesdouyin.com/share/music/<id>` 及 App 分享的 `v.douyin.com` 短链），音质为 CDN 提供的 128k MP3；版权曲库音乐通常只有片段，会被拒绝。
 
 咪咕、千千、5sing、Jamendo 和 JOOX 的实现移植自
 [guohuiyuan/music-lib](https://github.com/guohuiyuan/music-lib/tree/3b22e851f4fa2f55ceab943fa846a71536fed4f9)，支持歌曲和集合链接；5sing 不提供专辑，Jamendo 上游不提供歌词。这些第三方公开接口、地区限制和账号权益可能变化，表格描述的是当前适配器能力，不代表所有接口或歌曲都已在每个地区实时验证。实现、验证方式和已知限制见 [music-lib 平台移植说明](plugins/musiclib/README.md)。
@@ -110,7 +113,7 @@ wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 
 > 支持运行时 Cookie 导入的平台可以使用管理员命令 `/login <平台> cookie <cookie>`（会回写 `config.ini`）。新增的五个 music-lib 平台暂不实现运行时登录；请在对应 `[plugins.<name>]` 段填写 Cookie 后执行 `/reload`。
 >
-> 现有配置只要包含任意 `[plugins.*]` 段，程序便只加载显式列出的插件。升级后需要把希望启用的 `[plugins.migu]`、`[plugins.qianqian]`、`[plugins.fivesing]`、`[plugins.jamendo]`、`[plugins.joox]` 段加入原配置；完整示例见 `config_example.ini`。
+> 现有配置只要包含任意 `[plugins.*]` 段，程序便只加载显式列出的插件。升级后需要把希望启用的 `[plugins.migu]`、`[plugins.qianqian]`、`[plugins.fivesing]`、`[plugins.jamendo]`、`[plugins.joox]` 段加入原配置；完整示例见 `config_example.ini`。新增的抖音原声同理，需要加入 `[plugins.douyin]` 段。
 
 ## 命令
 

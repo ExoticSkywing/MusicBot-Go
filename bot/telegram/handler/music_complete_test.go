@@ -43,7 +43,7 @@ func preparedAudioWAV(t *testing.T) []byte {
 var completeAudioPlatforms = []string{
 	"netease", "qqmusic", "kugou", "kuwo", "soda", "bilibili",
 	"applemusic", "spotify", "youtubemusic",
-	"migu", "qianqian", "fivesing", "jamendo", "joox",
+	"migu", "qianqian", "fivesing", "jamendo", "joox", "douyin",
 }
 
 func TestPrepareRejectsPreviewForEveryPlatform(t *testing.T) {
@@ -152,5 +152,22 @@ func TestPrepareValidatesFinalFileAfterTagProcessing(t *testing.T) {
 	_, _, _, err := h.downloadAndPrepareFromPlatform(context.Background(), newStubPlatform("test"), &platform.Track{Title: "Song", Duration: time.Second}, "1", info, nil, nil, nil, song, nil)
 	if !providerCalled || !errors.Is(err, platform.ErrIncompleteAudio) || song.AudioValidated {
 		t.Fatalf("final file escaped verification: tags=%t validated=%t err=%v", providerCalled, song.AudioValidated, err)
+	}
+}
+
+func TestCoverFileNameIsValidOnWindows(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://p3-pc.douyinpic.com/aweme/1080x1080/aweme-avatar/abc.jpeg?from=889713528", "abc.jpeg"},
+		{"https://p3-luna.douyinpic.com/img/tos-cn/abc~tplv-resize:960:960.png", "abc~tplv-resize 960 960.png"},
+		{"https://p1.music.126.net/x/109951.jpg", "109951.jpg"},
+		{"https://example.com", "cover"},
+	}
+	for _, tt := range tests {
+		if got := coverFileName(tt.url); got != tt.want {
+			t.Fatalf("coverFileName(%q) = %q, want %q", tt.url, got, tt.want)
+		}
 	}
 }
