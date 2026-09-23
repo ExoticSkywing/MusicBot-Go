@@ -515,6 +515,9 @@ func (h *SettingsHandler) toggleValue(enabled bool) string {
 }
 
 func (h *SettingsHandler) shouldShowPluginSetting(def botpkg.PluginSettingDefinition, autoLinkDetectEnabled bool, isGroup bool) bool {
+	if def.UserOnly && isGroup {
+		return false
+	}
 	if def.GroupOnly && !isGroup {
 		return false
 	}
@@ -846,7 +849,7 @@ func (h *SettingsCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 		pluginKey := strings.TrimSpace(args[3])
 		pluginValue := strings.TrimSpace(args[4])
 		def, ok := h.SettingsHandler.findPluginSettingDefinition(pluginName, pluginKey)
-		if !ok || !def.Validate(pluginValue) {
+		if !ok || !def.Validate(pluginValue) || (def.UserOnly && (msg == nil || msg.Chat.Type != "private")) {
 			break
 		}
 		scopeType := botpkg.PluginScopeUser
@@ -875,7 +878,7 @@ func (h *SettingsCallbackHandler) Handle(ctx context.Context, b *telego.Bot, upd
 		pluginName := strings.TrimSpace(args[2])
 		pluginKey := strings.TrimSpace(args[3])
 		def, ok := h.SettingsHandler.findPluginSettingDefinition(pluginName, pluginKey)
-		if !ok || len(def.Options) == 0 {
+		if !ok || len(def.Options) == 0 || (def.UserOnly && (msg == nil || msg.Chat.Type != "private")) {
 			break
 		}
 		scopeType := botpkg.PluginScopeUser

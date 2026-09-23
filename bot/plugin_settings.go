@@ -31,7 +31,9 @@ type PluginSettingDefinition struct {
 	// GroupOnly hides this setting from the per-user (private chat) settings
 	// menu; it is only shown and editable in group settings.
 	GroupOnly bool
-	Order     int
+	// UserOnly hides private-chat features from group settings.
+	UserOnly bool
+	Order    int
 	// TitleKey / DescriptionKey are optional i18n catalog keys. When set, the
 	// settings renderer resolves them against the request language; Title /
 	// Description remain the fallback when a key is empty or unresolved.

@@ -35,7 +35,7 @@ func TestLocalizedCommandMenus(t *testing.T) {
 		for _, recognize := range []bool{false, true} {
 			public := buildLocalizedCommands(i18n.For(lang), recognize, false)
 			admin := buildLocalizedCommands(i18n.For(lang), recognize, true)
-			if len(admin) != len(public)+2 || !reflect.DeepEqual(public, admin[:len(public)]) {
+			if len(admin) != len(public)+3 || !reflect.DeepEqual(public, admin[:len(public)]) {
 				t.Fatalf("%s: admin menu must preserve all public commands", lang)
 			}
 			seen := make(map[string]bool)
@@ -49,11 +49,11 @@ func TestLocalizedCommandMenus(t *testing.T) {
 					t.Fatalf("%s: invalid description length for %s", lang, command.Command)
 				}
 			}
-			if seen["recognize"] != recognize || !seen["stats"] || !seen["users"] {
+			if seen["recognize"] != recognize || !seen["stats"] || !seen["users"] || !seen["broadcast"] {
 				t.Fatalf("%s: unexpected command set: %v", lang, seen)
 			}
 			for _, command := range public {
-				if command.Command == "stats" || command.Command == "users" {
+				if command.Command == "stats" || command.Command == "users" || command.Command == "broadcast" {
 					t.Fatal("admin command leaked to public menu")
 				}
 			}

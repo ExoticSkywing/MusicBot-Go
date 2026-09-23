@@ -116,6 +116,9 @@ func NewSQLiteRepository(cacheDSN, dataDSN string, gormLogger logger.Interface, 
 	if err := dataDB.AutoMigrate(&UserSettingsModel{}, &BotStatModel{}, &GroupSettingsModel{}, &PluginSettingModel{}, &FavoriteModel{}, &userActivityModel{}); err != nil {
 		return nil, err
 	}
+	if err := dataDB.AutoMigrate(&broadcastRecipientModel{}); err != nil {
+		return nil, err
+	}
 
 	if err := migrateSettingsAutoLinkDetect(dataDB); err != nil {
 		return nil, err

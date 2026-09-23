@@ -47,6 +47,7 @@ type App struct {
 	Build                    BuildInfo
 	botHandler               *th.BotHandler
 	musicHandler             *handler.MusicHandler
+	broadcast                *handler.BroadcastCommands
 	debug                    *debugServer
 }
 
@@ -302,6 +303,7 @@ func initPluginRuntime(ctx context.Context, conf *config.Config, log *logpkg.Log
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.ForwardButtonSettingDefinition())
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.GroupFavoritesSettingDefinition())
 	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.CommentButtonsSettingDefinition())
+	pluginSettingDefinitions = append(pluginSettingDefinitions, handler.BroadcastSettingDefinition())
 
 	if err := dynManager.Load(ctx, conf, platformManager); err != nil {
 		if log != nil {
@@ -454,6 +456,8 @@ func (a *App) Start(ctx context.Context) error {
 	}
 	adminCommands = append(adminCommands, a.AdminCommands...)
 	adminCommands = append(adminCommands, handler.BuildUserActivityCommands(a.DB, a.adminSet, rateLimiter)...)
+	a.broadcast = handler.NewBroadcastCommands(ctx, a.DB, a.adminSet, whitelist, rateLimiter, a.Logger)
+	adminCommands = append(adminCommands, a.broadcast.Command())
 	adminCommandNames := make([]string, 0, len(adminCommands))
 	for _, cmd := range adminCommands {
 		if strings.TrimSpace(cmd.Name) == "" {
@@ -614,6 +618,7 @@ func (a *App) Start(ctx context.Context) error {
 		Repo:                     a.DB,
 		Pool:                     a.Pool,
 		Activity:                 handler.NewUserActivityTracker(a.DB, a.adminSet),
+		BroadcastRecipients:      a.DB,
 	}
 
 	a.dropStaleBacklog(ctx)
@@ -1003,6 +1008,9 @@ func splitAdminIDs(raw string) []string {
 // Shutdown releases resources.
 func (a *App) Shutdown(ctx context.Context) error {
 	var firstErr error
+	if err := a.broadcast.Shutdown(ctx); err != nil {
+		firstErr = fmt.Errorf("stop broadcast: %w", err)
+	}
 
 	if err := a.debug.Shutdown(ctx); err != nil && a.Logger != nil {
 		a.Logger.Warn("failed to stop pprof listener", "error", err)

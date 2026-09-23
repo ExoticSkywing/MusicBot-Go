@@ -50,8 +50,9 @@ type Router struct {
 	BotName                  string
 	// Repo resolves the persisted per-user/group language override. Optional;
 	// when nil the router falls back to client-language auto-detection only.
-	Repo     botpkg.SongRepository
-	Activity *UserActivityTracker
+	Repo                botpkg.SongRepository
+	Activity            *UserActivityTracker
+	BroadcastRecipients botpkg.BroadcastRepository
 }
 
 // Register registers all handlers to the bot handler.
@@ -61,6 +62,7 @@ func (r *Router) Register(bh *th.BotHandler, botName string) {
 	}
 	r.BotName = botName
 	bh.Use(func(ctx *th.Context, update telego.Update) error {
+		r.recordBroadcastRecipient(ctx, &update)
 		if r.isOwnInlineMessage(update.Message) {
 			return ctx.Next(update)
 		}

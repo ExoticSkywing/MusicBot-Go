@@ -16,6 +16,10 @@ var activityCommandSpecs = []localizedCommandSpec{
 	{command: "users", descKey: "activity_cmd_users"},
 }
 
+var broadcastCommandSpecs = []localizedCommandSpec{
+	{command: "broadcast", descKey: "broadcast_cmd"},
+}
+
 func buildLocalizedCommands(loc *i18n.Localizer, enableRecognize, admin bool) []telego.BotCommand {
 	commands := make([]telego.BotCommand, 0, len(botCommandSpecs)+len(activityCommandSpecs))
 	appendSpecs := func(specs []localizedCommandSpec) {
@@ -29,6 +33,7 @@ func buildLocalizedCommands(loc *i18n.Localizer, enableRecognize, admin bool) []
 	appendSpecs(botCommandSpecs)
 	if admin {
 		appendSpecs(activityCommandSpecs)
+		appendSpecs(broadcastCommandSpecs)
 	}
 	return commands
 }
