@@ -55,7 +55,7 @@ guest_downloading_voice = "正在处理媒体…"
 guest_download_voice_failed = "下载媒体失败，请稍后重试"
 guest_converting_audio = "正在转换音频…"
 guest_audio_convert_failed = "音频格式转换失败，请稍后重试"
-guest_recognize_failed_short = "识别失败，媒体可能太短或音乐不清晰"
+guest_recognize_failed_short = "未匹配到歌曲，请换一段音乐清晰的片段再试"
 
 # --- recognize handler ---
 guest_reply_voice_note = "请发送或回复一段语音、音频或视频"

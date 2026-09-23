@@ -195,7 +195,7 @@ func (s *RecognizeService) Recognize(ctx context.Context, audioData []byte) (*Re
 		return nil, errors.New("recognize: empty audio data")
 	}
 
-	pcm, err := decodePCM(ctx, audioData)
+	pcm, err := decodeMiddlePCM(ctx, audioData)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +211,7 @@ func (s *RecognizeService) RecognizeFile(ctx context.Context, filePath string) (
 		return nil, errors.New("recognize: empty media file path")
 	}
 
-	pcm, err := decodePCMFile(ctx, filePath)
+	pcm, err := decodeMiddlePCMFile(ctx, filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +306,9 @@ func (s *RecognizeService) match(ctx context.Context, encoded string) (*Recogniz
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("recognize: parse audio-match response: %w", err)
 	}
+	if result.Code != http.StatusOK {
+		return nil, fmt.Errorf("recognize: audio-match returned code %d: %s", result.Code, result.Message)
+	}
 	return &result, nil
 }
 
@@ -331,6 +334,10 @@ func decodePCMFile(ctx context.Context, filePath string) ([]float32, error) {
 }
 
 func decodePCMInput(ctx context.Context, input string, stdin io.Reader) ([]float32, error) {
+	return decodePCMWindow(ctx, input, stdin, 0, afpDecodeSeconds)
+}
+
+func decodePCMWindow(ctx context.Context, input string, stdin io.Reader, startSeconds float64, durationSeconds int) ([]float32, error) {
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return nil, fmt.Errorf("recognize: ffmpeg not found: %w", err)
@@ -339,16 +346,24 @@ func decodePCMInput(ctx context.Context, input string, stdin io.Reader) ([]float
 	decodeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(decodeCtx, ffmpegPath,
+	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-nostdin",
+	}
+	if startSeconds > 0 {
+		// Input seeking avoids decoding the whole prefix of a long upload.
+		args = append(args, "-ss", strconv.FormatFloat(startSeconds, 'f', 6, 64))
+	}
+	args = append(args,
 		"-i", input,
-		"-t", strconv.Itoa(afpDecodeSeconds),
+		"-map", "0:a:0",
+		"-t", strconv.Itoa(durationSeconds),
 		"-ac", "1",
 		"-ar", strconv.Itoa(afpSampleRate),
 		"-f", "f32le",
 		"pipe:1",
 	)
+	cmd := exec.CommandContext(decodeCtx, ffmpegPath, args...)
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

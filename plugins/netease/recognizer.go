@@ -54,7 +54,9 @@ func mapRecognizeResult(result *RecognizeResult, err error) (*recognize.Result, 
 		return nil, err
 	}
 	if result == nil || result.Data == nil || len(result.Data.Result) == 0 {
-		return nil, errors.New("recognition returned no results")
+		// An empty successful response is not a service failure. Both Telegram
+		// recognition flows already handle nil results with a no-match message.
+		return nil, nil
 	}
 	songID := result.Data.Result[0].Song.ID
 	trackID := fmt.Sprintf("%d", songID)

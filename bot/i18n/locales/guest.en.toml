@@ -54,7 +54,7 @@ guest_downloading_voice = "Processing media…"
 guest_download_voice_failed = "Failed to download the media, please try again later"
 guest_converting_audio = "Converting audio…"
 guest_audio_convert_failed = "Audio format conversion failed, please try again later"
-guest_recognize_failed_short = "Recognition failed; the media may be too short or the music unclear"
+guest_recognize_failed_short = "No matching song found. Try another clip with clear music."
 
 # --- recognize handler ---
 guest_reply_voice_note = "Please send or reply to a voice message, audio file, or video"
