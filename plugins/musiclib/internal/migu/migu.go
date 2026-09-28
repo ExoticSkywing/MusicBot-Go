@@ -459,6 +459,7 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 	var candidates []validFormat
 	var duration int64 = int64(item.Duration)
 	var pqSize int64 = 0
+	hqAvailable := false
 
 	for i, fmtItem := range rateFormats {
 		sizeStr := firstNonZeroString(fmtItem.AndroidSize, fmtItem.ASize, fmtItem.Size, fmtItem.ISize)
@@ -501,6 +502,9 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 			}
 		}
 		isHiddenPaid := (item.ChargeAuditions == "1" && priceVal >= 200)
+		if fmtItem.FormatType == "HQ" && !previewOnly && !isVipTag && !isHiddenPaid {
+			hqAvailable = true
+		}
 
 		if allowPaid || (!isVipTag && !isHiddenPaid) {
 			candidates = append(candidates, validFormat{index: i, size: sizeVal, ext: ext})
@@ -535,6 +539,9 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 	}
 	if previewOnly {
 		extra["preview_only"] = "true"
+	}
+	if hqAvailable {
+		extra["hq_available"] = "true"
 	}
 	if item.CopyrightID != "" {
 		extra["copyright_id"] = item.CopyrightID

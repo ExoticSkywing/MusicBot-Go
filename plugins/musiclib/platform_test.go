@@ -131,6 +131,45 @@ func TestMiguCDNFallbackDoesNotReuseLosslessBitrate(t *testing.T) {
 	}
 }
 
+func TestMiguReportsServedMP3Rendition(t *testing.T) {
+	song := `{"contentId":"123","copyrightId":"600123","name":"Song","singers":[{"name":"Artist"}],"duration":200,"rateFormats":[` +
+		`{"formatType":"PQ","resourceType":"2","size":"3200000","fileType":"mp3"},` +
+		`{"formatType":"HQ","resourceType":"2","size":"8000000","fileType":"mp3"}]}`
+	for _, tc := range []struct {
+		name        string
+		hqStatus    int
+		wantPath    string
+		wantBitrate int
+		wantQuality platform.Quality
+	}{
+		{"320 on CDN", http.StatusPartialContent, "/MP3_320_16_Stero/", 320, platform.QualityHigh},
+		{"128 only", http.StatusNotFound, "/MP3_128_16_Stero/", 128, platform.QualityStandard},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/resourceinfo.do"):
+					return jsonResponse(req, `{"resource":[`+song+`]}`), nil
+				case strings.HasSuffix(req.URL.Path, "/listenSong.do"):
+					resp := jsonResponse(req, "")
+					resp.StatusCode = http.StatusFound
+					resp.Header.Set("Location", "https://cdn.example/x/MP3_128_16_Stero/song.mp3")
+					return resp, nil
+				default:
+					resp := jsonResponse(req, "")
+					resp.StatusCode = tc.hqStatus
+					resp.Header.Set("Content-Type", "audio/mpeg")
+					return resp, nil
+				}
+			})}
+			info, err := NewPlatform("migu", "", client, time.Second).GetDownloadInfo(context.Background(), "123", platform.QualityHigh)
+			if err != nil || !strings.Contains(info.URL, tc.wantPath) || info.Format != "mp3" || info.Bitrate != tc.wantBitrate || info.Quality != tc.wantQuality {
+				t.Fatalf("download = %#v, %v", info, err)
+			}
+		})
+	}
+}
+
 func TestQianqianRejectsPreviewAndReportsSelectedQuality(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		t.Run(map[bool]string{false: "preview_only", true: "full_track"}[full], func(t *testing.T) {
