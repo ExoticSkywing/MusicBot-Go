@@ -416,11 +416,17 @@ func (m *Migu) fetchSongDetail(contentID string) (*model.Song, error) {
 
 // convertItemToSong 将 API 返回的 Item 转换为 Song 模型 (复用 Search 中的逻辑)
 func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
-	artistNames := collectMiguArtistNames(item)
+	artists := collectMiguArtists(item)
+	artistNames := make([]string, 0, len(artists))
+	for _, artist := range artists {
+		artistNames = append(artistNames, artist.Name)
+	}
 	songName := firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.SongName))
 	albumName := strings.TrimSpace(item.Album)
+	albumID := strings.TrimSpace(item.AlbumID)
 	if len(item.Albums) > 0 && strings.TrimSpace(item.Albums[0].Name) != "" {
 		albumName = strings.TrimSpace(item.Albums[0].Name)
+		albumID = firstNonEmpty(strings.TrimSpace(item.Albums[0].ID), albumID)
 	}
 
 	rateFormats := item.RateFormats
@@ -512,50 +518,54 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		ID:       fmt.Sprintf("%s|%s|%s", item.ContentID, bestFormat.ResourceType, bestFormat.FormatType),
 		Name:     songName,
 		Artist:   strings.Join(artistNames, " / "),
+		Artists:  artists,
 		Album:    albumName,
+		AlbumID:  albumID,
 		Size:     displaySize,
 		Duration: int(duration),
 		Bitrate:  bitrate,
 		Cover:    coverURL,
 		Ext:      bestInfo.ext,
-		Link:     fmt.Sprintf("https://music.migu.cn/v3/music/song/%s", linkID),
+		Link:     miguSongLink(linkID),
 		Extra:    extra,
 	}
 }
 
-// GetLyrics 获取歌词
-func collectMiguArtistNames(item MiguSongItem) []string {
-	names := make([]string, 0, len(item.Singers)+len(item.Artists)+1)
-	seen := make(map[string]struct{})
+func collectMiguArtists(item MiguSongItem) []model.Artist {
+	artists := make([]model.Artist, 0, len(item.Singers)+len(item.Artists)+1)
+	seen := make(map[string]int)
 
-	appendName := func(name string) {
-		name = strings.TrimSpace(name)
+	appendArtist := func(id, name string) {
+		id, name = strings.TrimSpace(id), strings.TrimSpace(name)
 		if name == "" {
 			return
 		}
-		if _, ok := seen[name]; ok {
+		if index, ok := seen[name]; ok {
+			if artists[index].ID == "" {
+				artists[index].ID = id
+			}
 			return
 		}
-		seen[name] = struct{}{}
-		names = append(names, name)
+		seen[name] = len(artists)
+		artists = append(artists, model.Artist{ID: id, Name: name})
 	}
 
 	for _, singer := range item.Singers {
-		appendName(singer.Name)
+		appendArtist(singer.ID, singer.Name)
 	}
 	for _, singer := range item.SingerList {
-		appendName(singer.Name)
+		appendArtist(singer.ID, singer.Name)
 	}
 	for _, artist := range item.Artists {
-		appendName(artist.Name)
+		appendArtist(artist.ID, artist.Name)
 	}
-	if len(names) == 0 {
+	if len(artists) == 0 {
 		for _, name := range strings.Split(item.Singer, "|") {
-			appendName(name)
+			appendArtist("", name)
 		}
 	}
 
-	return names
+	return artists
 }
 
 func pickMiguImage(items []miguImageItem) string {
@@ -610,8 +620,14 @@ func miguFormatExt(formatType, formatCode string) string {
 	return "mp3"
 }
 
+// The v5 web app has no song page and the v3 pages redirect to the site root,
+// so songs link to the H5 share page, which takes the content ID.
+func miguSongLink(contentID string) string {
+	return "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=" + url.QueryEscape(contentID)
+}
+
 func miguAlbumLink(id string) string {
-	return fmt.Sprintf("https://music.migu.cn/v3/music/album/%s", id)
+	return fmt.Sprintf("https://music.migu.cn/v5/#/albumDetail?albumId=%s&playlistType=2003", id)
 }
 
 func miguPlaylistLink(id string) string {

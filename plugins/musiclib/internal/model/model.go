@@ -88,6 +88,15 @@ type Song struct {
 
 	// IsVIP marks tracks that require a paid/VIP entitlement for full playback or download.
 	IsVIP bool `json:"is_vip,omitempty"`
+
+	// Artists keeps per-artist IDs for sources that expose them; Artist remains
+	// the joined display name.
+	Artists []Artist `json:"artists,omitempty"`
+}
+
+type Artist struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Playlist 是所有音乐源通用的歌单结构 [修改]

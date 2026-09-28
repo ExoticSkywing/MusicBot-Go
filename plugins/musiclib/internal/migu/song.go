@@ -56,14 +56,17 @@ func (m *Migu) Search(keyword string) ([]model.Song, error) {
 
 func (m *Migu) Parse(link string) (*model.Song, error) {
 	// 1. 提取 ContentID
-	// 支持格式: https://music.migu.cn/v3/music/song/60054701934
-	re := regexp.MustCompile(`music\.migu\.cn/v3/music/song/(\d+)`)
-	matches := re.FindStringSubmatch(link)
-	if len(matches) < 2 {
-		return nil, errors.New("invalid migu link")
+	// 支持格式: https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=600902000006889366
+	// 以及旧版: https://music.migu.cn/v3/music/song/60054701934
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`h5\.nf\.migu\.cn/app/v4/p/share/song(?:-new)?/index\.html\?(?:[^#]*&)?id=(\d+)`),
+		regexp.MustCompile(`music\.migu\.cn/v3/music/song/(\d+)`),
 	}
-	contentID := matches[1]
-
-	// Media resolution belongs to MusicBot's GetDownloadInfo operation.
-	return m.fetchSongDetail(contentID)
+	for _, pattern := range patterns {
+		if matches := pattern.FindStringSubmatch(link); len(matches) >= 2 {
+			// Media resolution belongs to MusicBot's GetDownloadInfo operation.
+			return m.fetchSongDetail(matches[1])
+		}
+	}
+	return nil, errors.New("invalid migu link")
 }

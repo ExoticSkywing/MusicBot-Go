@@ -58,6 +58,35 @@ func TestSearchAdapters(t *testing.T) {
 	}
 }
 
+func TestMiguTrackLinksResolveSongAlbumAndSingers(t *testing.T) {
+	song := `{"contentId":"600902000006889366","copyrightId":"60054701923","name":"晴天","singers":[{"id":"112","name":"周杰伦"},{"id":"113","name":"Guest"}],"albums":[{"id":"8592","name":"叶惠美","type":"1"}],"duration":269,"rateFormats":[{"formatType":"PQ","resourceType":"2","size":"4300000","fileType":"mp3"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(req, `{"songResultData":{"result":[`+song+`]}}`), nil
+	})}
+	p := NewPlatform("migu", "", client, time.Second)
+	tracks, err := p.Search(context.Background(), "晴天", 1)
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("Search = %#v, %v", tracks, err)
+	}
+	track := tracks[0]
+	if track.URL != "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=600902000006889366" {
+		t.Fatalf("track URL = %q", track.URL)
+	}
+	wantArtists := []platform.Artist{
+		{ID: "112", Platform: "migu", Name: "周杰伦", URL: "https://music.migu.cn/v5/#/singerDetail?id=112"},
+		{ID: "113", Platform: "migu", Name: "Guest", URL: "https://music.migu.cn/v5/#/singerDetail?id=113"},
+	}
+	if fmt.Sprint(track.Artists) != fmt.Sprint(wantArtists) {
+		t.Fatalf("artists = %#v", track.Artists)
+	}
+	if track.Album == nil || track.Album.ID != "8592" || track.Album.Title != "叶惠美" || track.Album.URL != "https://music.migu.cn/v5/#/albumDetail?albumId=8592&playlistType=2003" {
+		t.Fatalf("album = %#v", track.Album)
+	}
+	if id, ok := p.MatchPlaylistURL(track.Album.URL); !ok || id != "album:8592" {
+		t.Fatalf("album link cannot round-trip: %q, %t", id, ok)
+	}
+}
+
 func TestMiguDownloadPreservesClientAndMetadataOnlyLookup(t *testing.T) {
 	downloadCalls := 0
 	client := &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

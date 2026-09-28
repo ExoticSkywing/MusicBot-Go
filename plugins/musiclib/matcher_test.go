@@ -11,6 +11,9 @@ func TestPlatformLinks(t *testing.T) {
 		collection     bool
 	}{
 		{"migu", "https://music.migu.cn/v3/music/song/600123?from=share", "600123", false},
+		{"migu", "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=600902000006889366", "600902000006889366", false},
+		{"migu", "https://h5.nf.migu.cn/app/v4/p/share/song-new/index.html?channel=014&id=600123", "600123", false},
+		{"migu", "https://music.migu.cn/v5/#/albumDetail?albumId=8592&playlistType=2003", "album:8592", true},
 		{"migu", "https://music.migu.cn/v5/music/album/123", "album:123", true},
 		{"migu", "https://y.migu.cn/share?playlistId=123", "123", true},
 		{"migu", "https://music.migu.cn/v5/#/playlist?playlistId=123&from=share", "123", true},
