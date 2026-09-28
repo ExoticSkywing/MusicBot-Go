@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	UserAgent   = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
-	Referer     = "http://music.migu.cn/"
-	MagicUserID = "15548614588710179085069"
+	UserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46 (KHTML, like Gecko) Version/9.0 Mobile/13B143 Safari/601.1"
+	Referer   = "http://music.migu.cn/"
 )
 
 type Migu struct {
@@ -344,47 +343,40 @@ type miguAlbumItem struct {
 }
 
 type miguRateFormat struct {
-	FormatType      string   `json:"formatType"`
-	ResourceType    string   `json:"resourceType"`
-	Size            string   `json:"size"`
-	AndroidSize     string   `json:"androidSize"`
-	ISize           string   `json:"isize"`
-	ASize           string   `json:"asize"`
-	FileType        string   `json:"fileType"`
-	AndroidFileType string   `json:"androidFileType"`
-	IFormat         string   `json:"iformat"`
-	AFormat         string   `json:"aformat"`
-	Price           string   `json:"price"`
-	ShowTag         []string `json:"showTag"`
-	ShowTags        []string `json:"showTags"`
+	FormatType      string `json:"formatType"`
+	ResourceType    string `json:"resourceType"`
+	Size            string `json:"size"`
+	AndroidSize     string `json:"androidSize"`
+	ISize           string `json:"isize"`
+	ASize           string `json:"asize"`
+	FileType        string `json:"fileType"`
+	AndroidFileType string `json:"androidFileType"`
+	IFormat         string `json:"iformat"`
+	AFormat         string `json:"aformat"`
 }
 
 type MiguSongItem struct {
-	ID                 string           `json:"id"`
-	Name               string           `json:"name"`
-	SongName           string           `json:"songName"`
-	SongID             string           `json:"songId"`
-	Singers            []miguArtistItem `json:"singers"`
-	Artists            []miguArtistItem `json:"artists"`
-	SingerList         []miguArtistItem `json:"singerList"`
-	Albums             []miguAlbumItem  `json:"albums"`
-	AlbumID            string           `json:"albumId"`
-	Album              string           `json:"album"`
-	Singer             string           `json:"singer"`
-	ContentID          string           `json:"contentId"`
-	CopyrightID        string           `json:"copyrightId"`
-	ChargeAuditions    string           `json:"chargeAuditions"`
-	OldChargeAuditions string           `json:"oldChargeAuditions"`
-	AuditionsType      string           `json:"auditionsType"`
-	AuditionsLength    int              `json:"auditionsLength"`
-	ImgItems           []miguImageItem  `json:"imgItems"`
-	AlbumImgs          []miguImageItem  `json:"albumImgs"`
-	RateFormats        []miguRateFormat `json:"rateFormats"`
-	AudioFormats       []miguRateFormat `json:"audioFormats"`
-	Img1               string           `json:"img1"`
-	Img2               string           `json:"img2"`
-	Img3               string           `json:"img3"`
-	Duration           int              `json:"duration"`
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	SongName     string           `json:"songName"`
+	SongID       string           `json:"songId"`
+	Singers      []miguArtistItem `json:"singers"`
+	Artists      []miguArtistItem `json:"artists"`
+	SingerList   []miguArtistItem `json:"singerList"`
+	Albums       []miguAlbumItem  `json:"albums"`
+	AlbumID      string           `json:"albumId"`
+	Album        string           `json:"album"`
+	Singer       string           `json:"singer"`
+	ContentID    string           `json:"contentId"`
+	CopyrightID  string           `json:"copyrightId"`
+	ImgItems     []miguImageItem  `json:"imgItems"`
+	AlbumImgs    []miguImageItem  `json:"albumImgs"`
+	RateFormats  []miguRateFormat `json:"rateFormats"`
+	AudioFormats []miguRateFormat `json:"audioFormats"`
+	Img1         string           `json:"img1"`
+	Img2         string           `json:"img2"`
+	Img3         string           `json:"img3"`
+	Duration     int              `json:"duration"`
 }
 
 // fetchSongDetail 通过 contentId 获取歌曲详情
@@ -424,18 +416,6 @@ func (m *Migu) fetchSongDetail(contentID string) (*model.Song, error) {
 
 // convertItemToSong 将 API 返回的 Item 转换为 Song 模型 (复用 Search 中的逻辑)
 func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
-	return m.convertItemToSongWithOption(item, false)
-}
-
-func (m *Migu) convertItemToSongAllowPaid(item MiguSongItem) *model.Song {
-	return m.convertItemToSongWithOption(item, true)
-}
-
-func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *model.Song {
-	previewOnly := miguPreviewOnly(item)
-	if previewOnly && !allowPaid {
-		return nil
-	}
 	artistNames := collectMiguArtistNames(item)
 	songName := firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.SongName))
 	albumName := strings.TrimSpace(item.Album)
@@ -459,7 +439,6 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 	var candidates []validFormat
 	var duration int64 = int64(item.Duration)
 	var pqSize int64 = 0
-	hqAvailable := false
 
 	for i, fmtItem := range rateFormats {
 		sizeStr := firstNonZeroString(fmtItem.AndroidSize, fmtItem.ASize, fmtItem.Size, fmtItem.ISize)
@@ -489,26 +468,7 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 			}
 		}
 
-		priceVal, _ := strconv.Atoi(fmtItem.Price)
-		tags := fmtItem.ShowTag
-		if len(tags) == 0 {
-			tags = fmtItem.ShowTags
-		}
-		isVipTag := false
-		for _, tag := range tags {
-			if tag == "vip" {
-				isVipTag = true
-				break
-			}
-		}
-		isHiddenPaid := (item.ChargeAuditions == "1" && priceVal >= 200)
-		if fmtItem.FormatType == "HQ" && !previewOnly && !isVipTag && !isHiddenPaid {
-			hqAvailable = true
-		}
-
-		if allowPaid || (!isVipTag && !isHiddenPaid) {
-			candidates = append(candidates, validFormat{index: i, size: sizeVal, ext: ext})
-		}
+		candidates = append(candidates, validFormat{index: i, size: sizeVal, ext: ext})
 	}
 
 	if len(candidates) == 0 {
@@ -537,14 +497,14 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 		"resource_type": bestFormat.ResourceType,
 		"format_type":   bestFormat.FormatType,
 	}
-	if previewOnly {
-		extra["preview_only"] = "true"
-	}
-	if hqAvailable {
-		extra["hq_available"] = "true"
-	}
 	if item.CopyrightID != "" {
 		extra["copyright_id"] = item.CopyrightID
+	}
+	if item.SongID != "" {
+		extra["song_id"] = item.SongID
+	}
+	if item.AlbumID != "" {
+		extra["album_id"] = item.AlbumID
 	}
 
 	return &model.Song{
@@ -560,17 +520,7 @@ func (m *Migu) convertItemToSongWithOption(item MiguSongItem, allowPaid bool) *m
 		Ext:      bestInfo.ext,
 		Link:     fmt.Sprintf("https://music.migu.cn/v3/music/song/%s", linkID),
 		Extra:    extra,
-		IsVIP:    previewOnly,
 	}
-}
-
-func miguPreviewOnly(item MiguSongItem) bool {
-	charge := strings.TrimSpace(item.ChargeAuditions)
-	oldCharge := strings.TrimSpace(item.OldChargeAuditions)
-	auditionType := strings.TrimSpace(item.AuditionsType)
-	return (charge != "" && charge != "0") ||
-		(oldCharge != "" && oldCharge != "0") ||
-		(item.AuditionsLength > 0 && auditionType != "" && auditionType != "00")
 }
 
 // GetLyrics 获取歌词

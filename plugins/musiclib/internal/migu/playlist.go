@@ -214,7 +214,7 @@ func (m *Migu) GetPlaylistSongs(id string) ([]model.Song, error) {
 
 		before := len(songs)
 		for _, item := range resp.Data.SongList {
-			song := m.convertItemToSongAllowPaid(item)
+			song := m.convertItemToSong(item)
 			if song == nil {
 				continue
 			}
