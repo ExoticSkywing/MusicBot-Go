@@ -43,6 +43,7 @@ func (j *Joox) GetLyrics(s *model.Song) (string, error) {
 	body, err := utils.Get(j.ctx, j.client, apiURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		if pageErr != nil {

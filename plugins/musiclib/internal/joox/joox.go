@@ -20,6 +20,10 @@ import (
 
 const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 
+// XForwardedFor spoofs an Indonesian client IP: JOOX only serves HK/SG/MY/TH/ID
+// regions and geo-blocks requests from elsewhere.
+const XForwardedFor = "36.73.34.109"
+
 type Joox struct {
 	ctx    context.Context
 	client *http.Client
@@ -102,6 +106,7 @@ func (j *Joox) fetchPlaylistPageDataFromURL(playlistID string, pageURL string) (
 	body, err := utils.Get(j.ctx, j.client, pageURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -272,6 +277,7 @@ func (j *Joox) fetchAlbumPageData(id string) (*jooxAlbumPageData, error) {
 	body, err := utils.Get(j.ctx, j.client, pageURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		return nil, err
@@ -528,6 +534,7 @@ func (j *Joox) fetchLegacySongInfo(songID string) (*model.Song, error) {
 	body, err := utils.Get(j.ctx, j.client, apiURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		return nil, err
