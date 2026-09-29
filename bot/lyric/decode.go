@@ -5,7 +5,9 @@ import (
 	"compress/zlib"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
+	"html"
 	"io"
 	"regexp"
 	"strings"
@@ -18,7 +20,10 @@ import (
 // — is exactly standard 3DES-EDE decryption, so Go's crypto/des reproduces it.
 var qrcDESKey = []byte("!@#)(*$%123ZXC!@!@#)(NHL")
 
-var qrcLyricContentRe = regexp.MustCompile(`(?s)<Lyric_1\s+[^>]*LyricContent="([^"]*)"`)
+// qrcLyricContentRe captures the Lyric_1 body up to the closing `"/>`. QQ does
+// not escape quotes inside LyricContent, so stopping at the first `"` would
+// truncate any line that contains one.
+var qrcLyricContentRe = regexp.MustCompile(`(?s)<Lyric_1\s[^>]*?LyricContent="(.*?)"\s*/>`)
 
 // DecodeQRC decrypts a QQ Music QRC payload and returns the inner LyricContent
 // token text (the "[start,dur]word(start,dur)…" body), or an error.
@@ -48,7 +53,7 @@ func DecodeQRCXML(input string) (string, error) {
 		return input, nil
 	}
 	// Bare token text (already decrypted, no XML wrapper).
-	if lineHeadRe.MatchString(input) {
+	if looksLikeTokenTrack(input) {
 		return input, nil
 	}
 	return decodeQRCBlob(input)
@@ -57,9 +62,12 @@ func DecodeQRCXML(input string) (string, error) {
 // ExtractQRCLyricContent pulls the primary Lyric_1 LyricContent token body from
 // a decrypted QRC XML, falling back to bare token text. Returns "" if absent.
 func ExtractQRCLyricContent(xmlContent string) string {
+	if content, ok := qrcXMLAttribute(xmlContent, "Lyric_1"); ok {
+		return content
+	}
 	m := qrcLyricContentRe.FindStringSubmatch(xmlContent)
 	if m == nil {
-		if lineHeadRe.MatchString(strings.TrimSpace(xmlContent)) {
+		if looksLikeTokenTrack(xmlContent) {
 			return strings.TrimSpace(xmlContent)
 		}
 		return ""
@@ -87,19 +95,43 @@ func decodeQRCBlob(hexStr string) (string, error) {
 }
 
 var qrcExtraContentRes = []*regexp.Regexp{
-	regexp.MustCompile(`(?s)<Lyric_2\s+[^>]*LyricContent="([^"]*)"`),
-	regexp.MustCompile(`(?s)<Lyric_3\s+[^>]*LyricContent="([^"]*)"`),
+	regexp.MustCompile(`(?s)<Lyric_2\s[^>]*?LyricContent="(.*?)"\s*/>`),
+	regexp.MustCompile(`(?s)<Lyric_3\s[^>]*?LyricContent="(.*?)"\s*/>`),
 }
 
 // DecodeQRCExtra extracts the romanization track from a decrypted QRC XML, which
 // some songs store in Lyric_2 / Lyric_3 nodes. Returns "" if absent.
 func DecodeQRCExtra(xmlContent string) string {
+	for _, name := range []string{"Lyric_2", "Lyric_3"} {
+		if content, ok := qrcXMLAttribute(xmlContent, name); ok && content != "" {
+			return content
+		}
+	}
 	for _, re := range qrcExtraContentRes {
 		if m := re.FindStringSubmatch(xmlContent); m != nil {
 			return htmlUnescape(m[1])
 		}
 	}
 	return ""
+}
+
+// Prefer XML parsing for valid documents (either quote style, arbitrary
+// attribute order). The regex fallback tolerates QQ's unescaped quotes.
+func qrcXMLAttribute(input, name string) (string, bool) {
+	d := xml.NewDecoder(strings.NewReader(input))
+	for {
+		t, err := d.Token()
+		if err != nil {
+			return "", false
+		}
+		if e, ok := t.(xml.StartElement); ok && e.Name.Local == name {
+			for _, a := range e.Attr {
+				if a.Name.Local == "LyricContent" {
+					return a.Value, true
+				}
+			}
+		}
+	}
 }
 
 // kugouKRCKey is the fixed 16-byte XOR key for Kugou KRC lyric decryption.
@@ -119,6 +151,9 @@ func DecodeKRC(content string) (string, error) {
 	}
 	if len(blob) < 4 {
 		return "", errors.New("krc: content too short")
+	}
+	if string(blob[:4]) != "krc1" {
+		return "", errors.New("krc: invalid magic")
 	}
 	enc := blob[4:] // skip 4-byte "krc1" magic
 	plain := make([]byte, len(enc))
@@ -141,15 +176,8 @@ func inflateZlib(data []byte) (string, error) {
 	return string(out), nil
 }
 
-var htmlEntityReplacer = strings.NewReplacer(
-	"&amp;", "&",
-	"&lt;", "<",
-	"&gt;", ">",
-	"&quot;", "\"",
-	"&#39;", "'",
-	"&apos;", "'",
-)
-
+// htmlUnescape decodes XML entities in a QRC attribute, including the numeric
+// forms (&#10;, &#x27;) a fixed replacer table would miss.
 func htmlUnescape(s string) string {
-	return htmlEntityReplacer.Replace(s)
+	return html.UnescapeString(s)
 }

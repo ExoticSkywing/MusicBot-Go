@@ -30,20 +30,41 @@ type tokenLine struct {
 
 var (
 	// lineHeadRe matches the leading "[lineStart,lineDur]" tag shared by
-	// yrc/qrc/lys/krc line formats.
+	// yrc/qrc/krc line formats.
 	lineHeadRe = regexp.MustCompile(`^\[(\d+),(\d+)\](.*)$`)
+	// lysLineHeadRe matches a Lyricify Syllable line "[property]text(start,dur)…",
+	// which carries no line timing of its own.
+	lysLineHeadRe = regexp.MustCompile(`^\[(\d)\](.*\(\d+,\d+\).*)$`)
 	// wordTagRe matches a "(start,dur)" or "(start,dur,flag)" word tag.
 	wordTagRe = regexp.MustCompile(`\((\d+),(\d+)(?:,(\d+))?\)`)
+	// yrcLeadRe matches content that opens with a yrc word tag. Checking for a
+	// bare "(" is not enough: qrc/lys lines routinely open with a parenthesised
+	// background word such as "(Oh (1000,500)".
+	yrcLeadRe = regexp.MustCompile(`^\(\d+,\d+(?:,\d+)?\)`)
 )
+
+// looksLikeTokenTrack reports whether any line of s is a yrc/qrc/lys token line.
+// It scans line by line: header tags ([ti:]/[ar:]…) usually precede the body.
+func looksLikeTokenTrack(s string) bool {
+	for _, row := range splitLines(s) {
+		row = strings.TrimSpace(row)
+		if lineHeadRe.MatchString(row) || lysLineHeadRe.MatchString(row) {
+			return true
+		}
+	}
+	return false
+}
 
 // parseTokenLines parses yrc/qrc/lys token text into canonical token lines.
 //
-// It mirrors LyricConverterService::parseTokenLines. Two on-wire shapes are
-// supported, distinguished by whether the line content starts with "(":
-//   - yrc:      [lineStart,lineDur](wStart,wDur,flag)text(wStart,wDur,flag)text
-//   - qrc/lys:  [lineStart,lineDur]text(wStart,wDur)text(wStart,wDur)
+// It mirrors LyricConverterService::parseTokenLines. Three on-wire shapes are
+// supported:
+//   - yrc:  [lineStart,lineDur](wStart,wDur,flag)text(wStart,wDur,flag)text
+//   - qrc:  [lineStart,lineDur]text(wStart,wDur)text(wStart,wDur)
+//   - lys:  [property]text(wStart,wDur)text(wStart,wDur)
 //
-// Word timestamps are absolute milliseconds in both shapes.
+// Word timestamps are absolute milliseconds in all shapes. LYS lines have no
+// line timing, so theirs is derived from the first and last word.
 func parseTokenLines(token string) []tokenLine {
 	rows := splitLines(token)
 	out := make([]tokenLine, 0, len(rows))
@@ -52,20 +73,30 @@ func parseTokenLines(token string) []tokenLine {
 		if row == "" {
 			continue
 		}
-		m := lineHeadRe.FindStringSubmatch(row)
-		if m == nil {
-			continue
-		}
-		lineStart := mustAtoi(m[1])
-		lineDur := mustAtoi(m[2])
-		lineEnd := lineStart + lineDur
-		content := m[3]
-
+		var lineStart, lineEnd int
+		var content string
 		var tokens []tokenWord
-		if strings.HasPrefix(content, "(") {
-			tokens = parseYRCWords(content)
-		} else {
+		if m := lineHeadRe.FindStringSubmatch(row); m != nil {
+			lineStart = mustAtoi(m[1])
+			lineEnd = lineStart + mustAtoi(m[2])
+			content = m[3]
+			if yrcLeadRe.MatchString(content) {
+				tokens = parseYRCWords(content)
+			} else {
+				tokens = parseQRCWords(content)
+			}
+		} else if m := lysLineHeadRe.FindStringSubmatch(row); m != nil {
+			content = m[2]
 			tokens = parseQRCWords(content)
+			if len(tokens) == 0 {
+				continue
+			}
+			lineStart = tokens[0].Start
+			for _, tk := range tokens {
+				lineEnd = max(lineEnd, tk.End)
+			}
+		} else {
+			continue
 		}
 
 		if len(tokens) == 0 {
@@ -133,38 +164,62 @@ func parseQRCWords(content string) []tokenWord {
 		}
 		tokens = append(tokens, tokenWord{Start: start, End: start + dur, Text: text})
 	}
+	// Untimed trailing punctuation/text belongs to the final syllable.
+	if len(tokens) > 0 && prev < len(content) {
+		tokens[len(tokens)-1].Text += content[prev:]
+	}
 	return tokens
 }
 
-// resolveLineStartFromTokens returns the first valid token start, falling back
-// to the line start. Mirrors LyricConverterService::resolveLineStartFromTokens.
+// Keep the declared line start, including a lead-in before the first word.
+// Expand it only when a word actually starts earlier than its line header.
 func resolveLineStartFromTokens(line tokenLine) int {
-	if len(line.Tokens) == 0 {
-		return line.Start
-	}
+	start := line.Start
 	for _, tk := range line.Tokens {
 		if tk.Start >= 0 && tk.End >= tk.Start {
-			return tk.Start
+			start = min(start, tk.Start)
 		}
 	}
-	return line.Start
+	return start
 }
 
-// resolveLineEndFromNext returns the next line's resolved start when positive,
-// else the current line end. Mirrors resolveLineEndFromNext.
-func resolveLineEndFromNext(lines []tokenLine, idx int) int {
-	cur := lines[idx].End
-	if idx+1 >= len(lines) {
-		return cur
+// resolveLineEnd returns when a line stops being sung: the later of its
+// declared end and its last word end. Only a line with no usable timing falls
+// back to the next line's start, then to a 3s default. The next line's start is
+// not used otherwise: overlapping lines (duets, background echoes) start before
+// the current one ends, which would cut it short or even end it before it begins.
+func resolveLineEnd(lines []tokenLine, idx int) int {
+	line := lines[idx]
+	start := resolveLineStartFromTokens(line)
+	end := line.End
+	for _, tk := range line.Tokens {
+		end = max(end, tk.End)
 	}
-	nextStart := resolveLineStartFromTokens(lines[idx+1])
-	if nextStart > 0 {
-		return nextStart
+	if end > start {
+		return end
 	}
-	return cur
+	if idx+1 < len(lines) {
+		if next := resolveLineStartFromTokens(lines[idx+1]); next > start {
+			return next
+		}
+	}
+	return start + 3000
+}
+
+// tokenLineStarts returns each line's resolved start and plain text, the keys
+// alignSideTrack matches translation/roma lines against.
+func tokenLineStarts(lines []tokenLine) (starts []int, texts []string) {
+	starts = make([]int, len(lines))
+	texts = make([]string, len(lines))
+	for i, line := range lines {
+		starts[i] = resolveLineStartFromTokens(line)
+		texts[i] = strings.TrimSpace(line.Text)
+	}
+	return starts, texts
 }
 
 func splitLines(s string) []string {
+	s = strings.TrimPrefix(s, "\ufeff")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return strings.Split(s, "\n")

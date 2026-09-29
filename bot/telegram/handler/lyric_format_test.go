@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,30 @@ import (
 	"github.com/liuran001/MusicBot-Go/bot/platform"
 	"github.com/mymmrac/telego"
 )
+
+func TestLyricKRCBinaryDocument(t *testing.T) {
+	h := &LyricHandler{}
+	lyrics := &platform.Lyrics{RawYRC: "[1000,1000](1000,500,0)hello", Translation: "[00:01.00]你好"}
+	doc, ok := h.renderLyricDocument(zhCtx(), lyrics, "test", "netease", "123", lyricRenderState{format: "krc", includeTranslation: true}, 42)
+	if !ok {
+		t.Fatal("render failed")
+	}
+	defer os.Remove(doc.filePath)
+	data, err := os.ReadFile(doc.filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := lyricpkg.DecodeKRC(base64.StdEncoding.EncodeToString(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := lyricpkg.ParseKRC(text); result.Lyric != "[00:01.00]hello" || result.Translation != lyrics.Translation {
+		t.Fatalf("document tracks = %+v", result)
+	}
+	if !strings.HasSuffix(doc.fileName, ".krc") || !lyricFormatSupportsSideTracks("krc") {
+		t.Fatal("KRC format metadata incorrect")
+	}
+}
 
 func TestParseTrailingLyricFormat(t *testing.T) {
 	cases := []struct {

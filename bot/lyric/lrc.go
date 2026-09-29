@@ -9,120 +9,185 @@ import (
 )
 
 // lrcEntry is one parsed LRC line: absolute time in seconds, its text, and a
-// normalized "[mm:ss.cc]" tag used as a map key for translation/roma lookup.
+// normalized "[mm:ss.cc]" tag. End is the next later timestamp in the track --
+// blank timed lines included, since LRC marks where a line stops with one -- or
+// Time+3s for the final line.
 type lrcEntry struct {
 	Time float64
+	End  float64
 	Text string
 	Tag  string
 }
 
 var (
-	// lrcLineRe matches "[mm:ss.fff]text" or "[mm:ss:fff]text".
-	lrcLineRe = regexp.MustCompile(`^\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\](.*)$`)
+	// lrcTimeTagRe matches one leading "[mm:ss]", "[mm:ss.fff]" or "[mm:ss:fff]"
+	// tag. A line may carry several ("[00:10.00][01:20.00]chorus").
+	lrcTimeTagRe = regexp.MustCompile(`^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]`)
 	// lrcMetaRe matches "[ti:...]"/"[ar:...]"/"[by:...]" metadata lines.
 	lrcMetaRe = regexp.MustCompile(`(?i)^\[(ti|ar|by)\s*:\s*(.*?)\]$`)
+	// lrcHeaderTagRe matches any "[key:value]" header line ([ti:], [offset:],
+	// [length:], [#:]...). Time tags never start with a letter or '#'.
+	lrcHeaderTagRe = regexp.MustCompile(`^\[[A-Za-z#][^\]]*:[^\]]*\]$`)
 	// lrcAnyTagRe matches any inline "[..:...]" timestamp (for stripping).
-	lrcAnyTagRe = regexp.MustCompile(`\[[0-9]{1,2}:[0-9]{2}(?:[.:][0-9]{1,3})?\]`)
+	lrcAnyTagRe = regexp.MustCompile(`\[[0-9]{1,3}:[0-9]{2}(?:[.:][0-9]{1,3})?\]`)
 )
 
+// parseLRCRow splits a row into the millisecond times of its leading time tags
+// and the text after them. ok is false when the row has no leading time tag.
+func parseLRCRow(row string) (times []int, text string, ok bool) {
+	rest := strings.TrimSpace(row)
+	for {
+		m := lrcTimeTagRe.FindStringSubmatch(rest)
+		if m == nil {
+			break
+		}
+		times = append(times, (mustAtoi(m[1])*60+mustAtoi(m[2]))*1000+parseLRCFractionToMs(m[3]))
+		rest = rest[len(m[0]):]
+	}
+	if len(times) == 0 {
+		return nil, "", false
+	}
+	return times, strings.TrimSpace(rest), true
+}
+
 // parseLRCEntries parses an LRC track into time-sorted entries, dropping empty
-// lines. Mirrors LyricConverterService::parseLrcEntries.
+// lines. A row with several time tags yields one entry per tag. Mirrors
+// LyricConverterService::parseLrcEntries.
 func parseLRCEntries(lrc string) []lrcEntry {
 	rows := splitLines(lrc)
 	entries := make([]lrcEntry, 0, len(rows))
+	var stamps []float64 // every timestamp, blank lines included
 	for _, row := range rows {
-		m := lrcLineRe.FindStringSubmatch(strings.TrimSpace(row))
-		if m == nil {
+		times, text, ok := parseLRCRow(row)
+		if !ok {
 			continue
 		}
-		min := mustAtoi(m[1])
-		sec := mustAtoi(m[2])
-		ms := parseLRCFractionToMs(m[3])
-		text := strings.TrimSpace(m[4])
-		if text == "" {
-			continue
+		for _, ms := range times {
+			sec := float64(ms) / 1000.0
+			stamps = append(stamps, sec)
+			if text == "" {
+				continue
+			}
+			entries = append(entries, lrcEntry{Time: sec, Text: text, Tag: formatLRCTagFromMs(ms, 2)})
 		}
-		entries = append(entries, lrcEntry{
-			Time: float64(min*60+sec) + float64(ms)/1000.0,
-			Text: text,
-			Tag:  formatLRCTagFromParts(min, sec, ms),
-		})
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Time < entries[j].Time })
+	sort.Float64s(stamps)
+	for i := range entries {
+		entries[i].End = entries[i].Time + 3.0
+		// The first stamp strictly after this line; lines sharing a timestamp
+		// (bilingual LRC) do not end each other.
+		if k := sort.SearchFloat64s(stamps, entries[i].Time+0.0005); k < len(stamps) {
+			entries[i].End = stamps[k]
+		}
+	}
 	return entries
 }
 
-// parseTranslationMap maps each LRC tag to its text. Mirrors parseTranslationMap.
-func parseTranslationMap(track string) map[string]string {
-	m := map[string]string{}
-	for _, row := range splitLines(track) {
-		match := lrcLineRe.FindStringSubmatch(strings.TrimSpace(row))
-		if match == nil {
-			continue
-		}
-		min := mustAtoi(match[1])
-		sec := mustAtoi(match[2])
-		ms := parseLRCFractionToMs(match[3])
-		m[formatLRCTagFromParts(min, sec, ms)] = strings.TrimSpace(match[4])
+// lrcEntryStarts returns each entry's start in ms and its text, the keys
+// alignSideTrack matches translation/roma lines against.
+func lrcEntryStarts(entries []lrcEntry) (starts []int, texts []string) {
+	starts = make([]int, len(entries))
+	texts = make([]string, len(entries))
+	for i, e := range entries {
+		starts[i] = int(math.Round(e.Time * 1000))
+		texts[i] = e.Text
 	}
-	return m
+	return starts, texts
 }
 
-// translationEntry is a time-sorted translation/roma line for nearest lookup.
-type translationEntry struct {
-	Time float64
+// sideEntry is one timed translation/roma line.
+type sideEntry struct {
+	Ms   int
 	Text string
 }
 
-var lrcDotLineRe = regexp.MustCompile(`^\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\](.*)$`)
+const (
+	// sideExactToleranceMs is how far apart two timestamps may be and still
+	// count as "the same": one track rounding to centiseconds while another
+	// truncates (QQ's QRC line at 1547ms vs its translation's [00:01.54]), or
+	// one keeping milliseconds, differs by under 10ms.
+	sideExactToleranceMs = 10
+	// sideFuzzyToleranceMs bounds how far a side-track line may sit from the
+	// main line it is attached to when timestamps do not agree.
+	sideFuzzyToleranceMs = 500
+)
 
-// parseTranslationEntries parses a track into non-empty time-sorted entries,
-// using "." fraction separator semantics. Mirrors parseTranslationEntries.
-func parseTranslationEntries(track string) []translationEntry {
-	var entries []translationEntry
+// parseSideEntries parses a translation/roma LRC track into time-sorted
+// entries, skipping empty lines and NetEase/QQ's "//" placeholders.
+func parseSideEntries(track string) []sideEntry {
+	var entries []sideEntry
 	for _, row := range splitLines(track) {
-		m := lrcDotLineRe.FindStringSubmatch(strings.TrimSpace(row))
-		if m == nil {
+		times, text, ok := parseLRCRow(row)
+		if !ok || text == "" || text == "//" {
 			continue
 		}
-		min := mustAtoi(m[1])
-		sec := mustAtoi(m[2])
-		msRaw := m[3]
-		switch len(msRaw) {
-		case 1:
-			msRaw += "00"
-		case 2:
-			msRaw += "0"
+		for _, ms := range times {
+			entries = append(entries, sideEntry{Ms: ms, Text: text})
 		}
-		ms := 0
-		if len(msRaw) >= 3 {
-			ms = mustAtoi(msRaw[:3])
-		}
-		text := strings.TrimSpace(m[4])
-		if text == "" || text == "//" {
-			continue
-		}
-		entries = append(entries, translationEntry{Time: float64(min*60+sec) + float64(ms)/1000.0, Text: text})
 	}
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Time < entries[j].Time })
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Ms < entries[j].Ms })
 	return entries
 }
 
-// findNearestTranslationText returns the closest entry text within maxDiffSec.
-func findNearestTranslationText(entries []translationEntry, timeSec, maxDiffSec float64) string {
-	best := ""
-	var bestDiff float64 = -1
-	for _, e := range entries {
-		diff := math.Abs(e.Time - timeSec)
-		if diff > maxDiffSec {
-			continue
-		}
-		if bestDiff < 0 || diff < bestDiff {
-			bestDiff = diff
-			best = e.Text
+// alignSideTrack attaches side-track lines to main lines, returning one text
+// per main line ("" when none). starts are the main lines' start times in ms,
+// texts their plain text.
+//
+// Lines whose timestamps agree (within sideExactToleranceMs) pair first. Each
+// remaining side line then goes to the main line nearest it, provided that line
+// is still free, within sideFuzzyToleranceMs, and not a credit line -- so a line
+// with no translation never borrows its neighbour's, and no side line is used
+// twice.
+func alignSideTrack(track string, starts []int, texts []string) []string {
+	out := make([]string, len(starts))
+	side := parseSideEntries(track)
+	if len(side) == 0 || len(starts) == 0 {
+		return out
+	}
+	used := make([]bool, len(side))
+	type candidate struct{ main, side, distance int }
+	var exact []candidate
+	for i, ms := range starts {
+		for j, e := range side {
+			if diff := absInt(e.Ms - ms); diff <= sideExactToleranceMs {
+				exact = append(exact, candidate{i, j, diff})
+			}
 		}
 	}
-	return best
+	// Reserve closer matches first, including exact equality: an earlier
+	// line 5ms away must not consume a later line's exact translation.
+	sort.SliceStable(exact, func(i, j int) bool { return exact[i].distance < exact[j].distance })
+	for _, c := range exact {
+		if out[c.main] == "" && !used[c.side] {
+			out[c.main] = side[c.side].Text
+			used[c.side] = true
+		}
+	}
+	for j, e := range side {
+		if used[j] {
+			continue
+		}
+		best := -1
+		for i, ms := range starts {
+			if best < 0 || absInt(ms-e.Ms) < absInt(starts[best]-e.Ms) {
+				best = i
+			}
+		}
+		if best < 0 || absInt(starts[best]-e.Ms) > sideFuzzyToleranceMs || out[best] != "" || isCreditLikeLine(texts[best]) {
+			continue
+		}
+		out[best] = e.Text
+		used[j] = true
+	}
+	return out
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // --- time formatting helpers ---

@@ -70,8 +70,8 @@ func TestConvertToSPL(t *testing.T) {
 	if !strings.HasPrefix(out, "[00:01.00]") {
 		t.Errorf("spl should start with line tag, got %q", out)
 	}
-	if !strings.Contains(out, "<00:01.00>") {
-		t.Errorf("spl should contain word tag <00:01.00>, got %q", out)
+	if !strings.Contains(out, "[00:01.00]Hello <00:01.50>world<00:02.00>") {
+		t.Errorf("spl should preserve syllable boundaries, got %q", out)
 	}
 }
 
@@ -80,7 +80,7 @@ func TestConvertToTTML(t *testing.T) {
 	for _, want := range []string{
 		"<tt xmlns",
 		"itunes:timing=\"Word\"",
-		"<span begin=\"00:01.000\" end=\"00:01.500\">Hello ",
+		"<span begin=\"00:01.000\" end=\"00:01.500\">Hello</span> ",
 		"musicName\" value=\"Song\"",
 	} {
 		if !strings.Contains(out, want) {

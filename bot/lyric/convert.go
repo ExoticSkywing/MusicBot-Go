@@ -50,7 +50,7 @@ func (p Payload) pickLrcLikeLyric() string { return p.Lyric }
 // plain lyric when it is itself token-shaped. Mirrors pickTokenLyric.
 func (p Payload) pickTokenLyric() string {
 	for _, t := range []string{p.RawYRC, p.RawQRC, p.RawLYS} {
-		if strings.TrimSpace(t) != "" {
+		if hasTokenTrack(t) {
 			return t
 		}
 	}
@@ -61,7 +61,7 @@ func (p Payload) pickTokenLyric() string {
 			return tok
 		}
 	}
-	if t := strings.TrimSpace(p.Lyric); t != "" && lineHeadRe.MatchString(t) {
+	if looksLikeTokenTrack(p.Lyric) {
 		return p.Lyric
 	}
 	return ""
@@ -136,7 +136,8 @@ func FileExtension(format string) string {
 
 // Convert renders the payload into the requested format. It mirrors
 // LyricConverterService::convert: token-shaped raw tracks are preferred for
-// word-by-word output, with graceful fallback to the plain LRC.
+// word-by-word output, with graceful fallback to the plain LRC. For "krc",
+// the returned string contains binary file bytes and must be written verbatim.
 func Convert(p Payload, format string, opts Options) string {
 	lyric := p.pickLrcLikeLyric()
 	// pickTokenLyric parses the whole TTML document for Apple Music payloads.
@@ -158,6 +159,9 @@ func Convert(p Payload, format string, opts Options) string {
 	tlyric := p.Translation
 	roma := normalizeRomaLyric(pickRoma(p))
 	resolved := NormalizeFormat(format)
+	if resolved == "ttml" && strings.TrimSpace(p.RawTTML) != "" {
+		return p.RawTTML
+	}
 
 	includeTranslation := defaultsIncludeTranslation(resolved)
 	if opts.IncludeTranslation != nil {
@@ -166,7 +170,8 @@ func Convert(p Payload, format string, opts Options) string {
 	includeRoma := opts.IncludeRoma
 	romaFirst := opts.RomaFirst
 
-	if lyric == "" && tokenLyric() != "" {
+	derivedLRC := strings.TrimSpace(lyric) == "" || looksLikeTokenTrack(lyric)
+	if resolved != "raw" && derivedLRC && tokenLyric() != "" {
 		lyric = tokenToLRC(tokenLyric())
 	}
 
@@ -196,11 +201,14 @@ func Convert(p Payload, format string, opts Options) string {
 	case "txt":
 		return lrcToTxt(lyric)
 	case "srt":
+		if derivedLRC && tokenLyric() != "" {
+			return tokenToSrt(tokenLyric())
+		}
 		return lrcToSrt(lyric)
 	}
 
 	if resolved == "yrc" {
-		if strings.TrimSpace(p.RawYRC) != "" {
+		if hasTokenTrack(p.RawYRC) {
 			return p.RawYRC
 		}
 		if tokenLyric() != "" {
@@ -209,7 +217,7 @@ func Convert(p Payload, format string, opts Options) string {
 		return lyric
 	}
 	if resolved == "qrc" {
-		if strings.TrimSpace(p.RawQRC) != "" {
+		if hasTokenTrack(p.RawQRC) {
 			return p.RawQRC
 		}
 		if tokenLyric() != "" {
@@ -218,12 +226,7 @@ func Convert(p Payload, format string, opts Options) string {
 		return lyric
 	}
 	if resolved == "krc" {
-		// KRC has a bespoke on-wire encoding; for export we emit the LYS-style
-		// document which carries the same word timing in a readable form.
-		if tokenLyric() != "" {
-			return tokenToLysDocument(tokenLyric(), p, lyric, tlyric, roma)
-		}
-		return lyric
+		return encodeKRC(tokenToKRC(tokenLyric(), lyric, p, ternary(includeTranslation, tlyric, ""), ternary(includeRoma, roma, "")))
 	}
 	if resolved == "lys" {
 		if tokenLyric() != "" {
@@ -272,10 +275,6 @@ func Convert(p Payload, format string, opts Options) string {
 	case "lqe":
 		return lrcToLqe(lyric, ternary(includeTranslation, tlyric, ""), romaTrack, p, tokenLyric(), romaFirst)
 	case "ttml":
-		// Apple Music already hands us a complete word-timed TTML document.
-		if strings.TrimSpace(p.RawTTML) != "" {
-			return p.RawTTML
-		}
 		if tokenLyric() != "" {
 			return tokenToTTML(tokenLyric(), ternary(includeTranslation, tlyric, ""), p, romaTrack, true, romaFirst)
 		}
@@ -303,15 +302,33 @@ func pickRoma(p Payload) string { return p.Roma }
 // also honored for the rare platforms that inline word tags there.
 func HasWordTiming(p Payload) bool {
 	for _, t := range []string{p.RawYRC, p.RawQRC, p.RawLYS} {
-		if hasTokenTrack(t) {
+		if hasTimedWords(t) {
 			return true
 		}
 	}
 	if strings.TrimSpace(p.RawTTML) != "" && ttmlHasWordSpans(p.RawTTML) {
 		return true
 	}
-	if t := strings.TrimSpace(p.Lyric); t != "" && lineHeadRe.MatchString(t) {
-		return hasTokenTrack(p.Lyric)
+	if looksLikeTokenTrack(p.Lyric) {
+		return hasTimedWords(p.Lyric)
+	}
+	return false
+}
+
+// A line header alone can be parsed for fallback rendering, but it must not
+// be advertised as word timing: parseTokenLines synthesizes a token for it.
+func hasTimedWords(track string) bool {
+	for _, row := range splitLines(track) {
+		if !wordTagRe.MatchString(row) {
+			continue
+		}
+		for _, line := range parseTokenLines(row) {
+			for _, word := range line.Tokens {
+				if word.End > word.Start && strings.TrimSpace(word.Text) != "" {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

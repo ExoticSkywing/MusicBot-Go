@@ -1,8 +1,11 @@
 package lyric
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"regexp"
 	"strings"
 )
@@ -159,4 +162,86 @@ func decodeKRCLanguages(b64 string) (translation, roma [][]string) {
 		}
 	}
 	return translation, roma
+}
+
+// tokenToKRC emits decoded KRC text. Word offsets are relative to the line,
+// unlike QRC/YRC. Line-only input is represented by a single timed segment.
+func tokenToKRC(token, lrc string, p Payload, translation, roma string) string {
+	lines := parseTokenLines(token)
+	if len(lines) == 0 {
+		for _, e := range parseLRCEntries(lrc) {
+			s, end := int(math.Round(e.Time*1000)), int(math.Round(e.End*1000))
+			lines = append(lines, tokenLine{Start: s, End: end, Text: e.Text, Tokens: []tokenWord{{Start: s, End: end, Text: e.Text}}})
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	var out []string
+	meta := extractLRCMetadata(lrc)
+	for _, field := range []struct{ key, value string }{
+		{"ti", firstNonEmpty(p.MusicName, meta["ti"])},
+		{"ar", firstNonEmpty(p.Artist, meta["ar"])},
+		{"al", p.Album},
+	} {
+		if field.value != "" {
+			out = append(out, "["+field.key+":"+field.value+"]")
+		}
+	}
+	type language struct {
+		Language     int        `json:"language"`
+		Type         int        `json:"type"`
+		LyricContent [][]string `json:"lyricContent"`
+	}
+	var languages []language
+	starts, texts := tokenLineStarts(lines)
+	for _, track := range []struct {
+		text string
+		kind int
+	}{{translation, 1}, {roma, 0}} {
+		if strings.TrimSpace(track.text) == "" {
+			continue
+		}
+		content := make([][]string, len(lines))
+		for i, text := range alignSideTrack(track.text, starts, texts) {
+			content[i] = []string{text}
+		}
+		languages = append(languages, language{Type: track.kind, LyricContent: content})
+	}
+	if len(languages) > 0 {
+		data, _ := json.Marshal(struct {
+			Content []language `json:"content"`
+		}{languages})
+		out = append(out, "[language:"+base64.StdEncoding.EncodeToString(data)+"]")
+	}
+	for i, line := range lines {
+		start := line.Start
+		for _, w := range line.Tokens {
+			start = min(start, w.Start)
+		}
+		var body strings.Builder
+		body.WriteString("[" + itoa(start) + "," + itoa(max0(resolveLineEnd(lines, i)-start)) + "]")
+		for _, w := range line.Tokens {
+			body.WriteString("<" + itoa(w.Start-start) + "," + itoa(max0(w.End-w.Start)) + ",0>" + w.Text)
+		}
+		out = append(out, body.String())
+	}
+	return strings.Join(out, "\n")
+}
+
+// Convert returns strings for all formats; KRC is the exception containing
+// binary file bytes. Callers must write it verbatim, without UTF-8 conversion.
+func encodeKRC(text string) string {
+	if text == "" {
+		return ""
+	}
+	var compressed bytes.Buffer
+	w := zlib.NewWriter(&compressed)
+	_, _ = w.Write([]byte(text)) // bytes.Buffer writes cannot fail.
+	_ = w.Close()
+	out := append([]byte("krc1"), compressed.Bytes()...)
+	for i := 4; i < len(out); i++ {
+		out[i] ^= kugouKRCKey[(i-4)%len(kugouKRCKey)]
+	}
+	return string(out)
 }

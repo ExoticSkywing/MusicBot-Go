@@ -29,7 +29,11 @@ func lrcToLqe(lrc, tlyric, roma string, p Payload, tokenLyric string, romaFirst 
 	}
 	out = append(out, "[by:"+by+"]", "")
 
-	out = append(out, "[lyrics: format@lys, language@und]")
+	lyricFormat := "lrc"
+	if strings.TrimSpace(tokenLyric) != "" {
+		lyricFormat = "lys"
+	}
+	out = append(out, "[lyrics: format@"+lyricFormat+", language@und]")
 	if musicName != "" {
 		out = append(out, "[ti:"+musicName+"]")
 	}
