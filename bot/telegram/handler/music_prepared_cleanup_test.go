@@ -3,10 +3,9 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -165,7 +164,7 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 	payload := preparedAudioWAV(t)
 	firstDownloadStarted := make(chan struct{})
 	allowFirstDownload := make(chan struct{})
-	firstDownloaderReturned := make(chan struct{})
+	unblockFirstDownload := sync.OnceFunc(func() { close(allowFirstDownload) })
 	var downloadCalls atomic.Int32
 
 	service := download.NewDownloadService(download.DownloadServiceOptions{
@@ -179,30 +178,22 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 		Downloader: func(_ context.Context, _ *platform.DownloadInfo, destPath string, progress func(written, total int64)) (int64, error) {
 			call := downloadCalls.Add(1)
 			if call == 1 {
-				// Make the old generation's final cleanup long enough for the
-				// test to deterministically observe the state-transition window.
-				stamp := strings.SplitN(filepath.Base(destPath), "-", 2)[0]
-				finalDir := filepath.Join(filepath.Dir(destPath), stamp)
-				if err := os.MkdirAll(finalDir, 0o755); err != nil {
+				// Keep the canceled generation alive until its replacement is
+				// ready. A channel makes this independent of filesystem speed.
+				if err := os.WriteFile(destPath, payload, 0o644); err != nil {
 					return 0, err
 				}
-				for i := 0; i < 8_000; i++ {
-					name := filepath.Join(finalDir, fmt.Sprintf("cleanup-%05d", i))
-					if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
-						return 0, err
-					}
-				}
 				close(firstDownloadStarted)
+				// Deliberately model a downloader slow to honor cancellation.
+				// Test cleanup always opens this gate, even after t.Fatal.
 				<-allowFirstDownload
+				return int64(len(payload)), nil
 			}
 			if err := os.WriteFile(destPath, payload, 0o644); err != nil {
 				return 0, err
 			}
 			if progress != nil {
 				progress(int64(len(payload)), int64(len(payload)))
-			}
-			if call == 1 {
-				close(firstDownloaderReturned)
 			}
 			return int64(len(payload)), nil
 		},
@@ -216,7 +207,7 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 	h := &MusicHandler{
 		CacheDir:        cacheDir,
 		DownloadService: service,
-		ProcessTimeout:  5 * time.Second,
+		ProcessTimeout:  30 * time.Second,
 	}
 	newSongInfo := func() *botpkg.SongInfo {
 		return &botpkg.SongInfo{
@@ -247,8 +238,25 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	firstResult := make(chan error, 1)
+	firstAcquireDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancelFirst()
+		unblockFirstDownload()
+		// Join acquire before waiting on prepareWG, so no worker can be
+		// added after ShutdownUploads starts waiting. TempDir cleans up last.
+		<-firstAcquireDone
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.ShutdownUploads(ctx); err != nil {
+			t.Errorf("stop prepared-media workers: %v", err)
+		}
+	})
 	go func() {
-		_, _, err := acquire(firstCtx, newSongInfo())
+		defer close(firstAcquireDone)
+		_, release, err := acquire(firstCtx, newSongInfo())
+		if release != nil {
+			release()
+		}
 		firstResult <- err
 	}()
 
@@ -256,6 +264,13 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 	case <-firstDownloadStarted:
 	case <-time.After(3 * time.Second):
 		t.Fatal("first download did not start")
+	}
+	key := "prepared:test:" + track.ID + ":high"
+	h.prepareMu.Lock()
+	firstState := h.preparedInFlight[key]
+	h.prepareMu.Unlock()
+	if firstState == nil {
+		t.Fatal("first generation state missing")
 	}
 	cancelFirst()
 	select {
@@ -267,40 +282,50 @@ func TestAcquirePreparedMediaCanceledLastWaiterStartsFreshGeneration(t *testing.
 		t.Fatal("canceled first acquire did not return")
 	}
 
-	close(allowFirstDownload)
-	select {
-	case <-firstDownloaderReturned:
-	case <-time.After(time.Second):
-		t.Fatal("first downloader did not finish")
+	h.prepareMu.Lock()
+	_, exists := h.preparedInFlight[key]
+	h.prepareMu.Unlock()
+	if exists {
+		t.Fatal("canceled generation state was not removed before downloader returned")
 	}
 
-	key := "prepared:test:" + track.ID + ":high"
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		h.prepareMu.Lock()
-		_, exists := h.preparedInFlight[key]
-		h.prepareMu.Unlock()
-		if !exists {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("canceled generation state was not removed")
-		}
-		time.Sleep(100 * time.Microsecond)
-	}
-
-	secondMusicPath, releaseSecond, err := acquire(context.Background(), newSongInfo())
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSecond()
+	secondMusicPath, releaseSecond, err := acquire(secondCtx, newSongInfo())
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
 	if releaseSecond == nil {
 		t.Fatal("second acquire returned nil release function")
 	}
+	defer releaseSecond()
 	if got := downloadCalls.Load(); got != 2 {
 		t.Fatalf("second acquire reused canceled generation: downloader calls = %d, want 2", got)
 	}
 	if _, err := os.Stat(secondMusicPath); err != nil {
 		t.Fatalf("second acquire returned missing artifact %q: %v", secondMusicPath, err)
+	}
+	h.prepareMu.Lock()
+	secondState := h.preparedInFlight[key]
+	h.prepareMu.Unlock()
+	if secondState == nil || secondState == firstState {
+		t.Fatal("second acquire did not create a fresh generation")
+	}
+
+	unblockFirstDownload()
+	select {
+	case <-firstState.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled generation did not finish")
+	}
+	h.prepareMu.Lock()
+	currentState := h.preparedInFlight[key]
+	h.prepareMu.Unlock()
+	if currentState != secondState {
+		t.Fatal("old generation completion removed its replacement")
+	}
+	if _, err := os.Stat(secondMusicPath); err != nil {
+		t.Fatalf("old generation cleanup removed replacement artifact: %v", err)
 	}
 
 	releaseSecond()
