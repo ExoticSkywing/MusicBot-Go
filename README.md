@@ -105,6 +105,10 @@ wvd_path = /path/to/device.wvd     # Widevine L3 设备文件，仓库不内置
 
 酷我、汽水、哔哩哔哩和 YouTube Music 支持匿名访问，但不保证每首歌曲均可取得完整音频；YouTube Music 配置 Cookie 可解锁 256k 并降低限流概率。咪咕、千千、5sing、Jamendo 和 JOOX 也允许在各自配置段中填写可选 Cookie，实际可用性取决于地区、歌曲权益和第三方接口状态。
 
+部分平台提供不带账号 Cookie 的备用取流入口：酷狗无会话时尝试移动端标准 MP3；QQ 音乐匿名主接口未取得授权时尝试旧版 `CgiGetVkey`，保留请求的文件格式；酷我原无损入口失败后尝试移动端 `2000kflac`，复用 FLAC 校验与尾部清理；咪咕在标准档增加 PC v2/H5 备用入口，仍优先选择可用的高音质。备用入口不保证增加歌曲或会员音质的可用范围，已配置账号的鉴权失败也不会被新增匿名路径掩盖。
+
+安装 ffprobe/ffmpeg 后，可设置 `MUSICBOT_ANONYMOUS_LIVE=1` 并运行 `go test ./plugins/kugou ./plugins/qqmusic ./plugins/kuwo -run '^TestAnonymousAudioLive$' -v -count=1` 验证匿名入口的真实整曲下载和解码；测试不加载账号、不发送 Telegram 消息。咪咕的备用入口验证见 [music-lib 插件说明](plugins/musiclib/README.md)。默认测试不访问这些线上音源。
+
 所有平台均拒绝试听片段：已知试听标记会在解析时拦截，下载后还会遍历实际音频包并与目录完整时长对照。时长缺失、明显不符或无法完成校验时停止发送，不会把试听文件作为降级结果。升级前未通过该校验的音频缓存会自动重新下载校验，正常短歌曲不按固定时长拒绝。
 
 完整选项（并发、缓存、限流、代理、日志、各平台细节等）见 `config_example.ini` 的注释，每一项都有说明。

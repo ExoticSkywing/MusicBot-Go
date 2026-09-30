@@ -49,6 +49,7 @@ type losslessResolver uint8
 
 const (
 	resolvePlayableFLAC losslessResolver = iota + 1
+	resolveAnonymousFLAC
 )
 
 type mediaProbe struct {
@@ -99,7 +100,7 @@ func losslessResolverPlan(quality platform.Quality) []losslessResolver {
 		// third-party resolver that used to front this is gone: its host has
 		// served an expired certificate since April 2026 and now answers every
 		// request with an empty body.
-		return []losslessResolver{resolvePlayableFLAC}
+		return []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC}
 	default:
 		return nil
 	}
@@ -185,12 +186,16 @@ func parseMobileMediaPseudoQuery(rawQuery string) (string, bool) {
 			if value != "mp3" && value != "flac" {
 				return "", false
 			}
-		case "source", "type":
+		case "source":
+			if value != "" && !isSafeMediaQueryToken(value, 128) {
+				return "", false
+			}
+		case "type":
 			if !isSafeMediaQueryToken(value, 128) {
 				return "", false
 			}
 		case "user":
-			if !isASCIIUnsignedDecimal(value, 32) {
+			if !isASCIIUnsignedDecimal(value, 32) && !(strings.HasPrefix(value, "C_APK_guanwang_") && isSafeMediaQueryToken(strings.TrimPrefix(value, "C_APK_guanwang_"), 64)) {
 				return "", false
 			}
 		case "loginUid":
@@ -600,6 +605,8 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 		switch resolver {
 		case resolvePlayableFLAC:
 			info, candidateErr = c.resolvePlayableLossless(ctx, detail)
+		case resolveAnonymousFLAC:
+			info, candidateErr = c.resolveMobileDownload(ctx, detail, mobileQuality{br: "2000kflac", format: "flac", bitrate: 2000, quality: platform.QualityLossless})
 		default:
 			continue
 		}
@@ -710,9 +717,9 @@ func (c *Client) resolveMobileDownload(ctx context.Context, detail *trackDetail,
 	}
 	query := parsed.Query()
 	for key, value := range map[string]string{
-		"user": "359307055300426", "source": "kwplayer_ar_5.1.0.0_B_jiakong_vh.apk",
-		"type": "convert_url_with_sign", "sig": "0", "network": "WIFI", "f": "web",
-		"rid": detail.ID, "br": candidate.br, "format": candidate.format,
+		"user": c.anonymousUser(), "source": "kwplayercar_ar_6.0.0.9_B_jiakong_vh.apk",
+		"type": "convert_url_with_sign", "from": "PC", "f": "web",
+		"rid": detail.ID, "br": candidate.br,
 	} {
 		query.Set(key, value)
 	}
@@ -780,7 +787,7 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
-	if !bitrateOK || declaredBitrate != int64(candidate.bitrate) {
+	if !bitrateOK || (declaredBitrate != int64(candidate.bitrate) && !(candidate.format == "flac" && declaredBitrate == directHiResBitrate)) {
 		return nil, errors.New("kuwo: candidate bitrate mismatch")
 	}
 	declaredFormat := strings.ToLower(scalarText(data.Format.scalar()))
@@ -828,6 +835,13 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 		if candidate.bitrate == 128 && (probe.bitrate < 102 || probe.bitrate > 154) {
 			return nil, errors.New("kuwo: 128k candidate failed bitrate verification")
 		}
+	}
+	if candidate.format == "flac" {
+		profile, ok := legacyLosslessProfileFor(declaredBitrate)
+		if !ok || !profile.acceptsProbe(probe) {
+			return nil, errors.New("kuwo: anonymous FLAC STREAMINFO mismatch")
+		}
+		return c.playableFLACInfo(ctx, rawURL, probe)
 	}
 	return c.buildDownloadInfo(rawURL, candidate.format, probe), nil
 }

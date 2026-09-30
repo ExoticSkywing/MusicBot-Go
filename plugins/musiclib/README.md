@@ -55,3 +55,17 @@ MUSICLIB_LIVE=1 go test ./plugins/musiclib -run '^TestLivePlatforms$' -v -count=
 - Jamendo：13,606,952 字节 MP3，目录 8 分 25 秒，音频包 8 分 25.539 秒。
 
 这四个平台均验证了无需 Cookie 的完整歌曲下载。JOOX 官网可匿名提供歌曲信息和歌词，但测试歌曲只提供约 33 秒试听；完整音频下载未验证，线上测试确认该试听会被拒绝。
+
+### 咪咕匿名备用入口（2026-10-01）
+
+Android 入口优先，无地址时尝试 PC v1。匿名 PQ 请求再增加 PC v2/H5 兜底；高音质请求及 ZQ/ZQ24 重试仍先收集，再按音质选择候选。返回地址须通过对应格式的音频头校验；出现试听提示时，CDN 文件大小须达到该档目录大小的 90%，缺少大小证据或明确的试听路径均拒绝。新增匿名入口不发送账号 Cookie、不使用共享 Cookie Jar；取消和证书错误立即中止回退。
+
+`AB CD 01` 响应封装解码参考 [Domdkw/miguMusic-api-enhanced](https://github.com/Domdkw/miguMusic-api-enhanced/tree/97bde9ce79067e436025241dfb8e37fc15e9530c) 的 `url_v2.ts`，经 MusicDownloader 提交 `de6eabd` 适配，MIT 版权声明保存在 [internal/migu/MRC_LICENSE](internal/migu/MRC_LICENSE)。离线回归使用 `go test ./plugins/musiclib/internal/migu`。
+
+可选的备用入口实测在本地拦截较早入口和其他音质候选，曲库、指定备用入口及整曲文件均真实联网，不加载账号或发送 Telegram 消息。需安装 ffprobe/ffmpeg：
+
+```sh
+MIGU_FALLBACK_LIVE=1 go test ./plugins/musiclib/internal/migu -run '^TestLiveAnonymousFallbacks$' -v -count=1
+```
+
+本轮 PC v2《成都》下载 5,249,778 字节，H5 周杰伦《晴天》下载 4,317,311 字节，均为 128 kbps MP3；音频包时长与目录相符，ffmpeg 全曲解码通过。

@@ -62,6 +62,8 @@ type Client struct {
 	endpoints          kuwoEndpoints
 	now                func() time.Time
 
+	anonymousOnce     sync.Once
+	anonymousID       string
 	sessionMu         sync.Mutex
 	sessionExpires    time.Time
 	sessionRefreshing bool
@@ -849,4 +851,14 @@ func uuidV4() (string, error) {
 	encoded[23] = '-'
 	hex.Encode(encoded[24:36], data[10:16])
 	return string(encoded), nil
+}
+
+// anonymousUser is a client installation ID, never an account identifier.
+func (c *Client) anonymousUser() string {
+	c.anonymousOnce.Do(func() {
+		var nonce [8]byte
+		_, _ = rand.Read(nonce[:])
+		c.anonymousID = "C_APK_guanwang_" + strconv.FormatInt(time.Now().UnixNano(), 10) + hex.EncodeToString(nonce[:])
+	})
+	return c.anonymousID
 }
