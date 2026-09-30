@@ -8,7 +8,9 @@
 
 接口实现来自 [guohuiyuan/music-lib](https://github.com/guohuiyuan/music-lib/tree/3b22e851f4fa2f55ceab943fa846a71536fed4f9)，固定提交为 `3b22e851f4fa2f55ceab943fa846a71536fed4f9`。移植范围保存在 `internal/`；上游 AGPL v3 许可证保存在 [`internal/LICENSE`](internal/LICENSE)。这些文件保留原许可证，未改动仓库原有 GPL v3 文件的许可证；组合程序须遵守相应 AGPL v3 要求。
 
-选择本地移植是因为上游使用全局 HTTP 客户端，不能接收请求上下文和各平台代理。当前项目的 music-lib 依赖版本保持不变，避免改变已有酷狗接口行为。
+选择本地移植是因为上游使用全局 HTTP 客户端，不能接收请求上下文和各平台代理。酷狗另外通过 Go module 引用 music-lib，当前版本为 `v1.1.0`；升级该依赖不会自动更新这里的五个平台，本地移植代码需要单独核对上游并保留上述适配。
+
+2026-10-01 核对上游 `28e1080ba416` 后，补充移植咪咕 `newRateFormats` 与旧音质字段的合并去重、按音质而非文件大小选择版本、Hi-Res 格式识别，以及普通 content ID 的下载解析。目录中的大小与码率对应同一个版本。保留本地请求上下文、代理、试听拒绝和权限判定逻辑；上游 3D 加密音频解密尚未接入，本地仍优先选择可处理的普通音频。
 
 - 每次 Bot 操作创建独立源实例，共享该平台的 HTTP transport，传入请求上下文；超时覆盖整个操作。
 - HTTP 请求支持取消、代理和响应大小限制，移除上游默认实例和全局调用入口。
@@ -27,6 +29,15 @@
 ```sh
 go test -race ./plugins/musiclib/... ./plugins/all
 ```
+
+使用已有配置进行真实下载回归时，可运行 `plugins/all` 中的可选测试：
+
+```sh
+MUSICBOT_LIVE_CONFIG=/private/config.ini MUSICBOT_LIVE_PLATFORMS=migu,spotify \
+  go test ./plugins/all -run '^TestLiveConfiguredDownloads$' -v -parallel=1 -timeout=10m
+```
+
+需要 ffprobe 和可用的账号配置。测试使用临时配置副本、关闭后台续期，不启动 Bot 或发送 Telegram 消息；会真实下载并校验完整音频，再验证标签读写。服务器运行时建议将线上配置目录只读挂载到独立测试容器，限制内存和 CPU，并在结束后移除容器及测试文件。
 
 可选的真实公开接口检查会搜索三个候选结果、下载完整音频文件，并用生产环境相同的 `ffprobe` 音频包时长校验与目录时长对照。检查不发送 Telegram 消息，不使用账号 Cookie；单个文件上限为 256 MiB，运行时会消耗相应流量和下载时间：
 

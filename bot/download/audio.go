@@ -70,10 +70,21 @@ func VerifyFullAudio(ctx context.Context, path string, expected time.Duration) (
 
 func readAudioPacketDuration(scanner *bufio.Scanner) (time.Duration, error) {
 	var seconds float64
+	packets := 0
+	skippedPrimingPacket := false
 	for scanner.Scan() {
 		value, ok := strings.CutPrefix(scanner.Text(), "duration_time=")
 		if !ok {
 			continue // Ignore optional packet side data (e.g. encoder padding).
+		}
+		packets++
+		// ffprobe reports N/A for the initial AAC priming packet in some
+		// Spotify fragmented MP4s. Count only measured audio, never infer a
+		// duration from the container header. Other missing durations remain
+		// errors, and the caller still checks the measured sum against catalog.
+		if value == "N/A" && packets == 1 {
+			skippedPrimingPacket = true
+			continue
 		}
 		duration, err := strconv.ParseFloat(value, 64)
 		if err != nil || duration < 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
@@ -86,6 +97,9 @@ func readAudioPacketDuration(scanner *bufio.Scanner) (time.Duration, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, err
+	}
+	if skippedPrimingPacket && seconds <= 0 {
+		return 0, fmt.Errorf("no measurable audio after priming packet")
 	}
 	return time.Duration(seconds * float64(time.Second)), nil
 }

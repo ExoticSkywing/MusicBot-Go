@@ -80,7 +80,8 @@ func connect(ctx context.Context, log librespot.Logger, deviceID string, httpCli
 	s.clientToken = clientToken
 
 	// Resolve current access point / spclient / dealer endpoints.
-	s.resolver = apresolve.NewApResolver(log, httpClient)
+	// Keep the resolver's default port order, as before the upstream option was added.
+	s.resolver = apresolve.NewApResolver(log, httpClient, false)
 	s.login5 = login5.NewLogin5(log, httpClient, deviceID, clientToken)
 
 	apAddr, err := s.resolver.GetAccesspoint(ctx)

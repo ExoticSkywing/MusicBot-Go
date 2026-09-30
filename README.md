@@ -70,7 +70,7 @@ docker compose up -d --build
 
 ### 裸机运行
 
-需要 Go 1.26+ 和 ffprobe（所有平台发送音频前均需完整性校验）；用 `/recognize` 还需 ffmpeg（识曲指纹编码已用纯 Go 实现，无需 Node.js）。Docker 镜像已内置 ffmpeg / ffprobe。
+需要 Go 1.26.7+ 和 ffprobe（所有平台发送音频前均需完整性校验）；用 `/recognize` 还需 ffmpeg（识曲指纹编码已用纯 Go 实现，无需 Node.js）。Docker 镜像已内置 ffmpeg / ffprobe。
 
 ```bash
 go build -o MusicBot-Go
