@@ -72,6 +72,7 @@ func (j *Joox) fetchPageSingle(songID string) (*jooxPageSingle, error) {
 	body, apiErr := utils.Get(j.ctx, j.client, apiURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if apiErr == nil {
 		var response struct {
@@ -91,6 +92,7 @@ func (j *Joox) fetchPageSingle(songID string) (*jooxPageSingle, error) {
 	body, pageErr := utils.Get(j.ctx, j.client, pageURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if pageErr != nil {
 		return nil, fmt.Errorf("joox page API: %v; page HTML: %w", apiErr, pageErr)

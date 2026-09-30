@@ -58,6 +58,35 @@ func TestSearchAdapters(t *testing.T) {
 	}
 }
 
+func TestMiguTrackLinksResolveSongAlbumAndSingers(t *testing.T) {
+	song := `{"contentId":"600902000006889366","copyrightId":"60054701923","name":"晴天","singers":[{"id":"112","name":"周杰伦"},{"id":"113","name":"Guest"}],"albums":[{"id":"8592","name":"叶惠美","type":"1"}],"duration":269,"rateFormats":[{"formatType":"PQ","resourceType":"2","size":"4300000","fileType":"mp3"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(req, `{"songResultData":{"result":[`+song+`]}}`), nil
+	})}
+	p := NewPlatform("migu", "", client, time.Second)
+	tracks, err := p.Search(context.Background(), "晴天", 1)
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("Search = %#v, %v", tracks, err)
+	}
+	track := tracks[0]
+	if track.URL != "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=600902000006889366" {
+		t.Fatalf("track URL = %q", track.URL)
+	}
+	wantArtists := []platform.Artist{
+		{ID: "112", Platform: "migu", Name: "周杰伦", URL: "https://music.migu.cn/v5/#/singerDetail?id=112"},
+		{ID: "113", Platform: "migu", Name: "Guest", URL: "https://music.migu.cn/v5/#/singerDetail?id=113"},
+	}
+	if fmt.Sprint(track.Artists) != fmt.Sprint(wantArtists) {
+		t.Fatalf("artists = %#v", track.Artists)
+	}
+	if track.Album == nil || track.Album.ID != "8592" || track.Album.Title != "叶惠美" || track.Album.URL != "https://music.migu.cn/v5/#/albumDetail?albumId=8592&playlistType=2003" {
+		t.Fatalf("album = %#v", track.Album)
+	}
+	if id, ok := p.MatchPlaylistURL(track.Album.URL); !ok || id != "album:8592" {
+		t.Fatalf("album link cannot round-trip: %q, %t", id, ok)
+	}
+}
+
 func TestMiguDownloadPreservesClientAndMetadataOnlyLookup(t *testing.T) {
 	downloadCalls := 0
 	client := &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -67,18 +96,16 @@ func TestMiguDownloadPreservesClientAndMetadataOnlyLookup(t *testing.T) {
 				t.Fatalf("wrong content ID: %s", req.URL.Query().Get("resourceId"))
 			}
 			return jsonResponse(req, `{"resource":[`+miguSongJSON+`]}`), nil
-		case strings.HasSuffix(req.URL.Path, "/listenSong.do"):
+		case strings.HasSuffix(req.URL.Path, "/listen-url"):
 			downloadCalls++
 			if req.URL.Query().Get("contentId") != "123" || req.Header.Get("Cookie") != "session=test" {
 				t.Fatal("download lost ID or credential")
 			}
-			resp := jsonResponse(req, "")
-			resp.StatusCode = http.StatusFound
-			resp.Header.Set("Location", "https://cdn.example/song.mp3")
-			return resp, nil
+			return jsonResponse(req, `{"code":"000000","data":{"url":"https://cdn.example/song.mp3","formatType":"PQ"}}`), nil
 		default:
-			t.Fatalf("download resolver followed media redirect: %s", req.URL.Host)
-			return nil, errors.New("unexpected request")
+			resp := jsonResponse(req, "\xff\xfbprobe")
+			resp.StatusCode = http.StatusPartialContent
+			return resp, nil
 		}
 	})}
 	p := NewPlatform("migu", "session=test", client, time.Second)
@@ -87,7 +114,7 @@ func TestMiguDownloadPreservesClientAndMetadataOnlyLookup(t *testing.T) {
 		t.Fatalf("metadata lookup fetched audio: track=%v err=%v calls=%d", track, err, downloadCalls)
 	}
 	info, err := p.GetDownloadInfo(context.Background(), "123", platform.QualityHiRes)
-	if err != nil || info.URL != "https://cdn.example/song.mp3" || info.Format != "mp3" || info.Quality != platform.QualityStandard || downloadCalls != 1 {
+	if err != nil || info.URL != "https://cdn.example/song.mp3" || info.Format != "mp3" || info.Quality != platform.QualityStandard || downloadCalls != 2 {
 		t.Fatalf("download = %#v, %v; calls=%d", info, err, downloadCalls)
 	}
 	if client.CheckRedirect != nil || client.Timeout != time.Second {
@@ -116,18 +143,59 @@ func TestMiguRejectsNonMediaResponse(t *testing.T) {
 
 func TestMiguCDNFallbackDoesNotReuseLosslessBitrate(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if strings.HasSuffix(req.URL.Path, "/resourceinfo.do") {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/resourceinfo.do"):
 			song := strings.Replace(miguSongJSON, `"fileType":"mp3"`, `"fileType":"flac"`, 1)
 			return jsonResponse(req, `{"resource":[`+song+`]}`), nil
+		case strings.HasSuffix(req.URL.Path, "/listen-url"):
+			return jsonResponse(req, `{"code":"000000","data":{"url":"https://cdn.example/fallback.mp3","formatType":"PQ"}}`), nil
+		default:
+			resp := jsonResponse(req, "\xff\xfbprobe")
+			resp.StatusCode = http.StatusPartialContent
+			return resp, nil
 		}
-		resp := jsonResponse(req, "")
-		resp.StatusCode = http.StatusFound
-		resp.Header.Set("Location", "https://cdn.example/fallback.mp3")
-		return resp, nil
 	})}
 	info, err := NewPlatform("migu", "", client, time.Second).GetDownloadInfo(context.Background(), "123", platform.QualityLossless)
-	if err != nil || info.Format != "mp3" || info.Bitrate != 0 || info.Quality != platform.QualityStandard {
+	if err != nil || info.Format != "mp3" || info.Bitrate != 128 || info.Quality != platform.QualityStandard {
 		t.Fatalf("lossless metadata leaked into MP3 fallback: %#v, %v", info, err)
+	}
+}
+
+func TestMiguReportsServedMP3Rendition(t *testing.T) {
+	song := `{"contentId":"123","copyrightId":"600123","name":"Song","singers":[{"name":"Artist"}],"duration":200,"rateFormats":[` +
+		`{"formatType":"PQ","resourceType":"2","size":"3200000","fileType":"mp3"},` +
+		`{"formatType":"HQ","resourceType":"2","size":"8000000","fileType":"mp3"}]}`
+	for _, tc := range []struct {
+		name        string
+		probePath   string
+		wantBitrate int
+		wantQuality platform.Quality
+	}{
+		{"320 on CDN", "/MP3_320_16_Stero/", 320, platform.QualityHigh},
+		{"128 only", "/MP3_128_16_Stero/", 128, platform.QualityStandard},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch {
+				case strings.HasSuffix(req.URL.Path, "/resourceinfo.do"):
+					return jsonResponse(req, `{"resource":[`+song+`]}`), nil
+				case strings.HasSuffix(req.URL.Path, "/listen-url"):
+					return jsonResponse(req, `{"code":"000000","data":{"url":"https://cdn.example/x/标清高清/MP3_128_16_Stero/song.mp3","formatType":"PQ"}}`), nil
+				case strings.Contains(req.URL.Path, tc.probePath):
+					resp := jsonResponse(req, "\xff\xfbprobe")
+					resp.StatusCode = http.StatusPartialContent
+					return resp, nil
+				default:
+					resp := jsonResponse(req, "")
+					resp.StatusCode = http.StatusNotFound
+					return resp, nil
+				}
+			})}
+			info, err := NewPlatform("migu", "", client, time.Second).GetDownloadInfo(context.Background(), "123", platform.QualityHigh)
+			if err != nil || !strings.Contains(info.URL, tc.probePath) || info.Format != "mp3" || info.Bitrate != tc.wantBitrate || info.Quality != tc.wantQuality {
+				t.Fatalf("download = %#v, %v", info, err)
+			}
+		})
 	}
 }
 

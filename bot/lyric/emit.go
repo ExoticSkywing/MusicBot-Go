@@ -2,6 +2,7 @@ package lyric
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -96,7 +97,7 @@ func tokenToLys(token, linePrefix string, stripLeadingPreface bool) string {
 }
 
 // tokenToLysDocument wraps tokenToLys with [ti]/[ar]/[by] headers. Mirrors
-// tokenToLysDocument (also used for the krc export path).
+// tokenToLysDocument.
 func tokenToLysDocument(token string, p Payload, lyric, tlyric, roma string) string {
 	body := tokenToLys(token, "[4]", true)
 	if strings.TrimSpace(body) == "" {
@@ -150,8 +151,11 @@ func tokenToElrc(token string, p Payload, lyric, tlyric, roma string) string {
 		if len(line.Tokens) == 0 {
 			lineText += formatElrcWordTag(line.Start) + plain
 		} else {
-			for _, tk := range line.Tokens {
+			for i, tk := range line.Tokens {
 				lineText += formatElrcWordTag(tk.Start) + tk.Text
+				if i+1 == len(line.Tokens) || tk.End < line.Tokens[i+1].Start {
+					lineText += formatElrcWordTag(tk.End)
+				}
 			}
 		}
 		out = append(out, lineText)
@@ -169,6 +173,10 @@ func formatElrcWordTag(ms int) string {
 func lrcToTxt(lrc string) string {
 	var out []string
 	for _, line := range splitLines(lrc) {
+		line = strings.TrimSpace(line)
+		if lrcHeaderTagRe.MatchString(line) {
+			continue
+		}
 		clean := strings.TrimSpace(lrcStripAllTags(line))
 		if clean != "" {
 			out = append(out, clean)
@@ -177,7 +185,9 @@ func lrcToTxt(lrc string) string {
 	return strings.Join(out, "\n")
 }
 
-var lrcBareTagRe = regexp.MustCompile(`\[[0-9:.]+\]`)
+// lrcBareTagRe matches "[mm:ss.xx]" line tags and "<mm:ss.xx>" enhanced-LRC
+// word tags.
+var lrcBareTagRe = regexp.MustCompile(`\[[0-9:.]+\]|<[0-9]{1,3}:[0-9]{2}(?:[.:][0-9]{1,3})?>`)
 
 func lrcStripAllTags(line string) string {
 	return lrcBareTagRe.ReplaceAllString(line, "")
@@ -191,12 +201,7 @@ func lrcToSrt(lrc string) string {
 	var out []string
 	for i, e := range entries {
 		start := e.Time
-		var end float64
-		if i+1 < len(entries) {
-			end = maxFloat(start+0.3, entries[i+1].Time-0.01)
-		} else {
-			end = start + 3.0
-		}
+		end := e.End
 		out = append(out, itoa(i+1))
 		out = append(out, secondsToSRTTime(start)+" --> "+secondsToSRTTime(end))
 		out = append(out, e.Text)
@@ -205,10 +210,19 @@ func lrcToSrt(lrc string) string {
 	return strings.Join(out, "\n")
 }
 
-var (
-	tlyricTagOnlyRe  = regexp.MustCompile(`^\[[0-9]{1,2}:[0-9]{1,2}(?:[.:][0-9]{1,3})?\].*$`)
-	tlyricEmptyTagRe = regexp.MustCompile(`^\[[0-9]{1,2}:[0-9]{1,2}(?:[.:][0-9]{1,3})?\]\s*//$`)
-)
+// Preserve explicit line ends and millisecond precision when no plain LRC
+// was supplied. Flattening through LRC would discard both.
+func tokenToSrt(token string) string {
+	lines := parseTokenLines(token)
+	sort.SliceStable(lines, func(i, j int) bool { return lines[i].Start < lines[j].Start })
+	var out []string
+	for i, line := range lines {
+		start := float64(resolveLineStartFromTokens(line)) / 1000
+		end := float64(resolveLineEnd(lines, i)) / 1000
+		out = append(out, itoa(i+1), secondsToSRTTime(start)+" --> "+secondsToSRTTime(end), line.Text, "")
+	}
+	return strings.Join(out, "\n")
+}
 
 func translationOnly(tlyric string) string {
 	if strings.TrimSpace(tlyric) == "" {
@@ -220,10 +234,7 @@ func translationOnly(tlyric string) string {
 		if line == "" || line == "//" {
 			continue
 		}
-		if !tlyricTagOnlyRe.MatchString(line) {
-			continue
-		}
-		if tlyricEmptyTagRe.MatchString(line) {
+		if _, text, ok := parseLRCRow(line); !ok || text == "" || text == "//" {
 			continue
 		}
 		out = append(out, line)
@@ -232,10 +243,12 @@ func translationOnly(tlyric string) string {
 }
 
 // mergeLrcTracks interleaves translation and/or roma side-tracks under each
-// original LRC line, matching by the "[mm:ss.xx]" tag prefix. Mirrors
-// LyricConverterService::mergeLrcTracks. The original line text is preserved
-// verbatim; extra lines reuse the original line's tag so players keep them in
-// sync. Order honors romaFirst.
+// original LRC line. Mirrors LyricConverterService::mergeLrcTracks, but matches
+// side lines by time (see alignSideTrack) rather than by the literal tag text,
+// so "[00:12.34]" and "[00:12.340]" still pair up. The original line text and
+// tag are preserved verbatim; extra lines reuse the original line's tag so
+// players keep them in sync. A row carrying several time tags is split into
+// one row per tag. Order honors romaFirst.
 func mergeLrcTracks(lyric, tlyric, roma string, romaFirst bool) string {
 	if strings.TrimSpace(lyric) == "" {
 		return lyric
@@ -244,77 +257,99 @@ func mergeLrcTracks(lyric, tlyric, roma string, romaFirst bool) string {
 		return lyric
 	}
 
-	transMap := lrcTagPrefixMap(tlyric)
-	romaMap := lrcTagPrefixMap(roma)
+	// item is one output row plus any untimed rows that followed it.
+	type item struct {
+		ms     int
+		timed  bool
+		tag    string
+		text   string
+		extras []string
+	}
+	var items []item
+	multiTag := false
+	for _, raw := range splitLines(lyric) {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		row := strings.TrimSpace(raw)
+		var tags []string
+		var times []int
+		for {
+			m := lrcTimeTagRe.FindStringSubmatch(row)
+			if m == nil {
+				break
+			}
+			tags = append(tags, m[0])
+			times = append(times, (mustAtoi(m[1])*60+mustAtoi(m[2]))*1000+parseLRCFractionToMs(m[3]))
+			row = row[len(m[0]):]
+		}
+		if len(tags) == 0 {
+			if len(items) > 0 && items[len(items)-1].timed {
+				items[len(items)-1].extras = append(items[len(items)-1].extras, raw)
+			} else {
+				items = append(items, item{text: raw})
+			}
+			continue
+		}
+		if len(tags) > 1 {
+			multiTag = true
+		}
+		for k := range tags {
+			items = append(items, item{ms: times[k], timed: true, tag: tags[k], text: row})
+		}
+	}
+	if multiTag {
+		// Untimed header rows stay on top; timed rows follow in time order.
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].timed != items[j].timed {
+				return !items[i].timed
+			}
+			return items[i].ms < items[j].ms
+		})
+	}
+
+	var starts []int
+	var texts []string
+	var idx []int
+	for i, it := range items {
+		if it.timed && strings.TrimSpace(it.text) != "" {
+			starts = append(starts, it.ms)
+			texts = append(texts, strings.TrimSpace(it.text))
+			idx = append(idx, i)
+		}
+	}
+	transByItem := map[int]string{}
+	romaByItem := map[int]string{}
+	for k, t := range alignSideTrack(tlyric, starts, texts) {
+		transByItem[idx[k]] = t
+	}
+	for k, r := range alignSideTrack(roma, starts, texts) {
+		romaByItem[idx[k]] = r
+	}
 
 	var out []string
-	for _, raw := range strings.Split(lyric, "\n") {
-		line := raw
-		if line == "" {
+	for i, it := range items {
+		if !it.timed {
+			out = append(out, it.text)
 			continue
 		}
-		out = append(out, line)
-
-		// Key is the bracketed tag prefix, e.g. "[00:12.34]".
-		key, ok := lrcLeadingTagKey(line)
-		if !ok {
-			continue
-		}
-		trans := strings.TrimSpace(transMap[key])
-		romaji := strings.TrimSpace(romaMap[key])
-		if romaji == "//" {
-			romaji = ""
-		}
-
+		out = append(out, it.tag+it.text)
+		trans := transByItem[i]
+		romaji := romaByItem[i]
 		transLine := ""
-		if trans != "" && trans != "//" {
-			transLine = key + trans
+		if trans != "" {
+			transLine = it.tag + trans
 		}
 		romaLine := ""
 		if romaji != "" && romaji != trans {
-			romaLine = key + romaji
+			romaLine = it.tag + romaji
 		}
 		out = append(out, buildOrderedOutputLines(transLine, romaLine, romaFirst)...)
+		out = append(out, it.extras...)
 	}
 	return strings.Join(out, "\n")
 }
 
-// lrcTagPrefixMap maps each line's bracketed tag prefix (e.g. "[00:12.34]") to
-// its text, collapsing runs of whitespace. Lines without a leading tag are
-// skipped. Mirrors the explode(']') maps in PHP mergeLrcTracks.
-var multiSpaceRe = regexp.MustCompile(`\s\s+`)
-
-func lrcTagPrefixMap(track string) map[string]string {
-	m := map[string]string{}
-	if strings.TrimSpace(track) == "" {
-		return m
-	}
-	for _, raw := range strings.Split(track, "\n") {
-		if raw == "" {
-			continue
-		}
-		key, ok := lrcLeadingTagKey(raw)
-		if !ok {
-			continue
-		}
-		text := strings.TrimSpace(multiSpaceRe.ReplaceAllString(raw[len(key):], " "))
-		m[key] = text
-	}
-	return m
-}
-
-// lrcLeadingTagKey returns the leading "[...]" tag (including brackets) of a
-// line, or false when the line does not start with one.
-func lrcLeadingTagKey(line string) (string, bool) {
-	if !strings.HasPrefix(line, "[") {
-		return "", false
-	}
-	end := strings.IndexByte(line, ']')
-	if end < 0 {
-		return "", false
-	}
-	return line[:end+1], true
-}
 func buildOrderedOutputLines(translationLine, romaLine string, romaFirst bool) []string {
 	var ordered []string
 	if romaFirst {
@@ -358,7 +393,7 @@ func isLqePrefaceLikeLine(text string) bool {
 	return lqePrefaceDashRe.MatchString(text) || lqePrefaceWordRe.MatchString(text)
 }
 
-var romaPrefixTagRe = regexp.MustCompile(`^(\[[0-9]{1,2}:[0-9]{2}(?:[.:][0-9]{1,3})?\])(.*)$`)
+var multiSpaceRe = regexp.MustCompile(`\s\s+`)
 
 // normalizeRomaLyric strips secondary inline timestamps from roma content.
 // Mirrors normalizeRomaLyric.
@@ -373,10 +408,14 @@ func normalizeRomaLyric(roma string) string {
 			continue
 		}
 		prefix := ""
-		content := line
-		if m := romaPrefixTagRe.FindStringSubmatch(line); m != nil {
-			prefix = m[1]
-			content = m[2]
+		content := strings.TrimSpace(line)
+		for {
+			m := lrcTimeTagRe.FindString(content)
+			if m == "" {
+				break
+			}
+			prefix += m
+			content = content[len(m):]
 		}
 		content = lrcAnyTagRe.ReplaceAllString(content, " ")
 		content = strings.TrimSpace(multiSpaceRe.ReplaceAllString(content, " "))

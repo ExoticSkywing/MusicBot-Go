@@ -1339,10 +1339,10 @@ func (h *MusicHandler) refreshCachedSongLinks(ctx context.Context, songInfo *bot
 	if h == nil || h.PlatformManager == nil || h.Repo == nil || songInfo == nil {
 		return
 	}
-	if strings.TrimSpace(songInfo.Platform) != "kugou" || strings.TrimSpace(songInfo.TrackID) == "" {
+	if strings.TrimSpace(songInfo.TrackID) == "" {
 		return
 	}
-	if !needsKugouLinkRefresh(songInfo) {
+	if !needsKugouLinkRefresh(songInfo) && !needsMiguLinkRefresh(songInfo) {
 		return
 	}
 	track, err := h.getTrackSingleflight(ctx, songInfo.Platform, songInfo.TrackID)
@@ -1351,6 +1351,17 @@ func (h *MusicHandler) refreshCachedSongLinks(ctx context.Context, songInfo *bot
 	}
 	fillSongInfoFromTrack(songInfo, track, songInfo.Platform, songInfo.TrackID, nil)
 	_ = h.Repo.Create(ctx, songInfo)
+}
+
+// needsMiguLinkRefresh reports cached Migu songs that carry the retired v3
+// song page, which now redirects to the site root. Those records also predate
+// album and singer links.
+func needsMiguLinkRefresh(songInfo *botpkg.SongInfo) bool {
+	if songInfo == nil || strings.TrimSpace(songInfo.Platform) != "migu" {
+		return false
+	}
+	trackURL := strings.TrimSpace(songInfo.TrackURL)
+	return trackURL == "" || strings.Contains(trackURL, "music.migu.cn/v3/")
 }
 
 func needsKugouLinkRefresh(songInfo *botpkg.SongInfo) bool {

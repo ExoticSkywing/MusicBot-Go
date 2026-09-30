@@ -234,6 +234,26 @@ func TestNeedsKugouLinkRefresh(t *testing.T) {
 	}
 }
 
+func TestNeedsMiguLinkRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+		info *botpkg.SongInfo
+		want bool
+	}{
+		{"legacy v3 track url", &botpkg.SongInfo{Platform: "migu", TrackURL: "https://music.migu.cn/v3/music/song/600902000006889366"}, true},
+		{"missing track url", &botpkg.SongInfo{Platform: "migu"}, true},
+		{"share page track url", &botpkg.SongInfo{Platform: "migu", TrackURL: "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=600902000006889366"}, false},
+		{"non migu", &botpkg.SongInfo{Platform: "qqmusic", TrackURL: "https://music.migu.cn/v3/music/song/1"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := needsMiguLinkRefresh(tt.info); got != tt.want {
+				t.Fatalf("needsMiguLinkRefresh()=%v want=%v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRefreshCachedSongLinksUpdatesKugouSongInfo(t *testing.T) {
 	repo := newStubRepo()
 	mgr := newStubManager()

@@ -221,7 +221,7 @@ func lyricFormatShowSaveDefault(current, defaultFormat string) bool {
 // roma side-tracks (and therefore should show the toggle buttons).
 func lyricFormatSupportsSideTracks(format string) bool {
 	switch lyricpkg.NormalizeFormat(format) {
-	case "lrc", "spl", "ass", "lqe", "ttml", "amjson":
+	case "lrc", "krc", "spl", "ass", "lqe", "ttml", "amjson":
 		return true
 	}
 	return false

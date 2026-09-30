@@ -321,7 +321,14 @@ func (p *Platform) convertSong(song model.Song) platform.Track {
 		Duration: time.Duration(max(song.Duration, 0)) * time.Second,
 		CoverURL: song.Cover, URL: p.trackURL(id),
 	}
-	if strings.TrimSpace(song.Artist) != "" {
+	for _, artist := range song.Artists {
+		if name := strings.TrimSpace(artist.Name); name != "" {
+			track.Artists = append(track.Artists, platform.Artist{
+				ID: artist.ID, Platform: p.name, Name: name, URL: p.artistURL(artist.ID),
+			})
+		}
+	}
+	if len(track.Artists) == 0 && strings.TrimSpace(song.Artist) != "" {
 		track.Artists = []platform.Artist{{Platform: p.name, Name: song.Artist}}
 	}
 	if song.Album != "" || song.AlbumID != "" {

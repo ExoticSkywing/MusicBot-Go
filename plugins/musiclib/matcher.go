@@ -9,7 +9,7 @@ import (
 )
 
 var platformMetadata = map[string]platform.Meta{
-	"migu":     {Name: "migu", DisplayName: "咪咕音乐", Emoji: "🎵", Aliases: []string{"migu", "mg", "咪咕", "咪咕音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.migu.cn", "y.migu.cn"}},
+	"migu":     {Name: "migu", DisplayName: "咪咕音乐", Emoji: "🎵", Aliases: []string{"migu", "mg", "咪咕", "咪咕音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.migu.cn", "y.migu.cn", "h5.nf.migu.cn"}},
 	"qianqian": {Name: "qianqian", DisplayName: "千千音乐", Emoji: "🎶", Aliases: []string{"qianqian", "qqian", "千千", "千千音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.91q.com"}},
 	"fivesing": {Name: "fivesing", DisplayName: "5sing", Emoji: "🎤", Aliases: []string{"fivesing", "5sing", "5s"}, AllowGroupURL: true, GroupURLHosts: []string{"5sing.kugou.com"}},
 	"jamendo":  {Name: "jamendo", DisplayName: "Jamendo", Emoji: "🎸", Aliases: []string{"jamendo", "jam"}, AllowGroupURL: true, GroupURLHosts: []string{"jamendo.com", "www.jamendo.com"}},
@@ -67,7 +67,8 @@ func (p *Platform) matchResource(rawURL string) (string, string) {
 	}
 	if p.name == "migu" && (u.Path == "/v5/" || u.Path == "/v3/" || u.Path == "/") && strings.HasPrefix(u.Fragment, "/") {
 		fragment, err := url.Parse(u.Fragment)
-		if err == nil && fragment.Host == "" && fragment.Scheme == "" && resourceKind(strings.Trim(fragment.Path, "/")) != "" {
+		route := strings.Trim(fragment.Path, "/")
+		if err == nil && fragment.Host == "" && fragment.Scheme == "" && (resourceKind(route) != "" || route == "albumDetail") {
 			u.Path, u.RawQuery = fragment.Path, fragment.RawQuery
 		}
 	}
@@ -77,6 +78,8 @@ func (p *Platform) matchResource(rawURL string) (string, string) {
 	case "migu":
 		if len(parts) == 4 && (parts[0] == "v3" || parts[0] == "v5") && parts[1] == "music" {
 			kind, id = resourceKind(parts[2]), parts[3]
+		} else if len(parts) == 6 && strings.Join(parts[:4], "/") == "app/v4/p/share" && (parts[4] == "song" || parts[4] == "song-new") && parts[5] == "index.html" {
+			kind, id = "track", u.Query().Get("id")
 		} else if len(parts) == 2 {
 			kind, id = resourceKind(parts[0]), parts[1]
 		}
@@ -188,7 +191,7 @@ func (p *Platform) trackURL(id string) string {
 	}
 	switch p.name {
 	case "migu":
-		return "https://music.migu.cn/v3/music/song/" + id
+		return "https://h5.nf.migu.cn/app/v4/p/share/song/index.html?id=" + id
 	case "qianqian":
 		return "https://music.91q.com/song/" + id
 	case "fivesing":
@@ -212,7 +215,10 @@ func (p *Platform) collectionURL(id string, isAlbum bool) string {
 	}
 	switch p.name {
 	case "migu":
-		return "https://music.migu.cn/v3/music/" + kind + "/" + id
+		if isAlbum {
+			return "https://music.migu.cn/v5/#/albumDetail?albumId=" + id + "&playlistType=2003"
+		}
+		return "https://music.migu.cn/v5/#/playlist?playlistId=" + id + "&playlistType=ordinary"
 	case "qianqian":
 		return "https://music.91q.com/" + kind + "/" + id
 	case "fivesing":
@@ -221,6 +227,13 @@ func (p *Platform) collectionURL(id string, isAlbum bool) string {
 		return "https://www.jamendo.com/" + kind + "/" + id
 	case "joox":
 		return "https://www.joox.com/sg/" + kind + "/" + url.PathEscape(id)
+	}
+	return ""
+}
+
+func (p *Platform) artistURL(id string) string {
+	if p.name == "migu" && numericID.MatchString(id) {
+		return "https://music.migu.cn/v5/#/singerDetail?id=" + id
 	}
 	return ""
 }

@@ -211,8 +211,8 @@ func TestEmptyCookieDoesNotInjectUpstreamSession(t *testing.T) {
 		if cookie := req.Header.Get("Cookie"); cookie != "" {
 			t.Fatalf("unexpected Cookie header: %q", cookie)
 		}
-		if forwarded := req.Header.Get("X-Forwarded-For"); forwarded != "" {
-			t.Fatalf("unexpected X-Forwarded-For header: %q", forwarded)
+		if forwarded := req.Header.Get("X-Forwarded-For"); forwarded != XForwardedFor {
+			t.Fatalf("geo header = %q, want %q", forwarded, XForwardedFor)
 		}
 		return testResponse(req, `{"section_list":[]}`), nil
 	})}

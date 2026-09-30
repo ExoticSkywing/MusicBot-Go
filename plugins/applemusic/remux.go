@@ -89,6 +89,12 @@ func remuxToProgressive(_ context.Context, path string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close temp: %w", err)
 	}
+	// Windows cannot replace a file while our source handle is still open.
+	// All sample data has been copied, so release it before the rename.
+	if err := in.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close input: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace original: %w", err)

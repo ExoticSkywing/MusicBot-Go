@@ -144,6 +144,7 @@ func (j *Joox) SearchPlaylist(keyword string) ([]model.Playlist, error) {
 	body, err := utils.Get(j.ctx, j.client, apiURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		return nil, err
@@ -240,6 +241,7 @@ func (j *Joox) GetPlaylistSongs(id string) ([]model.Song, error) {
 	body, err := utils.Get(j.ctx, j.client, apiURL,
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		if fallbackSongs, fallbackErr := j.fetchPlaylistSongsFromPage(id); fallbackErr == nil && len(fallbackSongs) > 0 {
@@ -391,6 +393,7 @@ func (j *Joox) fetchJooxPlaylistCategoriesPage() (*jooxPlaylistCategoryPage, err
 	body, err := utils.Get(j.ctx, j.client, "https://www.joox.com/sg/playlist",
 		utils.WithHeader("User-Agent", UserAgent),
 		utils.WithHeader("Cookie", j.cookie),
+		utils.WithHeader("X-Forwarded-For", XForwardedFor),
 	)
 	if err != nil {
 		return nil, err

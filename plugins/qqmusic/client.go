@@ -44,7 +44,7 @@ type autoRenewConfig struct {
 	enabled  bool
 	interval time.Duration
 	started  bool
-	cancel context.CancelFunc
+	cancel   context.CancelFunc
 }
 
 func NewClient(cookie string, timeout time.Duration, logger bot.Logger, autoRenewEnabled bool, autoRenewInterval time.Duration, persist func(map[string]string) error) *Client {
@@ -753,11 +753,12 @@ func (c *Client) GetLyricsQRC(ctx context.Context, songMid string) (*QQLyricResu
 				Trans      string `json:"trans"`
 				LyricTrans string `json:"lyricTrans"`
 				TransLyric string `json:"trans_lyric"`
-				// Romanization likewise.
+				// Romanization likewise. (roma_t / trans_t / qrc_t are numeric
+				// update timestamps, not tracks: typing one as a string makes
+				// the whole response fail to decode.)
 				Roma      string `json:"roma"`
 				RomaLyric string `json:"romaLyric"`
 				LyricRoma string `json:"lyricRoma"`
-				RomaT     string `json:"roma_t"`
 				QRC       int    `json:"qrc"`
 			} `json:"data"`
 		} `json:"req_1"`
@@ -768,7 +769,7 @@ func (c *Client) GetLyricsQRC(ctx context.Context, songMid string) (*QQLyricResu
 
 	data := resp.Req1.Data
 	rawTrans := firstNonEmptyStr(data.Trans, data.LyricTrans, data.TransLyric)
-	rawRoma := firstNonEmptyStr(data.Roma, data.RomaLyric, data.LyricRoma, data.RomaT)
+	rawRoma := firstNonEmptyStr(data.Roma, data.RomaLyric, data.LyricRoma)
 	out := &QQLyricResult{
 		Translation: decodeLyricPayload(rawTrans),
 		Roma:        decodeLyricPayload(rawRoma),
@@ -829,23 +830,49 @@ func decodeLyricPayload(text string) string {
 	if text == "" {
 		return ""
 	}
-	if strings.HasPrefix(text, "[") || strings.HasPrefix(text, "<") {
+	if strings.HasPrefix(text, "[") {
 		return text
 	}
-	if decoded := decodeBase64Text(text); decoded != "" {
-		if strings.Contains(decoded, "[") || strings.Contains(decoded, "<Lyric_") {
-			if strings.Contains(decoded, "<Lyric_") {
-				if tok, err := lyricpkg.DecodeQRC(decoded); err == nil && tok != "" {
-					return lyricpkg.Convert(lyricpkg.Payload{RawQRC: tok}, "lrc", lyricpkg.Options{})
-				}
-			}
-			return decoded
+	if strings.HasPrefix(text, "<") {
+		return qrcXMLToLRC(text)
+	}
+	// An encrypted QRC blob (GetPlayLyricInfo's roma) is pure hex. Try it before
+	// base64: hex digits are valid base64 too, so a hex blob of the right length
+	// base64-decodes "successfully" into bytes that often contain a '['.
+	if isHexString(text) {
+		if xmlContent, err := lyricpkg.DecodeQRCXML(text); err == nil && strings.TrimSpace(xmlContent) != "" {
+			return qrcXMLToLRC(xmlContent)
 		}
 	}
-	if tok, err := lyricpkg.DecodeQRC(text); err == nil && tok != "" {
-		return lyricpkg.Convert(lyricpkg.Payload{RawQRC: tok}, "lrc", lyricpkg.Options{})
+	decoded := decodeBase64Text(text)
+	if strings.Contains(decoded, "<Lyric_") {
+		return qrcXMLToLRC(decoded)
 	}
-	return decodeBase64Text(text)
+	return decoded
+}
+
+// qrcXMLToLRC flattens a decrypted QRC document to LRC. Text that is not a QRC
+// document (a decrypted blob that was plain LRC all along) is returned as-is.
+func qrcXMLToLRC(xmlContent string) string {
+	if tok := lyricpkg.ExtractQRCLyricContent(xmlContent); tok != "" {
+		// LyricContent may already contain line-timed LRC, particularly for
+		// translations. Lyric accepts both LRC and a detected token track.
+		return lyricpkg.Convert(lyricpkg.Payload{Lyric: tok}, "lrc", lyricpkg.Options{})
+	}
+	return xmlContent
+}
+
+func isHexString(s string) bool {
+	if len(s) == 0 || len(s)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) GetSongFileInfo(ctx context.Context, songMid string) (*qqFileInfo, error) {

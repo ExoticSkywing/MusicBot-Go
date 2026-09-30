@@ -20,73 +20,28 @@ func xmlEscape(s string) string {
 func lrcToTTML(lrc, tlyric string, p Payload, roma string, inlineTracks, romaFirst bool) string {
 	entries := parseLRCEntries(lrc)
 	if len(entries) == 0 {
-		return buildTTMLDocument(nil, 0, 0, p, "")
+		return buildTTMLDocument(nil, 0, 0, p, "", "Line")
 	}
-	translationMap := parseTranslationMap(tlyric)
-	translationEntries := parseTranslationEntries(tlyric)
-	romaMap := parseTranslationMap(roma)
-	romaEntries := parseTranslationEntries(roma)
-	translationsByKey := map[string]string{}
-	romasByKey := map[string]string{}
-	var orderedKeys []string
+	starts, texts := lrcEntryStarts(entries)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
+	sides := newTTMLSideTracks(romaFirst)
 
 	var lines []string
+	duration := 0.0
 	for i, e := range entries {
-		start := e.Time
-		var end float64
-		if i+1 < len(entries) {
-			end = entries[i+1].Time
-		} else {
-			end = start + 3.0
-		}
-		text := xmlEscape(e.Text)
-		translation := strings.TrimSpace(translationMap[e.Tag])
-		if (translation == "" || translation == "//") && !isCreditLikeLine(e.Text) {
-			translation = findNearestTranslationText(translationEntries, start, 0.5)
-		}
 		lineKey := "L" + itoa(i+1)
-		romaLine := strings.TrimSpace(romaMap[e.Tag])
-		if (romaLine == "" || romaLine == "//") && !isCreditLikeLine(e.Text) {
-			romaLine = findNearestTranslationText(romaEntries, start, 0.5)
-		}
-
-		line := "<p begin=\"" + secondsToTTMLTime(start) + "\" end=\"" + secondsToTTMLTime(end) + "\" itunes:key=\"" + lineKey + "\" ttm:agent=\"v1\">" + text
-		if translation != "" && translation != "//" {
-			if _, seen := translationsByKey[lineKey]; !seen {
-				orderedKeys = appendKey(orderedKeys, lineKey, translationsByKey, romasByKey)
-			}
-			translationsByKey[lineKey] = strings.TrimSpace(translation)
-		}
-		if romaLine != "" && romaLine != "//" {
-			if _, seen := romasByKey[lineKey]; !seen {
-				orderedKeys = appendKey(orderedKeys, lineKey, translationsByKey, romasByKey)
-			}
-			romasByKey[lineKey] = strings.TrimSpace(romaLine)
-		}
-
-		if inlineTracks {
-			translationSpan := ""
-			if translation != "" && translation != "//" {
-				translationSpan = "<span ttm:role=\"x-translation\" xml:lang=\"zh-Hans\">" + xmlEscape(translation) + "</span>"
-			}
-			romaSpan := ""
-			if romaLine != "" && romaLine != "//" {
-				romaSpan = "<span ttm:role=\"x-roman\" xml:lang=\"ja-Latn\">" + xmlEscape(romaLine) + "</span>"
-			}
-			for _, extra := range buildOrderedOutputLines(translationSpan, romaSpan, romaFirst) {
-				line += extra
-			}
-		}
+		line := "<p begin=\"" + secondsToTTMLTime(e.Time) + "\" end=\"" + secondsToTTMLTime(e.End) + "\" itunes:key=\"" + lineKey + "\" ttm:agent=\"v1\">" + xmlEscape(e.Text)
+		line += sides.add(lineKey, translations[i], romas[i], inlineTracks)
 		line += "</p>"
 		lines = append(lines, "      "+line)
+		duration = maxFloat(duration, e.End)
 	}
-	firstBegin := entries[0].Time
-	duration := entries[len(entries)-1].Time + 3.0
 	itunesMetadata := ""
 	if !inlineTracks {
-		itunesMetadata = buildITunesMetadataLocalizations(orderedKeys, translationsByKey, romasByKey, romaFirst)
+		itunesMetadata = sides.metadata()
 	}
-	return buildTTMLDocument(lines, duration, firstBegin, p, itunesMetadata)
+	return buildTTMLDocument(lines, duration, entries[0].Time, p, itunesMetadata, "Line")
 }
 
 // tokenToTTML renders token lines to word-timed TTML. Mirrors tokenToTtml,
@@ -96,65 +51,54 @@ func tokenToTTML(token, tlyric string, p Payload, roma string, inlineTracks, rom
 	if len(lines) == 0 {
 		return lrcToTTML(tokenToLRC(token), tlyric, p, roma, inlineTracks, romaFirst)
 	}
-	translationMap := parseTranslationMap(tlyric)
-	translationEntries := parseTranslationEntries(tlyric)
-	romaMap := parseTranslationMap(roma)
-	romaEntries := parseTranslationEntries(roma)
-	translationsByKey := map[string]string{}
-	romasByKey := map[string]string{}
-	var orderedKeys []string
+	starts, texts := tokenLineStarts(lines)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
+	sides := newTTMLSideTracks(romaFirst)
 	skip := map[int]bool{}
 
 	var pLines []string
+	durationMs := 0
 	for idx := 0; idx < len(lines); idx++ {
 		if skip[idx] {
 			continue
 		}
 		line := lines[idx]
+		lineStartMs := starts[idx]
+		lineEndMs := resolveLineEnd(lines, idx)
+
 		var spans []string
 		var bgInner []string
 		bgStartMs, bgEndMs := -1, -1
-
 		flushBg := func() {
 			if len(bgInner) == 0 {
 				return
 			}
 			start := bgStartMs
 			if start < 0 {
-				start = line.Start
+				start = lineStartMs
 			}
-			end := bgEndMs
-			if end < 0 {
-				end = line.End
-			}
-			if end < start {
-				end = start
-			}
-			spans = append(spans, "<span ttm:role=\"x-bg\" begin=\""+secondsToTTMLTime(float64(start)/1000.0)+"\" end=\""+secondsToTTMLTime(float64(end)/1000.0)+"\">"+strings.Join(bgInner, "")+"</span>")
+			end := max(bgEndMs, start)
+			spans = append(spans, "<span ttm:role=\"x-bg\" begin=\""+ttmlMs(start)+"\" end=\""+ttmlMs(end)+"\">"+strings.Join(bgInner, "")+"</span>")
 			bgInner = nil
 			bgStartMs, bgEndMs = -1, -1
 		}
 
+		// A parenthesised run -- "(oh", "my", "god)" -- is one background
+		// phrase, so the state carries across tokens until the closing paren.
+		inBg := false
 		for _, tk := range line.Tokens {
-			txt := xmlEscape(tk.Text)
-			startMs := tk.Start
-			endMs := tk.End
-			isBg := isBackgroundTokenText(tk.Text)
-
-			tokenSpan := ""
-			if endMs <= startMs || startMs < 0 || endMs <= 0 {
-				tokenSpan = txt
-			} else {
-				tokenSpan = "<span begin=\"" + secondsToTTMLTime(float64(startMs)/1000.0) + "\" end=\"" + secondsToTTMLTime(float64(endMs)/1000.0) + "\">" + txt + "</span>"
-			}
-
+			trimmed := strings.TrimSpace(tk.Text)
+			isBg := inBg || bgOpenRe.MatchString(trimmed)
+			inBg = isBg && !bgCloseRe.MatchString(trimmed)
+			tokenSpan := ttmlWordSpan(tk)
 			if isBg {
 				bgInner = append(bgInner, tokenSpan)
-				if startMs > 0 && (bgStartMs < 0 || startMs < bgStartMs) {
-					bgStartMs = startMs
+				if tk.Start >= 0 && (bgStartMs < 0 || tk.Start < bgStartMs) {
+					bgStartMs = tk.Start
 				}
-				if endMs > 0 && (bgEndMs < 0 || endMs > bgEndMs) {
-					bgEndMs = endMs
+				if tk.End > 0 && tk.End > bgEndMs {
+					bgEndMs = tk.End
 				}
 				continue
 			}
@@ -163,112 +107,109 @@ func tokenToTTML(token, tlyric string, p Payload, roma string, inlineTracks, rom
 		}
 		flushBg()
 
-		lineStartMs := resolveLineStartFromTokens(line)
-		lineEndMs := resolveLineEndFromNext(lines, idx)
 		lineKey := "L" + itoa(idx+1)
 		mainContent := strings.Join(spans, "")
 		if mainContent == "" {
 			mainContent = "<span>" + xmlEscape(line.Text) + "</span>"
 		}
-		base := "<p begin=\"" + secondsToTTMLTime(float64(lineStartMs)/1000.0) + "\" end=\"" + secondsToTTMLTime(float64(lineEndMs)/1000.0) + "\" itunes:key=\"" + lineKey + "\" ttm:agent=\"v1\">" + mainContent
-
-		tag := formatLRCTagFromMs(lineStartMs, 2)
-		translation := strings.TrimSpace(translationMap[tag])
-		if (translation == "" || translation == "//") && !isCreditLikeLine(line.Text) {
-			translation = findNearestTranslationText(translationEntries, float64(lineStartMs)/1000.0, 0.5)
-		}
-		if translation != "" && translation != "//" {
-			if _, seen := translationsByKey[lineKey]; !seen {
-				orderedKeys = appendKey(orderedKeys, lineKey, translationsByKey, romasByKey)
-			}
-			translationsByKey[lineKey] = strings.TrimSpace(translation)
-		}
-		romaLine := strings.TrimSpace(romaMap[tag])
-		if (romaLine == "" || romaLine == "//") && !isCreditLikeLine(line.Text) {
-			romaLine = findNearestTranslationText(romaEntries, float64(lineStartMs)/1000.0, 0.5)
-		}
-		if romaLine != "" && romaLine != "//" {
-			if _, seen := romasByKey[lineKey]; !seen {
-				orderedKeys = appendKey(orderedKeys, lineKey, translationsByKey, romasByKey)
-			}
-			romasByKey[lineKey] = strings.TrimSpace(romaLine)
-		}
-
-		if inlineTracks {
-			translationSpan := ""
-			if translation != "" && translation != "//" {
-				translationSpan = "<span ttm:role=\"x-translation\" xml:lang=\"zh-Hans\">" + xmlEscape(strings.TrimSpace(translation)) + "</span>"
-			}
-			romaSpan := ""
-			if romaLine != "" && romaLine != "//" {
-				romaSpan = "<span ttm:role=\"x-roman\" xml:lang=\"ja-Latn\">" + xmlEscape(strings.TrimSpace(romaLine)) + "</span>"
-			}
-			for _, extra := range buildOrderedOutputLines(translationSpan, romaSpan, romaFirst) {
-				base += extra
-			}
-		}
+		mainContent += sides.add(lineKey, translations[idx], romas[idx], inlineTracks)
 
 		// Fold a short overlapping echo line into x-bg.
-		if idx+1 < len(lines) && !skip[idx+1] {
+		if idx+1 < len(lines) && translations[idx+1] == "" && romas[idx+1] == "" && shouldAttachAsBackgroundLine(line, lines[idx+1]) {
 			nextLine := lines[idx+1]
-			if shouldAttachAsBackgroundLine(line, nextLine) {
-				var inner []string
-				for _, ntk := range nextLine.Tokens {
-					ntxt := xmlEscape(ntk.Text)
-					ns := ntk.Start
-					ne := ntk.End
-					if ne <= ns || ns <= 0 || ne <= 0 {
-						inner = append(inner, ntxt)
-					} else {
-						inner = append(inner, "<span begin=\""+secondsToTTMLTime(float64(ns)/1000.0)+"\" end=\""+secondsToTTMLTime(float64(ne)/1000.0)+"\">"+ntxt+"</span>")
-					}
-				}
-				if len(inner) > 0 {
-					bgStart := nextLine.Start
-					bgEnd := nextLine.End
-					if bgEnd < bgStart {
-						bgEnd = bgStart
-					}
-					base += "<span ttm:role=\"x-bg\" begin=\"" + secondsToTTMLTime(float64(bgStart)/1000.0) + "\" end=\"" + secondsToTTMLTime(float64(bgEnd)/1000.0) + "\">" + strings.Join(inner, "") + "</span>"
-					skip[idx+1] = true
-				}
+			var inner []string
+			for _, ntk := range nextLine.Tokens {
+				inner = append(inner, ttmlWordSpan(ntk))
+			}
+			if len(inner) > 0 {
+				bgStart := nextLine.Start
+				bgEnd := max(resolveLineEnd(lines, idx+1), bgStart)
+				mainContent += "<span ttm:role=\"x-bg\" begin=\"" + ttmlMs(bgStart) + "\" end=\"" + ttmlMs(bgEnd) + "\">" + strings.Join(inner, "") + "</span>"
+				lineEndMs = max(lineEndMs, bgEnd)
+				skip[idx+1] = true
 			}
 		}
 
-		base += "</p>"
-		pLines = append(pLines, "      "+base)
+		pLines = append(pLines, "      <p begin=\""+ttmlMs(lineStartMs)+"\" end=\""+ttmlMs(lineEndMs)+"\" itunes:key=\""+lineKey+"\" ttm:agent=\"v1\">"+mainContent+"</p>")
+		durationMs = max(durationMs, lineEndMs)
 	}
 
-	firstBegin := float64(lines[0].Start) / 1000.0
-	duration := float64(lines[len(lines)-1].End) / 1000.0
 	itunesMetadata := ""
 	if !inlineTracks {
-		itunesMetadata = buildITunesMetadataLocalizations(orderedKeys, translationsByKey, romasByKey, romaFirst)
+		itunesMetadata = sides.metadata()
 	}
-	return buildTTMLDocument(pLines, duration, firstBegin, p, itunesMetadata)
+	firstStart := starts[0]
+	for _, start := range starts {
+		firstStart = min(firstStart, start)
+	}
+	return buildTTMLDocument(pLines, float64(durationMs)/1000.0, float64(firstStart)/1000.0, p, itunesMetadata, "Word")
 }
 
-// appendKey records first-seen key order across both side-track maps.
-func appendKey(keys []string, key string, m1, m2 map[string]string) []string {
-	if _, ok := m1[key]; ok {
-		return keys
+func ttmlMs(ms int) string { return secondsToTTMLTime(float64(ms) / 1000.0) }
+
+// ttmlWordSpan renders one timed word. Leading/trailing whitespace goes outside
+// the span, as Apple Music writes it ("<span>Hello</span> <span>world</span>"):
+// the inter-word space is then a text node every TTML reader keeps, rather than
+// span content some readers trim.
+func ttmlWordSpan(tk tokenWord) string {
+	core := strings.TrimSpace(tk.Text)
+	if core == "" {
+		return xmlEscape(tk.Text)
 	}
-	if _, ok := m2[key]; ok {
-		return keys
+	lead := tk.Text[:strings.Index(tk.Text, core)]
+	trail := tk.Text[len(lead)+len(core):]
+	if tk.End <= tk.Start || tk.Start < 0 {
+		return xmlEscape(tk.Text)
 	}
-	return append(keys, key)
+	return lead + "<span begin=\"" + ttmlMs(tk.Start) + "\" end=\"" + ttmlMs(tk.End) + "\">" + xmlEscape(core) + "</span>" + trail
+}
+
+// ttmlSideTracks collects per-line translation/roma text, either inlined as
+// x-translation/x-roman spans or gathered for the iTunesMetadata head block.
+type ttmlSideTracks struct {
+	romaFirst    bool
+	keys         []string
+	translations map[string]string
+	romas        map[string]string
+}
+
+func newTTMLSideTracks(romaFirst bool) *ttmlSideTracks {
+	return &ttmlSideTracks{romaFirst: romaFirst, translations: map[string]string{}, romas: map[string]string{}}
+}
+
+// add records a line's side texts and returns the inline spans to append to
+// its <p> (empty unless inline).
+func (s *ttmlSideTracks) add(lineKey, translation, romaji string, inline bool) string {
+	if translation == "" && romaji == "" {
+		return ""
+	}
+	s.keys = append(s.keys, lineKey)
+	if translation != "" {
+		s.translations[lineKey] = translation
+	}
+	if romaji != "" {
+		s.romas[lineKey] = romaji
+	}
+	if !inline {
+		return ""
+	}
+	translationSpan := ""
+	if translation != "" {
+		translationSpan = "<span ttm:role=\"x-translation\" xml:lang=\"zh-Hans\">" + xmlEscape(translation) + "</span>"
+	}
+	romaSpan := ""
+	if romaji != "" {
+		romaSpan = "<span ttm:role=\"x-roman\" xml:lang=\"ja-Latn\">" + xmlEscape(romaji) + "</span>"
+	}
+	return strings.Join(buildOrderedOutputLines(translationSpan, romaSpan, s.romaFirst), "")
+}
+
+func (s *ttmlSideTracks) metadata() string {
+	return buildITunesMetadataLocalizations(s.keys, s.translations, s.romas, s.romaFirst)
 }
 
 var bgOpenRe = regexp.MustCompile(`^[（(]`)
 var bgCloseRe = regexp.MustCompile(`[)）]$`)
-
-func isBackgroundTokenText(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return false
-	}
-	return bgOpenRe.MatchString(text) || bgCloseRe.MatchString(text)
-}
 
 var comparablePunctRe = regexp.MustCompile(`[\s\p{P}\p{S}]+`)
 
@@ -286,7 +227,7 @@ func shouldAttachAsBackgroundLine(mainLine, nextLine tokenLine) bool {
 	if nextStart <= 0 || nextEnd <= nextStart || mainEnd <= mainStart {
 		return false
 	}
-	if nextStart >= mainEnd {
+	if nextStart < mainStart || nextStart >= mainEnd {
 		return false
 	}
 	if nextEnd-nextStart > 1400 {
@@ -306,12 +247,11 @@ func shouldAttachAsBackgroundLine(mainLine, nextLine tokenLine) bool {
 	return strings.HasSuffix(mainText, nextText)
 }
 
-func buildTTMLDocument(pLines []string, durationSeconds, divBeginSeconds float64, p Payload, itunesMetadata string) string {
+// buildTTMLDocument wraps rendered <p> lines in the TTML envelope. timing is
+// the itunes:timing value: "Word" for word-timed lines, "Line" for line-timed.
+func buildTTMLDocument(pLines []string, durationSeconds, divBeginSeconds float64, p Payload, itunesMetadata, timing string) string {
 	ncmMusicID := p.NcmMusicID
 	qqMusicID := p.QqMusicID
-	if p.Source == "netease" && ncmMusicID == "" {
-		ncmMusicID = ""
-	}
 
 	meta := []string{"      <ttm:agent type=\"person\" xml:id=\"v1\"/>"}
 	if itunesMetadata != "" {
@@ -331,7 +271,7 @@ func buildTTMLDocument(pLines []string, durationSeconds, divBeginSeconds float64
 
 	dur := secondsToTTMLTime(maxFloat(0, durationSeconds))
 	divBegin := secondsToTTMLTime(maxFloat(0, divBeginSeconds))
-	return "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:amll=\"http://www.example.com/ns/amll\" xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\" xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\" itunes:timing=\"Word\">\n" +
+	return "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:amll=\"http://www.example.com/ns/amll\" xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\" xmlns:ttm=\"http://www.w3.org/ns/ttml#metadata\" itunes:timing=\"" + timing + "\">\n" +
 		"  <head>\n" +
 		"    <metadata>\n" +
 		strings.Join(meta, "\n") +
@@ -388,7 +328,11 @@ func buildITunesMetadataLocalizations(orderedKeys []string, translationsByKey, r
 }
 
 var xmlDeclRe = regexp.MustCompile(`(?s)^\s*<\?xml[^>]*\?>\s*`)
-var xmlGapRe = regexp.MustCompile(`(?s)>\s+<`)
+
+// xmlGapRe matches the indentation between tags: whitespace that contains a
+// line break. A plain space between two word spans is an inter-word space and
+// must survive compaction.
+var xmlGapRe = regexp.MustCompile(`>[ \t]*[\r\n]\s*<`)
 
 func compactTTMLForAmjson(ttml string) string {
 	ttml = xmlDeclRe.ReplaceAllString(ttml, "")

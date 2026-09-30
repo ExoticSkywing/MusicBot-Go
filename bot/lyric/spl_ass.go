@@ -1,9 +1,6 @@
 package lyric
 
-import (
-	"regexp"
-	"strings"
-)
+import "strings"
 
 // --- SPL (Salt Player Lyrics) ---
 
@@ -14,33 +11,20 @@ func lrcToSpl(lrc, tlyric, roma string, romaFirst bool) string {
 	if len(entries) == 0 {
 		return ""
 	}
-	translationMap := parseTranslationMap(tlyric)
-	romaMap := parseTranslationMap(roma)
+	starts, texts := lrcEntryStarts(entries)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
 	adjacentMap := parseAdjacentTranslationMap(lrc)
-	romaEntries := parseTranslationEntries(roma)
 
 	var out []string
-	for _, e := range entries {
-		out = append(out, formatSplLineModeTag(e.Time)+e.Text)
-
-		translation := strings.TrimSpace(translationMap[e.Tag])
-		if (translation == "" || translation == "//") && !isCreditLikeLine(e.Text) {
-			translation = strings.TrimSpace(adjacentMap[e.Tag])
+	for i, e := range entries {
+		tag := formatSplLineModeTag(e.Time)
+		out = append(out, tag+e.Text+formatSplLineModeTag(e.End))
+		translation := translations[i]
+		if translation == "" && !isCreditLikeLine(e.Text) {
+			translation = adjacentMap[e.Tag]
 		}
-		romaLine := strings.TrimSpace(romaMap[e.Tag])
-		if (romaLine == "" || romaLine == "//") && !isCreditLikeLine(e.Text) {
-			romaLine = findNearestTranslationText(romaEntries, e.Time, 0.5)
-		}
-
-		translationLine := ""
-		if translation != "" && translation != "//" {
-			translationLine = formatSplLineModeTag(e.Time) + translation
-		}
-		romaOutputLine := ""
-		if romaLine != "" && romaLine != "//" && romaLine != translation {
-			romaOutputLine = formatSplLineModeTag(e.Time) + romaLine
-		}
-		out = append(out, buildOrderedOutputLines(translationLine, romaOutputLine, romaFirst)...)
+		out = append(out, splSideLines(tag, translation, romas[i], romaFirst)...)
 	}
 	return strings.Join(out, "\n")
 }
@@ -52,52 +36,62 @@ func tokenToSpl(token, tlyric, roma string, romaFirst bool) string {
 	if len(lines) == 0 {
 		return lrcToSpl(tokenToLRC(token), tlyric, roma, romaFirst)
 	}
-	translationMap := parseTranslationMap(tlyric)
-	translationEntries := parseTranslationEntries(tlyric)
-	romaMap := parseTranslationMap(roma)
-	romaEntries := parseTranslationEntries(roma)
+	starts, texts := tokenLineStarts(lines)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
 
 	var out []string
-	for _, line := range lines {
-		lineText := formatSplTimestamp(line.Start, false)
-		lastEnd := -1
-		for _, tk := range line.Tokens {
-			if lastEnd < 0 || tk.Start != lastEnd {
-				lineText += formatSplTimestamp(tk.Start, true)
-			}
-			lineText += tk.Text
-			lineText += formatSplTimestamp(tk.End, true)
-			lastEnd = tk.End
-		}
-		if line.End > 0 && (lastEnd < 0 || line.End > lastEnd) {
-			lineText += formatSplTimestamp(line.End, false)
-		}
-		out = append(out, lineText)
-
-		tag := formatLRCTagFromMs(line.Start, 2)
-		translation := strings.TrimSpace(translationMap[tag])
-		if (translation == "" || translation == "//") && !isCreditLikeLine(line.Text) {
-			translation = findNearestTranslationText(translationEntries, float64(line.Start)/1000.0, 0.5)
-		}
-		romaLine := strings.TrimSpace(romaMap[tag])
-		if (romaLine == "" || romaLine == "//") && !isCreditLikeLine(line.Text) {
-			romaLine = findNearestTranslationText(romaEntries, float64(line.Start)/1000.0, 0.5)
-		}
-
-		translationLine := ""
-		if translation != "" && translation != "//" {
-			translationLine = formatSplTimestamp(line.Start, false) + translation
-		}
-		romaOutputLine := ""
-		if romaLine != "" && romaLine != "//" && romaLine != translation {
-			romaOutputLine = formatSplTimestamp(line.Start, false) + romaLine
-		}
-		out = append(out, buildOrderedOutputLines(translationLine, romaOutputLine, romaFirst)...)
+	for i, line := range lines {
+		tag := formatSplTimestamp(starts[i], false)
+		out = append(out, tag+splWordLine(line, starts[i], resolveLineEnd(lines, i)))
+		out = append(out, splSideLines(tag, translations[i], romas[i], romaFirst)...)
 	}
 	return strings.Join(out, "\n")
 }
 
-var adjTagPrefixRe = regexp.MustCompile(`^\[([0-9]{1,2}):([0-9]{1,2})(?:[.:]([0-9]{1,3}))?\]`)
+// splWordLine renders the body of a word-timed SPL line (everything after the
+// leading line tag). The line tag doubles as the first word's start, so a word
+// tag is written only where the timeline would otherwise be ambiguous: at a
+// word whose start differs from where the previous word ended (a gap), and at
+// each word's end. The line closes with a "[mm:ss.cc]" end tag.
+//
+// Comparisons are made on the rendered centisecond value: two timestamps that
+// round to the same tag must not produce a zero-length "<t><t>" pair.
+func splWordLine(line tokenLine, startMs, endMs int) string {
+	if len(line.Tokens) == 0 {
+		return line.Text
+	}
+	var sb strings.Builder
+	cursor := msToRoundedCentis(startMs)
+	lastEnd := cursor
+	for i, tk := range line.Tokens {
+		if s := msToRoundedCentis(tk.Start); s != cursor {
+			sb.WriteString(formatSplTimestamp(tk.Start, true))
+		}
+		sb.WriteString(tk.Text)
+		cursor = msToRoundedCentis(tk.End)
+		lastEnd = cursor
+		isFinalBoundary := i == len(line.Tokens)-1 && msToRoundedCentis(endMs) <= cursor
+		sb.WriteString(formatSplTimestamp(tk.End, !isFinalBoundary))
+	}
+	body := sb.String()
+	if end := msToRoundedCentis(endMs); end > lastEnd {
+		body += formatSplTimestamp(endMs, false)
+	}
+	return body
+}
+
+func splSideLines(tag, translation, romaji string, romaFirst bool) []string {
+	translationLine := ""
+	if translation != "" {
+		translationLine = tag + translation
+	}
+	romaLine := ""
+	if romaji != "" && romaji != translation {
+		romaLine = tag + romaji
+	}
+	return buildOrderedOutputLines(translationLine, romaLine, romaFirst)
+}
 
 // parseAdjacentTranslationMap maps a line's tag to the following untimed line,
 // used as a translation fallback. Mirrors parseAdjacentTranslationMapFromLyric.
@@ -105,19 +99,10 @@ func parseAdjacentTranslationMap(lrc string) map[string]string {
 	m := map[string]string{}
 	rows := splitLines(lrc)
 	for i := 0; i < len(rows); i++ {
-		current := strings.TrimSpace(rows[i])
-		if current == "" {
+		times, _, ok := parseLRCRow(rows[i])
+		if !ok {
 			continue
 		}
-		hm := adjTagPrefixRe.FindStringSubmatch(current)
-		if hm == nil {
-			continue
-		}
-		min := mustAtoi(hm[1])
-		sec := mustAtoi(hm[2])
-		ms := parseLRCFractionToMs(hm[3])
-		tag := formatLRCTagFromParts(min, sec, ms)
-
 		j := i + 1
 		for j < len(rows) && strings.TrimSpace(rows[j]) == "" {
 			j++
@@ -126,13 +111,12 @@ func parseAdjacentTranslationMap(lrc string) map[string]string {
 			continue
 		}
 		next := strings.TrimSpace(rows[j])
-		if next == "" {
+		if _, _, timed := parseLRCRow(next); timed || lrcHeaderTagRe.MatchString(next) {
 			continue
 		}
-		if adjTagPrefixRe.MatchString(next) {
-			continue
+		for _, ms := range times {
+			m[formatLRCTagFromMs(ms, 2)] = next
 		}
-		m[tag] = next
 	}
 	return m
 }
@@ -144,36 +128,16 @@ func lrcToAss(lrc, tlyric, roma string, romaFirst bool) string {
 	if len(entries) == 0 {
 		return ""
 	}
-	translationMap := parseTranslationMap(tlyric)
-	romaMap := parseTranslationMap(roma)
-	romaEntries := parseTranslationEntries(roma)
+	starts, texts := lrcEntryStarts(entries)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
 
 	var dialogues []string
 	for i, e := range entries {
 		start := e.Time
-		var end float64
-		if i+1 < len(entries) {
-			end = maxFloat(start+0.3, entries[i+1].Time-0.01)
-		} else {
-			end = start + 3.0
-		}
-		dialogues = append(dialogues, "Dialogue: 0,"+secondsToASSTime(start)+","+secondsToASSTime(end)+",Default,v1,0,0,0,,"+escapeAssText(e.Text))
-
-		translation := strings.TrimSpace(translationMap[e.Tag])
-		romaji := strings.TrimSpace(romaMap[e.Tag])
-		if romaji == "" || romaji == "//" {
-			romaji = findNearestTranslationText(romaEntries, start, 0.5)
-		}
-
-		translationDialogue := ""
-		if translation != "" && translation != "//" {
-			translationDialogue = "Dialogue: 0," + secondsToASSTime(start) + "," + secondsToASSTime(end) + ",ts,x-lang:zh-Hans,0,0,0,," + escapeAssText(translation)
-		}
-		romaDialogue := ""
-		if romaji != "" && romaji != "//" {
-			romaDialogue = "Dialogue: 0," + secondsToASSTime(start) + "," + secondsToASSTime(end) + ",roma,x-lang:ja-Latn,0,0,0,," + escapeAssText(romaji)
-		}
-		dialogues = append(dialogues, buildOrderedOutputLines(translationDialogue, romaDialogue, romaFirst)...)
+		end := e.End
+		dialogues = append(dialogues, assDialogue(start, end, "Default", "v1", escapeAssText(e.Text)))
+		dialogues = append(dialogues, assSideDialogues(start, end, translations[i], romas[i], romaFirst)...)
 	}
 	return buildAssDocument(dialogues)
 }
@@ -183,141 +147,68 @@ func tokenToAss(token, tlyric, roma string, romaFirst bool) string {
 	if len(lines) == 0 {
 		return lrcToAss(tokenToLRC(token), tlyric, roma, romaFirst)
 	}
-	translationMap := parseTranslationMap(tlyric)
-	translationEntries := parseTranslationEntries(tlyric)
-	romaMap := parseTranslationMap(roma)
-	romaEntries := parseTranslationEntries(roma)
+	starts, texts := tokenLineStarts(lines)
+	translations := alignSideTrack(tlyric, starts, texts)
+	romas := alignSideTrack(roma, starts, texts)
 
 	var dialogues []string
 	for i, line := range lines {
-		startMs := resolveLineStartFromTokens(line)
-		endMs := resolveLineEndFromNext(lines, i)
-		if endMs <= startMs {
-			endMs = startMs + 3000
-		}
-		karaoke := buildAssKaraokeFromTokens(line.Tokens, line.Text)
-		dialogues = append(dialogues, "Dialogue: 0,"+secondsToASSTime(float64(startMs)/1000.0)+","+secondsToASSTime(float64(endMs)/1000.0)+",Default,v1,0,0,0,,"+karaoke)
-
-		tag := formatLRCTagFromMs(startMs, 2)
-		translation := strings.TrimSpace(translationMap[tag])
-		if translation == "" || translation == "//" {
-			translation = findNearestTranslationText(translationEntries, float64(startMs)/1000.0, 0.5)
-		}
-		romaji := strings.TrimSpace(romaMap[tag])
-		if romaji == "" || romaji == "//" {
-			romaji = findNearestTranslationText(romaEntries, float64(startMs)/1000.0, 0.5)
-		}
-
-		translationDialogue := ""
-		if translation != "" && translation != "//" {
-			translationDialogue = "Dialogue: 0," + secondsToASSTime(float64(startMs)/1000.0) + "," + secondsToASSTime(float64(endMs)/1000.0) + ",ts,x-lang:zh-Hans,0,0,0,," + escapeAssText(translation)
-		}
-		romaDialogue := ""
-		if romaji != "" && romaji != "//" {
-			romaKaraoke := buildAssKaraokeFromRomaLine(romaji, startMs, endMs)
-			romaDialogue = "Dialogue: 0," + secondsToASSTime(float64(startMs)/1000.0) + "," + secondsToASSTime(float64(endMs)/1000.0) + ",roma,x-lang:ja-Latn,0,0,0,," + romaKaraoke
-		}
-		dialogues = append(dialogues, buildOrderedOutputLines(translationDialogue, romaDialogue, romaFirst)...)
+		startMs := starts[i]
+		endMs := resolveLineEnd(lines, i)
+		start := float64(startMs) / 1000.0
+		end := float64(endMs) / 1000.0
+		karaoke := buildAssKaraokeFromTokens(line.Tokens, line.Text, startMs)
+		dialogues = append(dialogues, assDialogue(start, end, "Default", "v1", karaoke))
+		dialogues = append(dialogues, assSideDialogues(start, end, translations[i], romas[i], romaFirst)...)
 	}
 	return buildAssDocument(dialogues)
 }
 
-func buildAssKaraokeFromTokens(tokens []tokenWord, fallbackText string) string {
+func assDialogue(start, end float64, style, name, text string) string {
+	return "Dialogue: 0," + secondsToASSTime(start) + "," + secondsToASSTime(end) + "," + style + "," + name + ",0,0,0,," + text
+}
+
+// assSideDialogues renders the translation/roma dialogues shown alongside a line.
+func assSideDialogues(start, end float64, translation, romaji string, romaFirst bool) []string {
+	translationDialogue := ""
+	if translation != "" {
+		translationDialogue = assDialogue(start, end, "ts", "x-lang:zh-Hans", escapeAssText(translation))
+	}
+	romaDialogue := ""
+	if romaji != "" && romaji != translation {
+		romaDialogue = assDialogue(start, end, "roma", "x-lang:ja-Latn", escapeAssText(romaji))
+	}
+	return buildOrderedOutputLines(translationDialogue, romaDialogue, romaFirst)
+}
+
+// buildAssKaraokeFromTokens renders word timing as "{\kNN}" karaoke tags, NN in
+// centiseconds counted from the dialogue start. Gaps between words become empty
+// "{\kNN}" blocks so later words do not highlight early, and every boundary is
+// rounded against the line start rather than per word, so rounding error does
+// not accumulate across a long line.
+func buildAssKaraokeFromTokens(tokens []tokenWord, fallbackText string, lineStartMs int) string {
 	if len(tokens) == 0 {
 		return escapeAssText(fallbackText)
 	}
+	pos := func(ms int) int { return roundDiv(max0(ms-lineStartMs), 10) }
 	var sb strings.Builder
+	cursor := lineStartMs
 	for _, tk := range tokens {
 		if tk.Text == "" {
 			continue
 		}
-		durCs := roundDiv(max0(tk.End-tk.Start), 10)
-		if durCs <= 0 {
-			durCs = 1
+		s := max(tk.Start, cursor)
+		e := max(tk.End, s)
+		if gap := pos(s) - pos(cursor); gap > 0 {
+			sb.WriteString("{\\k" + itoa(gap) + "}")
 		}
-		sb.WriteString("{\\k" + itoa(durCs) + "}" + escapeAssText(tk.Text))
+		sb.WriteString("{\\k" + itoa(pos(e)-pos(s)) + "}" + escapeAssText(tk.Text))
+		cursor = e
 	}
 	if sb.Len() == 0 {
 		return escapeAssText(fallbackText)
 	}
 	return sb.String()
-}
-
-var romaInlineTagRe = regexp.MustCompile(`\[([0-9]{1,2}):([0-9]{2})(?:[.:]([0-9]{1,3}))?\]`)
-
-func buildAssKaraokeFromRomaLine(romaLine string, lineStartMs, lineEndMs int) string {
-	if romaLine == "" {
-		return ""
-	}
-	locs := romaInlineTagRe.FindAllStringSubmatchIndex(romaLine, -1)
-	if len(locs) == 0 {
-		return escapeAssText(strings.TrimSpace(romaLine))
-	}
-	type seg struct {
-		start, end int
-		text       string
-	}
-	var segments []seg
-	currentStart := lineStartMs
-	prev := 0
-	for _, loc := range locs {
-		segText := romaLine[prev:loc[0]]
-		min := romaLine[loc[2]:loc[3]]
-		sec := romaLine[loc[4]:loc[5]]
-		frac := "0"
-		if loc[6] >= 0 {
-			frac = romaLine[loc[6]:loc[7]]
-		}
-		tsMs := parseInlineTimeTagToMs(min, sec, frac)
-		prev = loc[1]
-		if tsMs <= currentStart {
-			continue
-		}
-		if segText != "" {
-			segments = append(segments, seg{start: currentStart, end: tsMs, text: segText})
-		}
-		currentStart = tsMs
-	}
-	tail := romaLine[prev:]
-	if tail != "" && lineEndMs > currentStart {
-		segments = append(segments, seg{start: currentStart, end: lineEndMs, text: tail})
-	}
-	if len(segments) == 0 {
-		return escapeAssText(strings.TrimSpace(romaInlineTagRe.ReplaceAllString(romaLine, " ")))
-	}
-	var sb strings.Builder
-	for _, s := range segments {
-		if s.text == "" {
-			continue
-		}
-		durCs := roundDiv(max0(s.end-s.start), 10)
-		if durCs <= 0 {
-			durCs = 1
-		}
-		sb.WriteString("{\\k" + itoa(durCs) + "}" + escapeAssText(s.text))
-	}
-	if sb.Len() == 0 {
-		return escapeAssText(strings.TrimSpace(romaLine))
-	}
-	return sb.String()
-}
-
-func parseInlineTimeTagToMs(min, sec, frac string) int {
-	msRaw := frac
-	if msRaw == "" {
-		msRaw = "0"
-	}
-	switch len(msRaw) {
-	case 1:
-		msRaw += "00"
-	case 2:
-		msRaw += "0"
-	}
-	ms := 0
-	if len(msRaw) >= 3 {
-		ms = mustAtoi(msRaw[:3])
-	}
-	return mustAtoi(min)*60000 + mustAtoi(sec)*1000 + ms
 }
 
 func buildAssDocument(dialogues []string) string {
@@ -340,10 +231,14 @@ func buildAssDocument(dialogues []string) string {
 		"\n"
 }
 
+// assTextReplacer escapes lyric text for a Dialogue Text field. Commas need no
+// escaping -- Text is the last field, so renderers split only the first nine --
+// but braces open override blocks and would hide the enclosed lyric, and there
+// is no escape for them that VSFilter honours, so they become full-width.
+var assTextReplacer = strings.NewReplacer("\r", "", "\n", "\\N", "{", "｛", "}", "｝")
+
 func escapeAssText(text string) string {
-	text = strings.ReplaceAll(text, "\r", "")
-	text = strings.ReplaceAll(text, "\n", "\\N")
-	return strings.ReplaceAll(text, ",", "，")
+	return assTextReplacer.Replace(text)
 }
 
 func roundDiv(value, divisor int) int {
