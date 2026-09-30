@@ -1,4 +1,5 @@
 // Source adapted from github.com/guohuiyuan/music-lib at commit 3b22e851f4fa2f55ceab943fa846a71536fed4f9.
+// Format collection and quality ranking adapted from upstream commit 28e1080ba416.
 // Licensed under GNU AGPL v3.0; see the bundled upstream license.
 
 package migu
@@ -356,27 +357,28 @@ type miguRateFormat struct {
 }
 
 type MiguSongItem struct {
-	ID           string           `json:"id"`
-	Name         string           `json:"name"`
-	SongName     string           `json:"songName"`
-	SongID       string           `json:"songId"`
-	Singers      []miguArtistItem `json:"singers"`
-	Artists      []miguArtistItem `json:"artists"`
-	SingerList   []miguArtistItem `json:"singerList"`
-	Albums       []miguAlbumItem  `json:"albums"`
-	AlbumID      string           `json:"albumId"`
-	Album        string           `json:"album"`
-	Singer       string           `json:"singer"`
-	ContentID    string           `json:"contentId"`
-	CopyrightID  string           `json:"copyrightId"`
-	ImgItems     []miguImageItem  `json:"imgItems"`
-	AlbumImgs    []miguImageItem  `json:"albumImgs"`
-	RateFormats  []miguRateFormat `json:"rateFormats"`
-	AudioFormats []miguRateFormat `json:"audioFormats"`
-	Img1         string           `json:"img1"`
-	Img2         string           `json:"img2"`
-	Img3         string           `json:"img3"`
-	Duration     int              `json:"duration"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	SongName       string           `json:"songName"`
+	SongID         string           `json:"songId"`
+	Singers        []miguArtistItem `json:"singers"`
+	Artists        []miguArtistItem `json:"artists"`
+	SingerList     []miguArtistItem `json:"singerList"`
+	Albums         []miguAlbumItem  `json:"albums"`
+	AlbumID        string           `json:"albumId"`
+	Album          string           `json:"album"`
+	Singer         string           `json:"singer"`
+	ContentID      string           `json:"contentId"`
+	CopyrightID    string           `json:"copyrightId"`
+	ImgItems       []miguImageItem  `json:"imgItems"`
+	AlbumImgs      []miguImageItem  `json:"albumImgs"`
+	RateFormats    []miguRateFormat `json:"rateFormats"`
+	NewRateFormats []miguRateFormat `json:"newRateFormats"`
+	AudioFormats   []miguRateFormat `json:"audioFormats"`
+	Img1           string           `json:"img1"`
+	Img2           string           `json:"img2"`
+	Img3           string           `json:"img3"`
+	Duration       int              `json:"duration"`
 }
 
 // fetchSongDetail 通过 contentId 获取歌曲详情
@@ -429,10 +431,7 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		albumID = firstNonEmpty(strings.TrimSpace(item.Albums[0].ID), albumID)
 	}
 
-	rateFormats := item.RateFormats
-	if len(rateFormats) == 0 {
-		rateFormats = item.AudioFormats
-	}
+	rateFormats := collectMiguFormats(item)
 	if len(rateFormats) == 0 {
 		return nil
 	}
@@ -444,7 +443,6 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 	}
 	var candidates []validFormat
 	var duration int64 = int64(item.Duration)
-	var pqSize int64 = 0
 
 	for i, fmtItem := range rateFormats {
 		sizeStr := firstNonZeroString(fmtItem.AndroidSize, fmtItem.ASize, fmtItem.Size, fmtItem.ISize)
@@ -453,10 +451,6 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		ext := firstNonEmpty(fmtItem.AndroidFileType, fmtItem.FileType)
 		if ext == "" {
 			ext = miguFormatExt(fmtItem.FormatType, firstNonEmpty(fmtItem.AFormat, fmtItem.IFormat))
-		}
-
-		if fmtItem.FormatType == "PQ" {
-			pqSize = sizeVal
 		}
 
 		if duration == 0 && sizeVal > 0 {
@@ -481,14 +475,19 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		return nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].size > candidates[j].size })
+	// File size alone can prefer a large compressed rendition over lossless.
+	// Prefer supported plain-audio tones; encrypted 3D audio needs a separate
+	// decryption pipeline and must not outrank an available plain rendition.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := miguFormatRank(rateFormats[candidates[i].index].FormatType)
+		right := miguFormatRank(rateFormats[candidates[j].index].FormatType)
+		if left != right {
+			return left > right
+		}
+		return candidates[i].size > candidates[j].size
+	})
 	bestInfo := candidates[0]
 	bestFormat := rateFormats[bestInfo.index]
-
-	displaySize := bestInfo.size
-	if pqSize > 0 {
-		displaySize = pqSize
-	}
 
 	bitrate := 0
 	if duration > 0 && bestInfo.size > 0 {
@@ -521,13 +520,50 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		Artists:  artists,
 		Album:    albumName,
 		AlbumID:  albumID,
-		Size:     displaySize,
+		Size:     bestInfo.size,
 		Duration: int(duration),
 		Bitrate:  bitrate,
 		Cover:    coverURL,
 		Ext:      bestInfo.ext,
 		Link:     miguSongLink(linkID),
 		Extra:    extra,
+	}
+}
+
+func collectMiguFormats(item MiguSongItem) []miguRateFormat {
+	var formats []miguRateFormat
+	seen := make(map[string]bool)
+	for _, group := range [][]miguRateFormat{item.NewRateFormats, item.RateFormats, item.AudioFormats} {
+		for _, format := range group {
+			format.FormatType = strings.ToUpper(strings.TrimSpace(format.FormatType))
+			format.ResourceType = strings.TrimSpace(format.ResourceType)
+			key := format.FormatType + "|" + format.ResourceType
+			if key == "|" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			formats = append(formats, format)
+		}
+	}
+	return formats
+}
+
+func miguFormatRank(tone string) int {
+	switch normalizeMiguTone(tone) {
+	case "ZQ32":
+		return 80
+	case "ZQ", "ZQ24":
+		return 75
+	case "SQ":
+		return 70
+	case "HQ":
+		return 60
+	case "PQ":
+		return 30
+	case "LQ":
+		return 20
+	default:
+		return 0
 	}
 }
 
@@ -614,6 +650,16 @@ func normalizeMiguImageURL(image string) string {
 func miguFormatExt(formatType, formatCode string) string {
 	formatType = strings.ToUpper(strings.TrimSpace(formatType))
 	formatCode = strings.TrimSpace(formatCode)
+	switch formatType {
+	case "SQ", "ZQ", "ZQ24":
+		return "flac"
+	case "ZQ32", "Z3D", "3D60":
+		return "wav"
+	case "I3D":
+		return "m4a"
+	case "PQ", "HQ", "LQ":
+		return "mp3"
+	}
 	if strings.Contains(formatType, "SQ") || strings.HasPrefix(formatCode, "011") {
 		return "flac"
 	}

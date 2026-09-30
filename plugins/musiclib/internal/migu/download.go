@@ -57,6 +57,9 @@ type miguDownloadCandidate struct {
 
 // GetDownloadURL 获取下载链接
 func (m *Migu) GetDownloadURL(s *model.Song) (string, error) {
+	if s == nil {
+		return "", errors.New("song is nil")
+	}
 	if s.Source != "migu" {
 		return "", errors.New("source mismatch")
 	}
@@ -174,6 +177,9 @@ func miguSongParts(s *model.Song) (contentID, resourceType, formatType string) {
 	parts := strings.Split(s.ID, "|")
 	if len(parts) == 3 {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
+	}
+	if contentID == "" && len(parts) == 1 {
+		contentID = strings.TrimSpace(s.ID)
 	}
 	return contentID, resourceType, formatType
 }
