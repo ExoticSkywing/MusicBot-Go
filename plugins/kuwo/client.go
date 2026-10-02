@@ -31,6 +31,8 @@ const (
 	kuwoSearchURL       = "https://www.kuwo.cn/search/searchMusicBykeyWord"
 	kuwoDetailURL       = "https://www.kuwo.cn/api/www/music/musicInfo"
 	kuwoPlaylistURL     = "https://www.kuwo.cn/api/www/playlist/playListInfo"
+	kuwoBangMenuURL     = "https://www.kuwo.cn/api/www/bang/bang/bangMenu"
+	kuwoBangMusicURL    = "https://www.kuwo.cn/api/www/bang/bang/musicList"
 	kuwoWordLyricURL    = "https://newlyric.kuwo.cn/newlyric.lrc"
 	kuwoMobileLyricURL  = "https://m.kuwo.cn/newh5/singles/songinfoandlrc"
 	kuwoUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -404,6 +406,9 @@ func (c *Client) GetPlaylist(
 	offset, limit int,
 ) (*platform.Playlist, error) {
 	playlistID = strings.TrimSpace(playlistID)
+	if kind, rawID := parseCollectionID(playlistID); kind == "top" {
+		return c.GetToplist(ctx, rawID, offset, limit)
+	}
 	// Album links arrive through the playlist entry point under an "album:"
 	// prefix, since both kinds of collection are bare integers upstream.
 	if kind, rawID := parseCollectionID(playlistID); kind == "album" {
@@ -497,6 +502,101 @@ func (c *Client) GetPlaylist(
 		Tracks:      tracks,
 		URL:         "https://www.kuwo.cn/playlist_detail/" + playlistID,
 	}, nil
+}
+
+// GetToplist resolves Kuwo's rankList links. They use a bangId namespace and
+// are served by a different endpoint from ordinary user playlists.
+func (c *Client) GetToplist(ctx context.Context, bangID string, offset, limit int) (*platform.Playlist, error) {
+	bangID = strings.TrimSpace(bangID)
+	if !isASCIIUnsignedDecimal(bangID, 20) {
+		return nil, platform.NewNotFoundError("kuwo", "toplist", bangID)
+	}
+	if c == nil {
+		return nil, platform.NewUnavailableError("kuwo", "toplist", bangID)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	menuBody, err := c.signedGet(ctx, kuwoBangMenuURL, kuwoHomeURL)
+	if err != nil {
+		return nil, err
+	}
+	var menu struct {
+		Code jsonScalar `json:"code"`
+		Data []struct {
+			List []struct {
+				SourceID jsonScalar `json:"sourceid"`
+				Name     jsonScalar `json:"name"`
+				Intro    jsonScalar `json:"intro"`
+				Pub      jsonScalar `json:"pub"`
+				Pic      jsonScalar `json:"pic"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(menuBody, &menu); err != nil {
+		return nil, fmt.Errorf("kuwo: decode bang menu: %w", err)
+	}
+	var meta struct{ name, intro, pub, pic string }
+	for _, group := range menu.Data {
+		for _, item := range group.List {
+			if scalarText(item.SourceID) == bangID {
+				meta.name = scalarText(item.Name)
+				meta.intro = scalarText(item.Intro)
+				meta.pub = scalarText(item.Pub)
+				meta.pic = normalizeCoverURL(scalarText(item.Pic))
+			}
+		}
+	}
+	if meta.name == "" {
+		return nil, platform.NewNotFoundError("kuwo", "toplist", bangID)
+	}
+	page := offset/limit + 1
+	requestURL, _ := url.Parse(kuwoBangMusicURL)
+	query := requestURL.Query()
+	query.Set("bangId", bangID)
+	query.Set("pn", strconv.Itoa(page))
+	query.Set("rn", strconv.Itoa(limit))
+	requestURL.RawQuery = query.Encode()
+	body, err := c.signedGet(ctx, requestURL.String(), "https://www.kuwo.cn/rankList?bangId="+bangID)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Code jsonScalar `json:"code"`
+		Data struct {
+			Num       jsonScalar  `json:"num"`
+			MusicList []trackWire `json:"musicList"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("kuwo: decode bang music list: %w", err)
+	}
+	total, ok := scalarNonNegativeInt(response.Data.Num)
+	if !ok {
+		return nil, playlistUnavailable("bang:"+bangID, "invalid toplist total")
+	}
+	start := offset % limit
+	rows := response.Data.MusicList
+	if start > len(rows) {
+		start = len(rows)
+	}
+	rows = rows[start:]
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	tracks := make([]platform.Track, 0, len(rows))
+	for _, item := range rows {
+		if detail, _, ok := convertTrack(item); ok {
+			tracks = append(tracks, detail.Track)
+		}
+	}
+	return &platform.Playlist{ID: "bang:" + bangID, Platform: "kuwo", Title: meta.name, Description: meta.intro, CoverURL: meta.pic, TrackCount: total, Tracks: tracks, URL: "https://www.kuwo.cn/rankList?bangId=" + bangID}, nil
 }
 
 func (c *Client) fetchPlaylistPage(

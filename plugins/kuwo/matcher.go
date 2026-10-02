@@ -60,6 +60,14 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 			return id, true
 		}
 	}
+	if parsed.Path == "/rankList" {
+		if id := parsed.Query().Get("bangId"); kuwoIDPattern.MatchString(id) {
+			return "top:" + id, true
+		}
+		if id := parsed.Query().Get("id"); kuwoIDPattern.MatchString(id) {
+			return "top:" + id, true
+		}
+	}
 	if id := parsed.Query().Get("albumid"); kuwoIDPattern.MatchString(id) {
 		return encodeAlbumCollectionID(id), true
 	}
