@@ -335,11 +335,11 @@ func TestSearchHandler_resolveDefaultQuality_NilRepo(t *testing.T) {
 	}
 }
 
-func TestResolvePlatformQualityValue_KugouDefaultHiResDowngrades(t *testing.T) {
+func TestResolvePlatformQualityValue_KugouDefaultHiResNotDowngraded(t *testing.T) {
 	repo := newStubRepo()
 	got := resolvePlatformQualityValue(context.Background(), repo, botpkg.PluginScopeUser, 12345, "kugou", "hires", false)
-	if got != "lossless" {
-		t.Fatalf("resolvePlatformQualityValue() = %q, want %q", got, "lossless")
+	if got != "hires" {
+		t.Fatalf("resolvePlatformQualityValue() = %q, want %q", got, "hires")
 	}
 }
 

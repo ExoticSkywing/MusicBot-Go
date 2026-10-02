@@ -139,16 +139,6 @@ func TestNormalizeRequestedQuality(t *testing.T) {
 	}
 }
 
-func TestNoHiResWhenDefaultDefinition_DefaultOn(t *testing.T) {
-	def := NoHiResWhenDefaultDefinition()
-	if def.DefaultUser != NoHiResWhenDefaultOn {
-		t.Fatalf("DefaultUser=%q want=%q", def.DefaultUser, NoHiResWhenDefaultOn)
-	}
-	if def.DefaultGroup != NoHiResWhenDefaultOn {
-		t.Fatalf("DefaultGroup=%q want=%q", def.DefaultGroup, NoHiResWhenDefaultOn)
-	}
-}
-
 func TestBuildTrackURLPrefersHashAlbumPage(t *testing.T) {
 	got := buildTrackURL(
 		"abcdef1234567890abcdef1234567890",

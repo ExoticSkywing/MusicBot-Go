@@ -371,8 +371,8 @@ func TestInlineSearchFallbackAppliesResolvedPlatformQualityPolicy(t *testing.T) 
 	}
 	platformName = "kugou"
 	resolved = resolvePlatformQualityValue(context.Background(), repo, botpkg.PluginScopeUser, 12345, platformName, qualityValue, false)
-	if resolved != "lossless" {
-		t.Fatalf("resolved quality=%q want=lossless", resolved)
+	if resolved != "hires" {
+		t.Fatalf("resolved quality=%q want=hires", resolved)
 	}
 }
 
