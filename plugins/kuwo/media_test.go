@@ -76,12 +76,12 @@ func TestLosslessResolverPlanUsesOfficialEndpoint(t *testing.T) {
 			// this is gone.
 			name:    "lossless uses the official endpoint",
 			quality: platform.QualityLossless,
-			want:    []losslessResolver{resolvePlayableFLAC},
+			want:    []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC},
 		},
 		{
 			name:    "hires uses the same official endpoint",
 			quality: platform.QualityHiRes,
-			want:    []losslessResolver{resolvePlayableFLAC},
+			want:    []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC},
 		},
 		{
 			name:    "high has no lossless resolver",
@@ -107,6 +107,10 @@ func TestMobileResolverUsesAPIClientAndDownloadProbeClient(t *testing.T) {
 			t.Fatalf("API client requested unexpected host %q", req.URL.Host)
 		}
 		apiCalls.Add(1)
+		query := req.URL.Query()
+		if !strings.HasPrefix(query.Get("user"), "C_APK_guanwang_") || query.Get("source") != "kwplayercar_ar_6.0.0.9_B_jiakong_vh.apk" || query.Get("from") != "PC" || query.Has("sig") || query.Has("format") || req.Header.Get("Cookie") != "" {
+			t.Fatalf("invalid anonymous request contract")
+		}
 		return response(http.StatusOK, nil, []byte(
 			`{"code":200,"data":{"rid":41378936,"url":"https://er-sycdn.kuwo.cn/signed.mp3","format":"mp3","bitrate":320,"duration":213,"type":"0"}}`,
 		)), nil

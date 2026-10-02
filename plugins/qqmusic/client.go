@@ -924,7 +924,7 @@ func (c *Client) GetSongFileInfo(ctx context.Context, songMid string) (*qqFileIn
 	return &file, nil
 }
 
-func (c *Client) GetVKey(ctx context.Context, songMid, mediaMid, qualityCode, ext, uin, authst string) (string, error) {
+func (c *Client) getSignedVKey(ctx context.Context, songMid, mediaMid, qualityCode, ext, uin, authst string) (string, error) {
 	guid := randomHex32()
 	filenames := buildVKeyFilenames(songMid, mediaMid, qualityCode, ext)
 	endpointBase := musicsEndpoint + "?format=json"
@@ -980,7 +980,7 @@ func (c *Client) GetVKey(ctx context.Context, songMid, mediaMid, qualityCode, ex
 		if err := json.Unmarshal(body, &resp); err != nil {
 			return "", fmt.Errorf("qqmusic: decode vkey: %w", err)
 		}
-		if len(resp.Req.Data.MidURLInfo) == 0 {
+		if resp.Code != 0 || resp.Req.Code != 0 || len(resp.Req.Data.MidURLInfo) == 0 {
 			c.logVKeyUnavailable(songMid, mediaMid, qualityCode, uin, authst, len(resp.Req.Data.MidURLInfo), resp.Code, resp.Req.Code)
 			continue
 		}

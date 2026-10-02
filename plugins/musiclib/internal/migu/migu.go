@@ -502,6 +502,11 @@ func (m *Migu) convertItemToSong(item MiguSongItem) *model.Song {
 		"resource_type": bestFormat.ResourceType,
 		"format_type":   bestFormat.FormatType,
 	}
+	for _, format := range rateFormats {
+		if size := firstNonZeroString(format.AndroidSize, format.ASize, format.Size, format.ISize); size != "" {
+			extra["size_"+normalizeMiguTone(format.FormatType)] = size
+		}
+	}
 	if item.CopyrightID != "" {
 		extra["copyright_id"] = item.CopyrightID
 	}

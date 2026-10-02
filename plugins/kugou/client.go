@@ -286,7 +286,12 @@ func (c *Client) ResolveDownloadByQuality(ctx context.Context, song *model.Song,
 	plans := buildDownloadPlans(song, requested)
 	var lastErr error
 	if c.concept == nil || !c.concept.HasUsableSession() {
-		return nil, platform.NewAuthRequiredError("kugou")
+		// A partial account must still surface authentication failures.
+		if parseCookieValue(c.baseCookie(), "token") != "" || parseCookieValue(c.baseCookie(), "t") != "" ||
+			(c.concept != nil && strings.TrimSpace(c.concept.Snapshot().Token) != "") {
+			return nil, platform.NewAuthRequiredError("kugou")
+		}
+		return c.resolveAnonymousAudio(ctx, song)
 	}
 	deviceRefreshUsed := false
 	for _, plan := range plans {

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/liuran001/MusicBot-Go/plugins/musiclib/internal/model"
@@ -50,9 +51,11 @@ var miguTonePaths = map[string]string{
 var miguTonePreference = []string{"ZQ32", "ZQ24", "ZQ", "SQ", "HQ", "PQ", "LQ"}
 
 type miguDownloadCandidate struct {
-	url    string
-	format string
-	ext    string
+	url             string
+	format          string
+	ext             string
+	requireFullSize bool
+	expectedSize    int64
 }
 
 // GetDownloadURL 获取下载链接
@@ -64,7 +67,7 @@ func (m *Migu) GetDownloadURL(s *model.Song) (string, error) {
 		return "", errors.New("source mismatch")
 	}
 	if s.URL != "" {
-		if model.ExplicitPreviewURL(s.URL) {
+		if miguPreviewURL(s.URL) {
 			return "", fmt.Errorf("%w: migu media URL is marked as an audition", model.ErrPreviewOnly)
 		}
 		return s.URL, nil
@@ -98,11 +101,18 @@ func (m *Migu) GetDownloadURL(s *model.Song) (string, error) {
 
 	// The endpoint reports the rendition the session may actually play: tones
 	// above the entitlement come back with an empty URL and a dialog hint.
-	requestTones := []string{"ZQ32", targetFormat, "PQ"}
+	requestTones := []string{"ZQ32", targetFormat}
+	if targetFormat == "ZQ" {
+		requestTones = append(requestTones, "ZQ24")
+	}
+	requestTones = append(requestTones, "PQ")
 	responses := make([]*miguListenResponse, 0, len(requestTones))
 	seenTones := make(map[string]struct{}, len(requestTones))
 	var fetchErr error
 	for _, tone := range requestTones {
+		if err := m.ctx.Err(); err != nil {
+			return "", err
+		}
 		if _, ok := seenTones[tone]; ok {
 			continue
 		}
@@ -110,6 +120,8 @@ func (m *Migu) GetDownloadURL(s *model.Song) (string, error) {
 		resp, err := m.fetchListenInfo(contentID, copyrightID, songID, albumID, resourceType, tone)
 		if err == nil {
 			responses = append(responses, resp)
+		} else if miguTerminalError(err) {
+			return "", err
 		} else if fetchErr == nil {
 			fetchErr = err
 		}
@@ -118,18 +130,32 @@ func (m *Migu) GetDownloadURL(s *model.Song) (string, error) {
 	candidates := buildMiguDownloadCandidates(responses)
 	auditionSkipped := false
 	for _, candidate := range candidates {
-		if model.ExplicitPreviewURL(candidate.url) {
+		if miguPreviewURL(candidate.url) {
 			auditionSkipped = true
 			continue
 		}
-		if !m.downloadInfoValid(candidate) {
+		candidate.expectedSize = miguCatalogSize(s, candidate.format, targetFormat)
+		valid, err := m.downloadInfoValid(candidate)
+		if miguTerminalError(err) {
+			return "", err
+		}
+		if !valid {
+			if candidate.requireFullSize {
+				auditionSkipped = true
+			}
 			continue
+		}
+		if err := m.ctx.Err(); err != nil {
+			return "", err
 		}
 		s.Ext = candidate.ext
 		s.Bitrate = miguToneBitrate(candidate.format)
 		return candidate.url, nil
 	}
 
+	if err := m.ctx.Err(); err != nil {
+		return "", err
+	}
 	if len(candidates) == 0 {
 		for _, resp := range responses {
 			if message := miguListenResponseMessage(resp); message != "empty download url" {
@@ -188,64 +214,15 @@ type miguListenResponse struct {
 	Code string `json:"code"`
 	Info string `json:"info"`
 	Data struct {
-		URL        string `json:"url"`
-		FormatType string `json:"formatType"`
-		DialogInfo struct {
+		URL             string          `json:"url"`
+		FormatType      string          `json:"formatType"`
+		AudioFormatType string          `json:"audioFormatType"`
+		AuditionsLength json.RawMessage `json:"auditionsLength"`
+		IsTrial         json.RawMessage `json:"isTrial"`
+		DialogInfo      struct {
 			Text string `json:"text"`
 		} `json:"dialogInfo"`
 	} `json:"data"`
-}
-
-func (m *Migu) fetchListenInfo(contentID, copyrightID, songID, albumID, resourceType, toneFlag string) (*miguListenResponse, error) {
-	params := url.Values{}
-	params.Set("netType", "01")
-	params.Set("resourceType", firstNonEmpty(resourceType, "2"))
-	params.Set("contentId", strings.TrimSpace(contentID))
-	params.Set("toneFlag", firstNonEmpty(toneFlag, "PQ"))
-	if copyrightID != "" {
-		params.Set("copyrightId", copyrightID)
-	}
-	if songID != "" {
-		params.Set("songId", songID)
-	}
-	if albumID != "" {
-		params.Set("albumId", albumID)
-	}
-
-	req, err := http.NewRequestWithContext(m.ctx, http.MethodGet, miguListenURL+"?"+params.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", miguAndroidUA)
-	req.Header.Set("channel", miguAndroidChannel)
-	req.Header.Set("version", miguAndroidVersion)
-	req.Header.Set("Referer", "https://music.migu.cn/")
-	if cookie := strings.TrimSpace(m.cookie); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("migu listen endpoint returned status %d", resp.StatusCode)
-	}
-
-	var result miguListenResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("migu listen response json parse error: %w", err)
-	}
-	if result.Code != "" && result.Code != "000000" {
-		return nil, fmt.Errorf("migu api error: %s (code %s)", result.Info, result.Code)
-	}
-	return &result, nil
 }
 
 // buildMiguDownloadCandidates expands the served URLs into every preferred
@@ -253,8 +230,9 @@ func (m *Migu) fetchListenInfo(contentID, copyrightID, songID, albumID, resource
 // tone path of a served URL can be rewritten and probed.
 func buildMiguDownloadCandidates(responses []*miguListenResponse) []miguDownloadCandidate {
 	type directSource struct {
-		url    string
-		format string
+		url             string
+		format          string
+		requireFullSize bool
 	}
 	sources := make([]directSource, 0, len(responses))
 	seenSources := make(map[string]struct{}, len(responses))
@@ -266,13 +244,13 @@ func buildMiguDownloadCandidates(responses []*miguListenResponse) []miguDownload
 		if sourceURL == "" || isEncryptedMiguDirectURL(sourceURL) {
 			continue
 		}
-		format := firstNonEmpty(normalizeMiguTone(resp.Data.FormatType), "PQ")
+		format := firstNonEmpty(normalizeMiguTone(firstNonEmpty(resp.Data.AudioFormatType, resp.Data.FormatType)), "PQ")
 		key := format + "\x00" + sourceURL
 		if _, ok := seenSources[key]; ok {
 			continue
 		}
 		seenSources[key] = struct{}{}
-		sources = append(sources, directSource{url: sourceURL, format: format})
+		sources = append(sources, directSource{url: sourceURL, format: format, requireFullSize: miguTrialHint(resp)})
 	}
 
 	candidates := make([]miguDownloadCandidate, 0, len(miguTonePreference))
@@ -288,10 +266,11 @@ func buildMiguDownloadCandidates(responses []*miguListenResponse) []miguDownload
 				candidateURL = rewrittenURL
 			}
 			candidate, ok := newMiguDownloadCandidate(candidateURL, tone)
+			candidate.requireFullSize = source.requireFullSize
 			if !ok {
 				continue
 			}
-			key := candidate.format + "\x00" + candidate.url
+			key := candidate.format + "\x00" + candidate.url + strconv.FormatBool(candidate.requireFullSize)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -308,12 +287,15 @@ func newMiguDownloadCandidate(rawURL, format string) (miguDownloadCandidate, boo
 		return miguDownloadCandidate{}, false
 	}
 	parsed, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.User != nil {
 		return miguDownloadCandidate{}, false
 	}
 	ext := strings.TrimPrefix(strings.ToLower(path.Ext(parsed.Path)), ".")
 	if ext == "" {
 		ext = miguToneExtensions[format]
+	}
+	if expected := miguToneExtensions[format]; expected != "" && ext != expected {
+		return miguDownloadCandidate{}, false
 	}
 	if ext == "" {
 		ext = "mp3"
@@ -414,10 +396,10 @@ func formatFromMiguExt(ext string) string {
 
 // downloadInfoValid probes the first bytes of a candidate. The CDN only
 // serves renditions the session may fetch, so the audio magic decides.
-func (m *Migu) downloadInfoValid(candidate miguDownloadCandidate) bool {
+func (m *Migu) downloadInfoValid(candidate miguDownloadCandidate) (bool, error) {
 	req, err := http.NewRequestWithContext(m.ctx, http.MethodGet, candidate.url, nil)
 	if err != nil {
-		return false
+		return false, err
 	}
 	req.Header.Set("User-Agent", miguAndroidUA)
 	req.Header.Set("Referer", "https://music.migu.cn/")
@@ -427,17 +409,49 @@ func (m *Migu) downloadInfoValid(candidate miguDownloadCandidate) bool {
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return false
+		return false, nil
 	}
 	prefix, err := io.ReadAll(io.LimitReader(resp.Body, 64))
 	if err != nil {
-		return false
+		return false, err
 	}
-	return isMiguAudioMagic(prefix)
+	if !isMiguAudioMagic(prefix) {
+		return false, nil
+	}
+	switch candidate.ext {
+	case "flac":
+		if !bytes.HasPrefix(prefix, []byte("fLaC")) {
+			return false, nil
+		}
+	case "wav":
+		if len(prefix) < 12 || !bytes.Equal(prefix[:4], []byte("RIFF")) || !bytes.Equal(prefix[8:12], []byte("WAVE")) {
+			return false, nil
+		}
+	case "mp3":
+		if !bytes.HasPrefix(prefix, []byte("ID3")) && !isMiguMP3Frame(prefix) {
+			return false, nil
+		}
+	}
+	var size int64
+	if resp.StatusCode == http.StatusPartialContent {
+		_, total, ok := strings.Cut(resp.Header.Get("Content-Range"), "/")
+		if ok {
+			size, _ = strconv.ParseInt(total, 10, 64)
+		}
+	} else if resp.StatusCode == http.StatusOK {
+		size = resp.ContentLength
+		if size <= 0 {
+			size, _ = strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+		}
+	}
+	if candidate.expectedSize > 0 && size > 0 && float64(size) < float64(candidate.expectedSize)*0.9 {
+		return false, nil
+	}
+	return !candidate.requireFullSize || (size > 0 && candidate.expectedSize > 0), nil
 }
 
 func isMiguAudioMagic(data []byte) bool {
@@ -451,4 +465,16 @@ func isMiguAudioMagic(data []byte) bool {
 		bytes.Equal(data[:3], []byte("ID3")) ||
 		(len(data) >= 12 && bytes.Equal(data[4:8], []byte("ftyp"))) ||
 		(data[0] == 0xFF && data[1]&0xE0 == 0xE0)
+}
+
+// Validate an MPEG Layer III frame header, excluding ADTS AAC sync words.
+func isMiguMP3Frame(data []byte) bool {
+	if len(data) < 4 || data[0] != 0xff || data[1]&0xe0 != 0xe0 {
+		return false
+	}
+	version := (data[1] >> 3) & 3
+	layer := (data[1] >> 1) & 3
+	bitrate := (data[2] >> 4) & 15
+	sample := (data[2] >> 2) & 3
+	return version != 1 && layer == 1 && bitrate > 0 && bitrate < 15 && sample != 3
 }

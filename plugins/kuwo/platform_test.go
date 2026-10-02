@@ -163,7 +163,7 @@ func TestPlatformDownloadQualityDelegatesToClient(t *testing.T) {
 	apiOriginTransport := apiServer.Client().Transport
 	client.apiHTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "mobile.test" {
-			if request.URL.Query().Get("br") != "320kmp3" || request.URL.Query().Get("format") != "mp3" {
+			if request.URL.Query().Get("br") != "320kmp3" || request.URL.Query().Get("from") != "PC" {
 				t.Fatalf("mobile query = %v, want 320kmp3/mp3", request.URL.Query())
 			}
 			return response(http.StatusOK, nil, []byte(

@@ -223,6 +223,10 @@ func (c *Client) resolvePlayableLossless(ctx context.Context, detail *trackDetai
 	if !selector.acceptsProbe(probe) {
 		return nil, errors.New("kuwo: legacy lossless STREAMINFO mismatch")
 	}
+	return c.playableFLACInfo(ctx, rawURL, probe)
+}
+
+func (c *Client) playableFLACInfo(ctx context.Context, rawURL string, probe mediaProbe) (*platform.DownloadInfo, error) {
 	rawSize := probe.size
 	trailerProbe, err := c.probeDirectFLACTrailer(
 		ctx,
