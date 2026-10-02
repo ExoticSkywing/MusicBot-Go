@@ -2,6 +2,8 @@ package kuwo
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,12 +15,66 @@ import (
 // paidTrackDetail is a track kuwo marks as requiring payment.
 const paidTrackDetail = `{"data":{"rid":41378936,"duration":213,"isListenFee":true}}`
 
-// TestPaidTrackNeverFallsThroughToMP3 preserves the guarantee that the deleted
-// external-resolver tests used to carry: a track kuwo marks as paid must never
-// be served as an ordinary MP3, whatever happens to the lossless resolvers. A
-// preview or a downgraded stream handed over as if it were the track is worse
-// than an honest failure.
-func TestPaidTrackNeverFallsThroughToMP3(t *testing.T) {
+func TestPaidCatalogMP3RequiresFullVerifiedAudio(t *testing.T) {
+	for _, quality := range []platform.Quality{platform.QualityStandard, platform.QualityHigh} {
+		for _, source := range []struct {
+			name      string
+			mediaType int
+			duration  int
+			wantErr   error
+		}{
+			{"full", 0, 213, nil},
+			{"preview", 1, 213, errPreviewMedia},
+			{"short", 0, 30, errTrackDurationMismatch},
+		} {
+			t.Run(quality.String()+"/"+source.name, func(t *testing.T) {
+				candidate := mobileQualityCandidates(quality)[0]
+				var mobileCalls, probes int
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					switch req.URL.Host {
+					case "www.kuwo.cn":
+						if req.URL.Path == "/" {
+							return response(http.StatusOK, map[string]string{"Set-Cookie": kuwoSessionCookie + "=abcdefghijklmnop; Path=/"}, nil), nil
+						}
+						if strings.Contains(req.URL.Path, "playUrl") {
+							t.Fatal("paid catalog must not use unchecked web fallback")
+						}
+						return response(http.StatusOK, nil, []byte(`{"data":{"rid":41378936,"duration":213,"isListenFee":true,"payInfo":{"listen_fragment":"1","cannotOnlinePlay":0}}}`)), nil
+					case "mobi.kuwo.cn":
+						mobileCalls++
+						if req.URL.Query().Get("br") != candidate.br {
+							t.Fatal("unexpected requested tier")
+						}
+						return response(http.StatusOK, nil, []byte(fmt.Sprintf(`{"code":200,"data":{"rid":41378936,"url":"https://kw-er.kuwo.cn/a.mp3","format":"mp3","bitrate":%d,"duration":%d,"type":%d}}`, candidate.bitrate, source.duration, source.mediaType))), nil
+					case "kw-er.kuwo.cn":
+						probes++
+						return mp3ProbeTransport(t, int64(candidate.bitrate)*1000*213/8, nil).Transport.RoundTrip(req)
+					default:
+						t.Fatalf("unexpected host %s", req.URL.Host)
+						return nil, nil
+					}
+				})
+				client := NewClient(time.Second, nil)
+				client.apiHTTPClient.Transport = transport
+				client.mediaHTTPClient.Transport = transport
+				info, err := client.GetDownloadInfo(context.Background(), "41378936", quality)
+				if mobileCalls != 1 {
+					t.Fatalf("mobile calls=%d, want 1", mobileCalls)
+				}
+				if source.wantErr != nil {
+					if !errors.Is(err, source.wantErr) || info != nil || probes != 0 {
+						t.Fatalf("unverified source: err=%v info=%v probes=%d", err, info, probes)
+					}
+				} else if err != nil || info.Quality != quality || info.Bitrate != candidate.bitrate || probes == 0 {
+					t.Fatalf("full source: err=%v info=%v probes=%d", err, info, probes)
+				}
+			})
+		}
+	}
+}
+
+// Catalog flags allow a verified mobile rendition, never an unchecked web MP3.
+func TestPaidTrackRejectsUnverifiedAudio(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
 		legacyStatus int
@@ -70,22 +126,15 @@ func TestPaidTrackNeverFallsThroughToMP3(t *testing.T) {
 				if webCalls != 0 {
 					t.Errorf("quality %v: fell through to the web MP3 endpoint", quality)
 				}
-				// The lossless tiers may probe the legacy endpoint, since a paid
-				// track can still have a public FLAC. The MP3 tiers must not.
-				if quality == platform.QualityHigh || quality == platform.QualityStandard {
-					if mobileCalls != 0 {
-						t.Errorf("quality %v: probed the mobile MP3 endpoint %d times", quality, mobileCalls)
-					}
+				if mobileCalls == 0 {
+					t.Errorf("quality %v: catalog flag prevented checking the actual audio", quality)
 				}
 			}
 		})
 	}
 }
 
-// TestPaidTrackStillServesAVerifiedFLAC is the other side of that guarantee:
-// refusing MP3 must not mean refusing everything. When kuwo does hand over a
-// fully verified FLAC, a paid track is served -- which is how Jay Chou's
-// 告白气球 became downloadable at 24-bit/96kHz.
+// Catalog fee labels also permit a fully verified FLAC rendition.
 func TestPaidTrackStillServesAVerifiedFLAC(t *testing.T) {
 	const rawSize = 1 << 20
 	cleartext := makeTestFLAC(t, rawSize-len(knownDirectFLACTrailer), 96000, 24, 2, 213*time.Second)

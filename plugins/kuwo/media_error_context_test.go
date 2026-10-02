@@ -54,7 +54,7 @@ func TestPaidTrackErrorCarriesResolverCause(t *testing.T) {
 		t.Errorf("error lost the access verdict: %v", err)
 	}
 	// ...but it must no longer be the whole story.
-	if !strings.Contains(err.Error(), "lossless resolvers failed") {
+	if !strings.Contains(err.Error(), "audio resolvers failed") {
 		t.Fatalf("error does not explain why the resolvers failed, so a network "+
 			"fault is indistinguishable from an entitlement problem: %v", err)
 	}
@@ -63,10 +63,8 @@ func TestPaidTrackErrorCarriesResolverCause(t *testing.T) {
 	}
 }
 
-// TestPaidTrackErrorStaysBareWhenNoResolverRan keeps the message clean for the
-// case it was originally written for: a paid track whose tier has no resolver
-// plan at all, where there is no underlying cause to report.
-func TestPaidTrackErrorStaysBareWhenNoResolverRan(t *testing.T) {
+// MP3 requests also report the actual resolver failure alongside catalog flags.
+func TestPaidMP3ErrorCarriesResolverCause(t *testing.T) {
 	const trackID = "41378936"
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -87,13 +85,13 @@ func TestPaidTrackErrorStaysBareWhenNoResolverRan(t *testing.T) {
 	client.apiHTTPClient.Transport = transport
 	client.mediaHTTPClient.Transport = transport
 
-	// QualityStandard has no lossless resolver plan, so accessErr returns alone.
+	// QualityStandard still checks the mobile source despite catalog flags.
 	_, err := client.GetDownloadInfo(context.Background(), trackID, platform.QualityStandard)
 	if err == nil {
 		t.Fatal("GetDownloadInfo() succeeded, want failure")
 	}
-	if strings.Contains(err.Error(), "lossless resolvers failed") {
-		t.Fatalf("no resolver ran, yet the message claims one failed: %v", err)
+	if !strings.Contains(err.Error(), "audio resolvers failed") {
+		t.Fatalf("missing mobile resolver failure: %v", err)
 	}
 	if !strings.Contains(err.Error(), errPaidTrack.Error()) {
 		t.Fatalf("error = %v, want the paid-track verdict", err)
