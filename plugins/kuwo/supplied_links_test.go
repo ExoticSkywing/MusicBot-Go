@@ -8,6 +8,7 @@ func TestSuppliedMobileShareRoutes(t *testing.T) {
 		{"https://m.kuwo.cn/newh5app/singers/233?id=233", "artist:233"},
 		{"https://m.kuwo.cn/?albumid=3985139&from=ar", "album:3985139"},
 		{"https://m.kuwo.cn/newh5app/playlist_detail/3381506302", "playlist:3381506302"},
+		{"https://m.kuwo.cn/newh5/album/content?albumid=3985139", "album:3985139"},
 	}
 	p := NewURLMatcher()
 	for _, tc := range cases {

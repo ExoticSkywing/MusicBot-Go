@@ -63,6 +63,18 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 	if id := parsed.Query().Get("albumid"); kuwoIDPattern.MatchString(id) {
 		return encodeAlbumCollectionID(id), true
 	}
+	for _, prefix := range []string{"/album_detail/", "/newh5app/album_detail/"} {
+		if id, ok := pathID(parsed.Path, prefix); ok {
+			return encodeAlbumCollectionID(id), true
+		}
+	}
+	for _, path := range []string{"/newh5/album/content", "/newh5/album/2017/content"} {
+		if parsed.Path == path {
+			if id := parsed.Query().Get("albumid"); kuwoIDPattern.MatchString(id) {
+				return encodeAlbumCollectionID(id), true
+			}
+		}
+	}
 	return "", false
 }
 

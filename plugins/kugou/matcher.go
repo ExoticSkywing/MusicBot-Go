@@ -14,7 +14,7 @@ var (
 	kugouPathHashPattern     = regexp.MustCompile(`(?i)/(?:song|share)/(?:[^/?#]+/)?([a-f0-9]{32})(?:[/?#]|$)`)
 	kugouSharePathPattern    = regexp.MustCompile(`(?i)^/share/([a-z0-9]+)\.html$`)
 	kugouWCShortPathPattern  = regexp.MustCompile(`(?i)^/wc/s/([a-z0-9]+)$`)
-	kugouAlbumPathPattern    = regexp.MustCompile(`(?i)^/album/(\d+)\.html$`)
+	kugouAlbumPathPattern    = regexp.MustCompile(`(?i)^/album/(?:info/|single/)?([a-z0-9_]+)(?:\.html)?/?$`)
 	// Covers the three singer page shapes Kugou serves: /singer/3520.html,
 	// /yy/singer/home/3520.html and /singer/info/3520/.
 	kugouSingerPathPattern   = regexp.MustCompile(`(?i)^/(?:yy/)?singer/(?:home/|info/)?(\d+)(?:\.html)?/?$`)

@@ -13,6 +13,7 @@ var (
 		regexp.MustCompile(`^n/ryqq/songDetail/([^/?#]+)$`),
 		regexp.MustCompile(`^n/ryqq_v2/songDetail/([^/?#]+)$`),
 		regexp.MustCompile(`^n/ryqq/song/([^/?#]+)$`),
+		regexp.MustCompile(`^n/yqq/song/([^/?#]+)\.html$`),
 		regexp.MustCompile(`^song/([^/?#]+)$`),
 	}
 	qqAlbumPathPatterns = []*regexp.Regexp{
@@ -27,7 +28,10 @@ var (
 	qqPlaylistPathPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`^n/ryqq/playlist/([^/?#]+)$`),
 		regexp.MustCompile(`^n/ryqq_v2/playlist/([^/?#]+)$`),
+		regexp.MustCompile(`^n/yqq/playlist/([^/?#]+)\.html$`),
 		regexp.MustCompile(`^playlist/([^/?#]+)$`),
+		regexp.MustCompile(`^n/ryqq(?:_v2)?/toplist/(\d+)$`),
+		regexp.MustCompile(`^n/yqq/toplist/(\d+)\.html$`),
 		regexp.MustCompile(`^n2/m/share/details/taoge\.html$`),
 		regexp.MustCompile(`^n3/other/pages/details/playlist\.html$`),
 	}
@@ -156,6 +160,9 @@ func matchQQMusicPlaylistURL(parsed *url.URL) (string, bool) {
 	}
 	for _, re := range qqPlaylistPathPatterns {
 		if match := re.FindStringSubmatch(pathValue); len(match) == 2 {
+			if strings.Contains(strings.ToLower(pathValue), "toplist") {
+				return "top:" + match[1], true
+			}
 			return match[1], true
 		}
 	}

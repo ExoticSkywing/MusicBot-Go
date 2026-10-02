@@ -408,7 +408,7 @@ func (q *QQMusicPlatform) MatchPlaylistURL(rawURL string) (string, bool) {
 
 // ShortLinkHosts implements platform.ShortLinkProvider.
 func (q *QQMusicPlatform) ShortLinkHosts() []string {
-	return []string{"c6.y.qq.com"}
+	return []string{"c6.y.qq.com", "url.cn"}
 }
 
 func (q *QQMusicPlatform) MatchText(text string) (string, bool) {

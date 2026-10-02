@@ -10,6 +10,9 @@ func TestSuppliedMiguShareRoutes(t *testing.T) {
 	if id, ok := p.MatchArtistURL("https://h5.nf.migu.cn/app/v4/p/share/singer/index.html?id=1000000538"); !ok || id != "1000000538" {
 		t.Fatalf("singer = %q, %v", id, ok)
 	}
+	if id, ok := p.MatchArtistURL("https://music.migu.cn/v5/#/singerDetail?id=112"); !ok || id != "112" {
+		t.Fatalf("web singer = %q, %v", id, ok)
+	}
 	if id, ok := p.MatchPlaylistURL("https://h5.nf.migu.cn/app/v4/p/share/album/index.html?id=1142245189"); !ok || id != "album:1142245189" {
 		t.Fatalf("album = %q, %v", id, ok)
 	}
