@@ -9,7 +9,7 @@ import (
 )
 
 var platformMetadata = map[string]platform.Meta{
-	"migu":     {Name: "migu", DisplayName: "咪咕音乐", Emoji: "🎵", Aliases: []string{"migu", "mg", "咪咕", "咪咕音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.migu.cn", "y.migu.cn", "h5.nf.migu.cn"}},
+	"migu":     {Name: "migu", DisplayName: "咪咕音乐", Emoji: "🎵", Aliases: []string{"migu", "mg", "咪咕", "咪咕音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.migu.cn", "y.migu.cn", "h5.nf.migu.cn", "c.migu.cn"}},
 	"qianqian": {Name: "qianqian", DisplayName: "千千音乐", Emoji: "🎶", Aliases: []string{"qianqian", "qqian", "千千", "千千音乐"}, AllowGroupURL: true, GroupURLHosts: []string{"music.91q.com"}},
 	"fivesing": {Name: "fivesing", DisplayName: "5sing", Emoji: "🎤", Aliases: []string{"fivesing", "5sing", "5s"}, AllowGroupURL: true, GroupURLHosts: []string{"5sing.kugou.com"}},
 	"jamendo":  {Name: "jamendo", DisplayName: "Jamendo", Emoji: "🎸", Aliases: []string{"jamendo", "jam"}, AllowGroupURL: true, GroupURLHosts: []string{"jamendo.com", "www.jamendo.com"}},
@@ -78,8 +78,18 @@ func (p *Platform) matchResource(rawURL string) (string, string) {
 	case "migu":
 		if len(parts) == 4 && (parts[0] == "v3" || parts[0] == "v5") && parts[1] == "music" {
 			kind, id = resourceKind(parts[2]), parts[3]
-		} else if len(parts) == 6 && strings.Join(parts[:4], "/") == "app/v4/p/share" && (parts[4] == "song" || parts[4] == "song-new") && parts[5] == "index.html" {
-			kind, id = "track", u.Query().Get("id")
+		} else if len(parts) == 6 && strings.Join(parts[:4], "/") == "app/v4/p/share" && parts[5] == "index.html" {
+			switch parts[4] {
+			case "song", "song-new":
+				kind = "track"
+			case "singer":
+				kind = "artist"
+			case "album":
+				kind = "album"
+			case "playlist":
+				kind = "playlist"
+			}
+			id = u.Query().Get("id")
 		} else if len(parts) == 2 {
 			kind, id = resourceKind(parts[0]), parts[1]
 		}
@@ -123,6 +133,30 @@ func (p *Platform) matchResource(rawURL string) (string, string) {
 		return "", ""
 	}
 	return kind, id
+}
+
+// MatchArtistURL handles Migu's share singer page, which is a separate
+// resource kind from the generic track/collection matcher.
+func (p *Platform) MatchArtistURL(rawURL string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", false
+	}
+	if p.name != "migu" || !strings.EqualFold(u.Hostname(), "h5.nf.migu.cn") {
+		return "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 6 && strings.Join(parts[:4], "/") == "app/v4/p/share" && parts[4] == "singer" && parts[5] == "index.html" && numericID.MatchString(u.Query().Get("id")) {
+		return u.Query().Get("id"), true
+	}
+	return "", false
+}
+
+func (p *Platform) ShortLinkHosts() []string {
+	if p.name == "migu" {
+		return []string{"c.migu.cn"}
+	}
+	return nil
 }
 
 func queryResource(u *url.URL, keys map[string]string) (string, string) {
