@@ -1,6 +1,9 @@
 package kuwo
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSuppliedMobileShareRoutes(t *testing.T) {
 	cases := []struct{ url, want string }{
@@ -14,6 +17,12 @@ func TestSuppliedMobileShareRoutes(t *testing.T) {
 	p := NewURLMatcher()
 	for _, tc := range cases {
 		t.Run(tc.url, func(t *testing.T) {
+			if strings.HasPrefix(tc.want, "top:") {
+				if id, ok := p.MatchPlaylistURL(tc.url); !ok || id != tc.want {
+					t.Fatalf("toplist = %q, %v", id, ok)
+				}
+				return
+			}
 			if id, ok := p.MatchArtistURL(tc.url); ok && tc.want[:7] == "artist:" {
 				if id != tc.want[7:] {
 					t.Fatalf("artist = %q", id)
