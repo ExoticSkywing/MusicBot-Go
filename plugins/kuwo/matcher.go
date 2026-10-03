@@ -25,8 +25,10 @@ func (m *URLMatcher) MatchURL(rawURL string) (trackID string, matched bool) {
 		return "", false
 	}
 
-	if id, ok := pathID(parsed.Path, "/play_detail/"); ok {
-		return id, true
+	for _, prefix := range []string{"/play_detail/", "/yinyue/", "/newh5app/play_detail/"} {
+		if id, ok := pathID(parsed.Path, prefix); ok {
+			return id, true
+		}
 	}
 	if parsed.Path == "/newh5/singles/songinfoandlrc" {
 		if id := parsed.Query().Get("musicId"); kuwoIDPattern.MatchString(id) {
@@ -43,7 +45,7 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 		return "", false
 	}
 
-	for _, prefix := range []string{"/playlist_detail/", "/h5app/playlist/"} {
+	for _, prefix := range []string{"/playlist_detail/", "/newh5app/playlist_detail/", "/h5app/playlist/"} {
 		if id, ok := pathID(parsed.Path, prefix); ok {
 			return id, true
 		}
@@ -58,6 +60,29 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 			return id, true
 		}
 	}
+	if parsed.Path == "/rankList" {
+		if id := parsed.Query().Get("bangId"); kuwoIDPattern.MatchString(id) {
+			return "top:" + id, true
+		}
+		if id := parsed.Query().Get("id"); kuwoIDPattern.MatchString(id) {
+			return "top:" + id, true
+		}
+	}
+	if id := parsed.Query().Get("albumid"); kuwoIDPattern.MatchString(id) {
+		return encodeAlbumCollectionID(id), true
+	}
+	for _, prefix := range []string{"/album_detail/", "/newh5app/album_detail/"} {
+		if id, ok := pathID(parsed.Path, prefix); ok {
+			return encodeAlbumCollectionID(id), true
+		}
+	}
+	for _, path := range []string{"/newh5/album/content", "/newh5/album/2017/content"} {
+		if parsed.Path == path {
+			if id := parsed.Query().Get("albumid"); kuwoIDPattern.MatchString(id) {
+				return encodeAlbumCollectionID(id), true
+			}
+		}
+	}
 	return "", false
 }
 
@@ -68,10 +93,13 @@ func (m *URLMatcher) MatchArtistURL(rawURL string) (artistID string, matched boo
 		return "", false
 	}
 
-	for _, prefix := range []string{"/singer_detail/", "/newh5app/singer_detail/"} {
+	for _, prefix := range []string{"/singer_detail/", "/newh5app/singer_detail/", "/newh5app/singers/"} {
 		if id, ok := pathID(parsed.Path, prefix); ok {
 			return id, true
 		}
+	}
+	if parsed.Path == "/newh5/artist/artistDetail" && kuwoIDPattern.MatchString(parsed.Query().Get("id")) {
+		return parsed.Query().Get("id"), true
 	}
 	return "", false
 }

@@ -71,17 +71,14 @@ func TestLosslessResolverPlanUsesOfficialEndpoint(t *testing.T) {
 		want    []losslessResolver
 	}{
 		{
-			// Kuwo's own endpoint reports which FLAC tier it served, so one
-			// resolver covers both. The third-party resolver that used to front
-			// this is gone.
 			name:    "lossless uses the official endpoint",
 			quality: platform.QualityLossless,
-			want:    []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC},
+			want:    []losslessResolver{resolveAnonymousFLAC, resolvePlayableFLAC},
 		},
 		{
-			name:    "hires uses the same official endpoint",
+			name:    "hires selects 4000 before falling back",
 			quality: platform.QualityHiRes,
-			want:    []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC},
+			want:    []losslessResolver{resolveAnonymousHiRes, resolveAnonymousFLAC, resolvePlayableFLAC},
 		},
 		{
 			name:    "high has no lossless resolver",
@@ -436,6 +433,9 @@ func TestResolveDownloadReturnsVerifiedQuality(t *testing.T) {
 			t.Fatal("lossless route requested the Hi-Res/master resolver")
 			return nil, nil
 		case "mobi.kuwo.cn":
+			if req.URL.Query().Get("br") == "2000kflac" {
+				return response(http.StatusBadGateway, nil, nil), nil
+			}
 			if req.URL.Query().Get("q") == "" || req.URL.Query().Get("br") != "" {
 				t.Fatal("lossless route fell through to an MP3 mobile candidate")
 			}
@@ -903,7 +903,7 @@ func TestResolveDownloadOverflowingMobileDurationIsTerminal(t *testing.T) {
 	}
 }
 
-func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
+func TestCatalogAccessSignalsRequireVerifiedMobileAudio(t *testing.T) {
 	fixtures := []struct {
 		name   string
 		detail string
@@ -946,8 +946,13 @@ func TestRejectPreviewAndAccessSignalsAreTerminal(t *testing.T) {
 			if !errors.Is(err, platform.ErrUnavailable) || !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want unavailable and %v", err, tt.want)
 			}
-			if mobileCalls != 0 {
-				t.Fatalf("mobile calls = %d", mobileCalls)
+			wantCalls := 2
+			if tt.want == platform.ErrUnavailable {
+				// Duplicate keys still invalidate the catalog response itself.
+				wantCalls = 0
+			}
+			if mobileCalls != wantCalls {
+				t.Fatalf("mobile calls = %d, want %d", mobileCalls, wantCalls)
 			}
 			if webCalls != 0 {
 				t.Fatalf("web calls = %d", webCalls)

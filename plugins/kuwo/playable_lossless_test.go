@@ -279,8 +279,8 @@ func TestResolvePlayableLosslessAcceptsSupportedStereoPCMOn2000Selector(t *testi
 	}{
 		{name: "16-bit 44.1 kHz", sampleRate: 44100, bitsPerSample: 16, wantQuality: platform.QualityLossless},
 		{name: "16-bit 48 kHz", sampleRate: 48000, bitsPerSample: 16, wantQuality: platform.QualityLossless},
-		{name: "24-bit 44.1 kHz", sampleRate: 44100, bitsPerSample: 24, wantQuality: platform.QualityHiRes},
-		{name: "24-bit 48 kHz", sampleRate: 48000, bitsPerSample: 24, wantQuality: platform.QualityHiRes},
+		{name: "24-bit 44.1 kHz", sampleRate: 44100, bitsPerSample: 24, wantQuality: platform.QualityLossless},
+		{name: "24-bit 48 kHz", sampleRate: 48000, bitsPerSample: 24, wantQuality: platform.QualityLossless},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cleartext := makeTestFLAC(

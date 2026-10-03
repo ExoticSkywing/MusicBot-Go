@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	botpkg "github.com/liuran001/MusicBot-Go/bot"
 	"github.com/liuran001/MusicBot-Go/bot/config"
 	logpkg "github.com/liuran001/MusicBot-Go/bot/logger"
 	platformplugins "github.com/liuran001/MusicBot-Go/bot/platform/plugins"
@@ -64,9 +63,6 @@ func buildContribution(cfg *config.Config, logger *logpkg.Logger) (*platformplug
 	}
 	contrib := &platformplugins.Contribution{
 		Platform: platform,
-		SettingDefinitions: []botpkg.PluginSettingDefinition{
-			NoHiResWhenDefaultDefinition(),
-		},
 	}
 	return contrib, nil
 }

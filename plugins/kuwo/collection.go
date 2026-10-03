@@ -27,5 +27,8 @@ func parseCollectionID(rawID string) (kind, id string) {
 	if strings.HasPrefix(rawID, albumCollectionPrefix) {
 		return "album", strings.TrimSpace(strings.TrimPrefix(rawID, albumCollectionPrefix))
 	}
+	if strings.HasPrefix(rawID, "top:") {
+		return "top", strings.TrimSpace(strings.TrimPrefix(rawID, "top:"))
+	}
 	return "playlist", rawID
 }

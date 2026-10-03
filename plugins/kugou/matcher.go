@@ -14,7 +14,7 @@ var (
 	kugouPathHashPattern     = regexp.MustCompile(`(?i)/(?:song|share)/(?:[^/?#]+/)?([a-f0-9]{32})(?:[/?#]|$)`)
 	kugouSharePathPattern    = regexp.MustCompile(`(?i)^/share/([a-z0-9]+)\.html$`)
 	kugouWCShortPathPattern  = regexp.MustCompile(`(?i)^/wc/s/([a-z0-9]+)$`)
-	kugouAlbumPathPattern    = regexp.MustCompile(`(?i)^/album/(\d+)\.html$`)
+	kugouAlbumPathPattern    = regexp.MustCompile(`(?i)^/album/(?:info/|single/)?([a-z0-9_]+)(?:\.html)?/?$`)
 	// Covers the three singer page shapes Kugou serves: /singer/3520.html,
 	// /yy/singer/home/3520.html and /singer/info/3520/.
 	kugouSingerPathPattern   = regexp.MustCompile(`(?i)^/(?:yy/)?singer/(?:home/|info/)?(\d+)(?:\.html)?/?$`)
@@ -92,6 +92,11 @@ func (m *URLMatcher) MatchArtistURL(rawURL string) (artistID string, matched boo
 	if matches := kugouSingerPathPattern.FindStringSubmatch(parsed.Path); len(matches) == 2 {
 		return matches[1], true
 	}
+	for _, key := range []string{"singerid", "singerId"} {
+		if id := strings.TrimSpace(parsed.Query().Get(key)); isNumericText(id) {
+			return id, true
+		}
+	}
 	return "", false
 }
 
@@ -109,6 +114,9 @@ func (m *URLMatcher) MatchPlaylistURL(rawURL string) (playlistID string, matched
 		return "", false
 	}
 	if matches := kugouAlbumPathPattern.FindStringSubmatch(parsed.Path); len(matches) == 2 {
+		return encodeAlbumCollectionID(matches[1]), true
+	}
+	if matches := regexp.MustCompile(`^/share/(c_[A-Za-z0-9]+)\.html$`).FindStringSubmatch(parsed.Path); len(matches) == 2 {
 		return encodeAlbumCollectionID(matches[1]), true
 	}
 	if matches := kugouPlaylistPattern.FindStringSubmatch(trimmed); len(matches) == 2 {

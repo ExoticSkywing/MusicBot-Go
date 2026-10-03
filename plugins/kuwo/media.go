@@ -50,6 +50,7 @@ type losslessResolver uint8
 const (
 	resolvePlayableFLAC losslessResolver = iota + 1
 	resolveAnonymousFLAC
+	resolveAnonymousHiRes
 )
 
 type mediaProbe struct {
@@ -94,13 +95,12 @@ func mobileQualityCandidates(quality platform.Quality) []mobileQuality {
 
 func losslessResolverPlan(quality platform.Quality) []losslessResolver {
 	switch quality {
-	case platform.QualityLossless, platform.QualityHiRes:
-		// Kuwo's own play endpoint serves both FLAC tiers and reports which one
-		// it gave, so a single resolver covers lossless and Hi-Res alike. The
-		// third-party resolver that used to front this is gone: its host has
-		// served an expired certificate since April 2026 and now answers every
-		// request with an empty body.
-		return []losslessResolver{resolvePlayableFLAC, resolveAnonymousFLAC}
+	case platform.QualityLossless:
+		return []losslessResolver{resolveAnonymousFLAC, resolvePlayableFLAC}
+	case platform.QualityHiRes:
+		// Select the independent 4000 rendition before falling back to 2000.
+		// The legacy endpoint cannot select a tier and is only a fallback.
+		return []losslessResolver{resolveAnonymousHiRes, resolveAnonymousFLAC, resolvePlayableFLAC}
 	default:
 		return nil
 	}
@@ -593,10 +593,8 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 	}
 	accessErr := validateTrackAccess(access)
 	resolverPlan := losslessResolverPlan(quality)
-	if accessErr != nil && len(resolverPlan) == 0 {
-		return nil, accessErr
-	}
 	var lastErr error
+	var best *platform.DownloadInfo
 	for _, resolver := range resolverPlan {
 		var (
 			info         *platform.DownloadInfo
@@ -607,31 +605,33 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 			info, candidateErr = c.resolvePlayableLossless(ctx, detail)
 		case resolveAnonymousFLAC:
 			info, candidateErr = c.resolveMobileDownload(ctx, detail, mobileQuality{br: "2000kflac", format: "flac", bitrate: 2000, quality: platform.QualityLossless})
+		case resolveAnonymousHiRes:
+			info, candidateErr = c.resolveMobileDownload(ctx, detail, mobileQuality{br: "4000kflac", format: "flac", bitrate: 4000, quality: platform.QualityHiRes})
 		default:
 			continue
 		}
 		if candidateErr == nil {
-			return info, nil
+			if best == nil || info.Quality > best.Quality {
+				best = info
+			}
+			// A downgraded 4000 response must not hide a separate 2000
+			// rendition. Once that fallback succeeds, use the best full FLAC.
+			if info.Quality == quality || resolver != resolveAnonymousHiRes {
+				return best, nil
+			}
+			continue
 		}
 		if isTerminalMediaError(candidateErr) {
 			return nil, candidateErr
 		}
 		lastErr = candidateErr
 	}
-	// Paid/preview metadata must never fall through to ordinary MP3 candidates.
-	// A requested lossless tier may still use a public direct FLAC, but only
-	// after its selector, identity, duration, STREAMINFO, size, and URL have all
-	// passed the resolver-specific checks above.
-	if accessErr != nil {
-		// Report why the resolvers actually failed alongside the access flag.
-		// Returning accessErr alone made every failure read as "paid track"
-		// whatever went wrong: a region block, an unreachable host and a genuine
-		// entitlement problem were indistinguishable in the logs.
-		if lastErr != nil {
-			return nil, fmt.Errorf("%w (lossless resolvers failed: %v)", accessErr, lastErr)
-		}
-		return nil, accessErr
+	if best != nil {
+		return best, nil
 	}
+	// Catalog fee/fragment flags do not describe the mobile endpoint's actual
+	// rendition. Accept MP3 only after its identity, non-preview type, full
+	// duration, format and bitrate pass the same checks as unrestricted tracks.
 	for _, candidate := range mobileQualityCandidates(quality) {
 		info, candidateErr := c.resolveMobileDownload(ctx, detail, candidate)
 		if candidateErr == nil {
@@ -641,6 +641,14 @@ func (c *Client) GetDownloadInfo(ctx context.Context, trackID string, quality pl
 			return nil, candidateErr
 		}
 		lastErr = candidateErr
+	}
+	if accessErr != nil {
+		// The web endpoint lacks the mobile response's identity/preview fields.
+		// Keep the catalog restriction there, and retain the actual failure cause.
+		if lastErr != nil {
+			return nil, fmt.Errorf("%w (audio resolvers failed: %v)", accessErr, lastErr)
+		}
+		return nil, accessErr
 	}
 	info, err := c.resolveWebDownload(ctx, detail)
 	if err == nil {
@@ -787,7 +795,8 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 	if bitrateOK && declaredBitrate > 0 && declaredBitrate <= 1 {
 		return nil, terminalUnavailable(errPreviewMedia)
 	}
-	if !bitrateOK || (declaredBitrate != int64(candidate.bitrate) && !(candidate.format == "flac" && declaredBitrate == directHiResBitrate)) {
+	if !bitrateOK || (declaredBitrate != int64(candidate.bitrate) &&
+		!(candidate.format == "flac" && (declaredBitrate == directLosslessBitrate || declaredBitrate == directHiResBitrate))) {
 		return nil, errors.New("kuwo: candidate bitrate mismatch")
 	}
 	declaredFormat := strings.ToLower(scalarText(data.Format.scalar()))
@@ -841,6 +850,7 @@ func (c *Client) downloadInfoFromMobileData(ctx context.Context, detail *trackDe
 		if !ok || !profile.acceptsProbe(probe) {
 			return nil, errors.New("kuwo: anonymous FLAC STREAMINFO mismatch")
 		}
+		probe.quality = profile.verifiedQuality()
 		return c.playableFLACInfo(ctx, rawURL, probe)
 	}
 	return c.buildDownloadInfo(rawURL, candidate.format, probe), nil

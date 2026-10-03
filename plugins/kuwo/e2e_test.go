@@ -317,10 +317,21 @@ func TestKuwoE2E(t *testing.T) {
 		assertKuwoE2EFFmpegDecode(t, ctx, webPath)
 	})
 
-	runKuwoE2EStage(t, "G_Paid_Or_Preview_Typed_Rejection", func(t *testing.T) {
+	runKuwoE2EStage(t, "G_Paid_Catalog_Verified_Audio_Or_Typed_Rejection", func(t *testing.T) {
 		info, err := client.GetDownloadInfo(ctx, kuwoE2EPaidID, platform.QualityStandard)
-		if info != nil {
-			t.Fatal("paid/preview track unexpectedly returned download info")
+		if err == nil {
+			assertKuwoE2EDownloadInfo(t, kuwoE2EPaidID, info, "mp3", platform.QualityStandard)
+			paidDetail, _, detailErr := client.getTrackDetail(ctx, kuwoE2EPaidID)
+			if detailErr != nil {
+				t.Fatal(redactKuwoE2EError(detailErr))
+			}
+			mediaPath := filepath.Join(tempDir, "kuwo-e2e-paid-catalog.mp3")
+			assertKuwoE2EFullDownload(t, ctx, service, info, mediaPath)
+			if _, err := download.VerifyFullAudio(ctx, mediaPath, paidDetail.Duration); err != nil {
+				t.Fatal(redactKuwoE2EError(err))
+			}
+			assertKuwoE2EFFmpegDecode(t, ctx, mediaPath)
+			return
 		}
 		if !errors.Is(err, platform.ErrUnavailable) {
 			t.Fatalf("paid/preview error is not ErrUnavailable: %s", redactKuwoE2EError(err))
